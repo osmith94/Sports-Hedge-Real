@@ -61,6 +61,9 @@ DEFAULT_HOT_REPRICE_AFTER_SECONDS = 30
 HOT_SCAN_INTERVAL_MIN_SECONDS = 5
 HOT_SCAN_INTERVAL_MAX_SECONDS = 60
 DEFAULT_HOT_SCAN_INTERVAL_SECONDS = 10
+HOT_TARGET_REFRESH_MIN_SECONDS = 5
+HOT_TARGET_REFRESH_MAX_SECONDS = 60
+DEFAULT_HOT_TARGET_REFRESH_SECONDS = 10
 BACKGROUND_CADENCE_MIN_SECONDS = 60
 BACKGROUND_CADENCE_MAX_SECONDS = 600
 DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS = 600
@@ -86,6 +89,11 @@ class OperatorScannerSettings(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     outright_min_net_edge: Decimal | None = Field(default=None, ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
+    hot_target_refresh_seconds: int = Field(
+        default=DEFAULT_HOT_TARGET_REFRESH_SECONDS,
+        ge=HOT_TARGET_REFRESH_MIN_SECONDS,
+        le=HOT_TARGET_REFRESH_MAX_SECONDS,
+    )
     hot_scan_interval_seconds: int = Field(
         default=DEFAULT_HOT_SCAN_INTERVAL_SECONDS,
         ge=HOT_SCAN_INTERVAL_MIN_SECONDS,
@@ -163,6 +171,11 @@ class OperatorScannerSettingsUpdate(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     outright_min_net_edge: Decimal | None = Field(default=None, ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
+    hot_target_refresh_seconds: int | None = Field(
+        default=None,
+        ge=HOT_TARGET_REFRESH_MIN_SECONDS,
+        le=HOT_TARGET_REFRESH_MAX_SECONDS,
+    )
     hot_scan_interval_seconds: int | None = Field(
         default=None,
         ge=HOT_SCAN_INTERVAL_MIN_SECONDS,
@@ -254,6 +267,13 @@ def clamp_hot_cadence_seconds(value: int) -> int:
     return min(HOT_CADENCE_MAX_SECONDS, max(HOT_CADENCE_MIN_SECONDS, int(value)))
 
 
+def clamp_hot_target_refresh_seconds(value: int) -> int:
+    return min(
+        HOT_TARGET_REFRESH_MAX_SECONDS,
+        max(HOT_TARGET_REFRESH_MIN_SECONDS, int(value)),
+    )
+
+
 def clamp_hot_scan_interval_seconds(value: int) -> int:
     return min(
         HOT_SCAN_INTERVAL_MAX_SECONDS,
@@ -335,6 +355,7 @@ def env_operator_scanner_settings(
         min_net_edge=Decimal(str(resolved.min_net_edge)),
         outright_min_net_edge=_env_outright_min_net_edge(resolved),
         max_execution_risk=int(resolved.max_execution_risk),
+        hot_target_refresh_seconds=DEFAULT_HOT_TARGET_REFRESH_SECONDS,
         hot_scan_interval_seconds=clamp_hot_scan_interval_seconds(
             resolved.paper_hot_scan_interval_seconds
         ),
@@ -468,6 +489,7 @@ class SqliteOperatorScannerSettingsStore:
             "background_scan_interval_seconds",
             "background_reprice_after_seconds",
             "universe_discovery_refresh_seconds",
+            "hot_target_refresh_seconds",
         ):
             if column not in columns:
                 connection.execute(
@@ -493,6 +515,7 @@ class SqliteOperatorScannerSettingsStore:
         min_net_edge: Decimal,
         max_execution_risk: int,
         hot_cadence_seconds: int | None = None,
+        hot_target_refresh_seconds: int | None = None,
         hot_scan_interval_seconds: int | None = None,
         hot_reprice_after_seconds: int | None = None,
         background_cadence_seconds: int | None = None,
@@ -520,6 +543,13 @@ class SqliteOperatorScannerSettingsStore:
             current.hot_reprice_after_seconds if current is not None else None,
             get_settings().paper_live_refresh_hot_interval_seconds,
             clamp_hot_cadence_seconds,
+        )
+        hot_target = _resolve_optional_seconds(
+            hot_target_refresh_seconds,
+            None,
+            current.hot_target_refresh_seconds if current is not None else None,
+            DEFAULT_HOT_TARGET_REFRESH_SECONDS,
+            clamp_hot_target_refresh_seconds,
         )
         hot_scan = _resolve_optional_seconds(
             hot_scan_interval_seconds,
@@ -571,6 +601,7 @@ class SqliteOperatorScannerSettingsStore:
             min_net_edge=min_net_edge,
             outright_min_net_edge=outright,
             max_execution_risk=int(max_execution_risk),
+            hot_target_refresh_seconds=hot_target,
             hot_scan_interval_seconds=hot_scan,
             hot_reprice_after_seconds=hot_reprice,
             background_scan_interval_seconds=background_scan,
@@ -664,13 +695,14 @@ class SqliteOperatorScannerSettingsStore:
                 INSERT INTO operator_scanner_settings (
                     id, min_net_edge, outright_min_net_edge, max_execution_risk,
                     hot_cadence_seconds, hot_scan_interval_seconds, hot_reprice_after_seconds,
+                    hot_target_refresh_seconds,
                     background_cadence_seconds, background_scan_interval_seconds,
                     background_reprice_after_seconds,
                     universe_cadence_seconds, universe_discovery_refresh_seconds,
                     max_allocated_per_trade_gbp, scanner_stopped,
                     universe_scans_paused, source, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_net_edge = excluded.min_net_edge,
                     outright_min_net_edge = excluded.outright_min_net_edge,
@@ -678,6 +710,7 @@ class SqliteOperatorScannerSettingsStore:
                     hot_cadence_seconds = excluded.hot_cadence_seconds,
                     hot_scan_interval_seconds = excluded.hot_scan_interval_seconds,
                     hot_reprice_after_seconds = excluded.hot_reprice_after_seconds,
+                    hot_target_refresh_seconds = excluded.hot_target_refresh_seconds,
                     background_cadence_seconds = excluded.background_cadence_seconds,
                     background_scan_interval_seconds = excluded.background_scan_interval_seconds,
                     background_reprice_after_seconds = excluded.background_reprice_after_seconds,
@@ -698,6 +731,7 @@ class SqliteOperatorScannerSettingsStore:
                     int(payload.hot_reprice_after_seconds),
                     int(payload.hot_scan_interval_seconds),
                     int(payload.hot_reprice_after_seconds),
+                    int(payload.hot_target_refresh_seconds),
                     int(payload.background_reprice_after_seconds),
                     int(payload.background_scan_interval_seconds),
                     int(payload.background_reprice_after_seconds),
@@ -879,6 +913,15 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         DEFAULT_BACKGROUND_SCAN_INTERVAL_SECONDS,
         clamp_background_scan_interval_seconds,
     )
+    raw_target = _row_optional(row, "hot_target_refresh_seconds")
+    if raw_target is None:
+        # Documented migration: a saved HOT reprice-after age becomes the
+        # single pass target when the new column has not been written yet.
+        hot_target_refresh_seconds = clamp_hot_target_refresh_seconds(
+            hot_reprice_after_seconds
+        )
+    else:
+        hot_target_refresh_seconds = clamp_hot_target_refresh_seconds(int(raw_target))
     universe_discovery_refresh_seconds = _migrated_timing_seconds(
         _row_optional(row, "universe_discovery_refresh_seconds"),
         universe_cadence_seconds,
@@ -903,6 +946,7 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         min_net_edge=min_net_edge,
         outright_min_net_edge=outright_min_net_edge,
         max_execution_risk=max_execution_risk,
+        hot_target_refresh_seconds=hot_target_refresh_seconds,
         hot_scan_interval_seconds=hot_scan_interval_seconds,
         hot_reprice_after_seconds=hot_reprice_after_seconds,
         background_scan_interval_seconds=background_scan_interval_seconds,

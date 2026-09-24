@@ -95,6 +95,7 @@ from sports_hedge.application.adaptive_scheduler import (
     SchedulerWork,
     order_scheduler_work,
 )
+from sports_hedge.application.coverage_cursor import CoverageCursor
 from sports_hedge.application.provider_access import (
     HEALTH_CAPACITY_SATURATED,
     HEALTH_DEFERRED,
@@ -445,6 +446,16 @@ class CataloguePriceEngine:
         self._selected_competition_codes: frozenset[str] | None = None
         self._exempt_event_ids: frozenset[str] = frozenset()
         self.viability_cache = get_opportunity_viability_cache()
+        self._coverage: dict[str, CoverageCursor] = {
+            PriceEnginePriority.HOT.value: CoverageCursor(lane=PriceEnginePriority.HOT.value),
+            PriceEnginePriority.BACKGROUND.value: CoverageCursor(
+                lane=PriceEnginePriority.BACKGROUND.value
+            ),
+        }
+        self._coverage_claim_limit = {
+            PriceEnginePriority.HOT.value: 64,
+            PriceEnginePriority.BACKGROUND.value: 24,
+        }
 
     def now(self) -> datetime:
         return self._clock()
@@ -559,34 +570,53 @@ class CataloguePriceEngine:
             return PriceEnginePriority.HOT
         return PriceEnginePriority.BACKGROUND
 
+    def coverage_cursor(self, priority: PriceEnginePriority) -> CoverageCursor:
+        return self._coverage[priority.value]
+
+    def restore_coverage_cursor(self, priority: PriceEnginePriority, payload: dict | None) -> None:
+        self._coverage[priority.value] = CoverageCursor.from_resume(priority.value, payload)
+
     def due_items(
         self,
         priority: PriceEnginePriority,
         *,
         now: datetime | None = None,
     ) -> list[PriceEngineRuntimeItem]:
+        """Claim the next round-robin region. Age gates do not rewind the cursor."""
+
         evaluated = now or self.now()
-        due: list[PriceEngineRuntimeItem] = []
+        eligible: list[PriceEngineRuntimeItem] = []
+        blocked: set[str] = set()
         for runtime in self._items.values():
             runtime.priority = self.classify_priority(runtime.identity)
             if runtime.priority is not priority:
                 continue
+            row_id = runtime.identity.catalogue_row_id
             if runtime.in_flight:
+                blocked.add(row_id)
                 continue
             if runtime.next_retry_at is not None and evaluated < runtime.next_retry_at:
+                blocked.add(row_id)
                 continue
-            if runtime.last_priced_at is not None:
-                interval = (
-                    self._hot_interval
-                    if runtime.priority is PriceEnginePriority.HOT
-                    else self._background_interval
-                )
-                if evaluated < runtime.last_priced_at + timedelta(seconds=interval):
-                    continue
-            runtime.status = PriceEngineItemStatus.DUE
             self._refresh_scheduler_signals(runtime)
+            eligible.append(runtime)
+        eligible.sort(key=lambda item: item.identity.catalogue_row_id)
+        by_id = {item.identity.catalogue_row_id: item for item in eligible}
+        cursor = self._coverage[priority.value]
+        claimed = cursor.claim(
+            [item.identity.catalogue_row_id for item in eligible],
+            blocked=blocked,
+            limit=self._coverage_claim_limit[priority.value],
+            now=evaluated,
+        )
+        due: list[PriceEngineRuntimeItem] = []
+        for row_id in claimed:
+            runtime = by_id.get(row_id)
+            if runtime is None:
+                continue
+            runtime.status = PriceEngineItemStatus.DUE
             due.append(runtime)
-        return self._order_due_items(due, now=evaluated)
+        return due
 
     def _refresh_scheduler_signals(self, runtime: PriceEngineRuntimeItem) -> None:
         identity = runtime.identity

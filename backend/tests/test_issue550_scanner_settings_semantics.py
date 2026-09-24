@@ -112,7 +112,9 @@ def test_legacy_cadence_columns_migrate_to_reprice_and_discovery_refresh(tmp_pat
     store.close()
 
 
-def test_background_reprice_age_is_independent_of_worker_scans() -> None:
+def test_background_reprice_age_does_not_skip_recent_rows() -> None:
+    """BACKGROUND coverage is a cursor, not a reprice-after age gate."""
+
     clock = FakeClock(NOW)
     engine, _mb, _ks, _layer = _engine(
         [_hda_row("aged"), _hda_row("fresh")],
@@ -125,12 +127,11 @@ def test_background_reprice_age_is_independent_of_worker_scans() -> None:
     assert aged is not None and fresh is not None
     aged.last_priced_at = None
     fresh.last_priced_at = NOW
-    almost = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW + timedelta(seconds=599))
-    ids = {item.identity.catalogue_row_id for item in almost}
-    assert "amc-aged" in ids
-    assert "amc-fresh" not in ids
-    due = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW + timedelta(seconds=600))
-    assert "amc-fresh" in {item.identity.catalogue_row_id for item in due}
+    claimed = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW + timedelta(seconds=1))
+    ids = [item.identity.catalogue_row_id for item in claimed]
+    assert ids == ["amc-aged", "amc-fresh"]
+    cursor = engine.coverage_cursor(PriceEnginePriority.BACKGROUND)
+    assert cursor.cursor_after_id == "amc-fresh"
 
 
 def test_hot_reprice_age_is_independent_of_worker_scans() -> None:
@@ -149,12 +150,11 @@ def test_hot_reprice_age_is_independent_of_worker_scans() -> None:
     assert never is not None and priced is not None
     never.last_priced_at = None
     priced.last_priced_at = NOW
-    early = engine.due_items(PriceEnginePriority.HOT, now=NOW + timedelta(seconds=29))
-    early_ids = {item.identity.catalogue_row_id for item in early}
-    assert "amc-hot-new" in early_ids
-    assert "amc-hot-priced" not in early_ids
-    later = engine.due_items(PriceEnginePriority.HOT, now=NOW + timedelta(seconds=30))
-    assert "amc-hot-priced" in {item.identity.catalogue_row_id for item in later}
+    early = engine.due_items(PriceEnginePriority.HOT, now=NOW + timedelta(seconds=1))
+    early_ids = [item.identity.catalogue_row_id for item in early]
+    assert early_ids == ["amc-hot-new", "amc-hot-priced"]
+    cursor = engine.coverage_cursor(PriceEnginePriority.HOT)
+    assert cursor.hold_until is not None
 
 
 @pytest.mark.asyncio
@@ -166,10 +166,8 @@ async def test_background_slice_schedules_next_scan_not_reprice_age() -> None:
     assert coordinator.status.background.scan_interval_seconds == 10
     assert coordinator.status.background.reprice_after_seconds == 600
     await coordinator.run_price_engine_slice(PriceEnginePriority.BACKGROUND)
-    assert coordinator._next_background_due == NOW + timedelta(seconds=10)
-    waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=9))
-    assert waiting.lane == "idle"
-    due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=10))
+    assert coordinator._next_background_due == NOW
+    due = coordinator.plan_background_tick(now=NOW)
     assert due.lane == "background"
 
 

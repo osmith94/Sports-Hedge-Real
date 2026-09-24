@@ -270,12 +270,14 @@ def test_frontend_renders_backend_settings_not_a_second_authority() -> None:
     assert "forceSettings" in text
     assert "saveOperatorScannerSettings" in text
     assert "Auto refresh view" in text
-    assert "HOT scan interval s" in text
-    assert "HOT reprice after s" in text
-    assert "BACKGROUND scan interval s" in text
-    assert "BACKGROUND reprice after s" in text
+    assert "HOT target refresh s" in text
+    assert "HOT scan interval s" not in text
+    assert "HOT reprice after s" not in text
+    assert "BACKGROUND scan interval s" not in text
+    assert "BACKGROUND reprice after s" not in text
     assert "UNIVERSE discovery refresh s" in text
-    assert "background_reprice_after_seconds" in text
+    assert "hot_target_refresh_seconds" in text
+    assert "background_reprice_after_seconds" not in text
     assert "universe_discovery_refresh_seconds" in text
     assert "HOT cadence s" not in text
     assert "BACKGROUND cadence s" not in text

@@ -155,7 +155,7 @@ async def test_background_next_due_is_90s_after_slice_and_independent_of_univers
     await coordinator.run_price_engine_slice(PriceEnginePriority.BACKGROUND)
     assert coordinator.status.background.cadence_seconds == 10
     assert coordinator.status.background.reprice_after_seconds == 600
-    assert coordinator._next_background_due == NOW + timedelta(seconds=10)
+    assert coordinator._next_background_due == NOW
     assert coordinator.status.background.next_due_at == coordinator._next_background_due
     summary = coordinator.status.background.operator_summary or ""
     assert OPERATOR_BACKGROUND_PRICING_LABEL in summary

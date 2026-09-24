@@ -217,13 +217,11 @@ async def test_background_next_due_is_plus_90s_after_slice() -> None:
     coordinator._clock = clock
     coordinator._next_background_due = NOW
     await coordinator.run_price_engine_slice(PriceEnginePriority.BACKGROUND)
-    assert coordinator._next_background_due == NOW + timedelta(seconds=10)
+    assert coordinator._next_background_due == NOW
     assert coordinator.status.background.cadence_seconds == 10
     assert coordinator.status.background.reprice_after_seconds == 600
-    assert coordinator.status.background.next_due_at == NOW + timedelta(seconds=10)
-    waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=9))
-    assert waiting.lane == "idle"
-    due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=10))
+    assert coordinator.status.background.next_due_at == NOW
+    due = coordinator.plan_background_tick(now=NOW)
     assert due.lane == "background"
 
 
@@ -411,15 +409,13 @@ async def test_persisted_background_cadence_is_used_by_scheduler_without_restart
         assert saved.source == "operator"
         assert coordinator.status.background.cadence_seconds == 45
         assert coordinator.status.background.reprice_after_seconds == 600
-        assert coordinator._next_background_due == NOW + timedelta(seconds=45)
-        waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=44))
-        assert waiting.lane == "idle"
-        due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=45))
+        assert coordinator._next_background_due == NOW
+        due = coordinator.plan_background_tick(now=NOW)
         assert due.lane == "background"
         clock.now = NOW + timedelta(seconds=45)
         coordinator._next_background_due = clock.now
         await coordinator.run_price_engine_slice(PriceEnginePriority.BACKGROUND)
-        assert coordinator._next_background_due == clock.now + timedelta(seconds=45)
+        assert coordinator._next_background_due == clock.now
         assert coordinator.status.background.cadence_seconds == 45
         assert coordinator.status.background.reprice_after_seconds == 600
         load = coordinator.public_status().system_load
@@ -606,14 +602,11 @@ def test_frontend_exposes_background_cadence_beside_hot() -> None:
         encoding="utf-8"
     )
     api = (REPO_ROOT / "frontend" / "lib" / "api.ts").read_text(encoding="utf-8")
-    assert "BACKGROUND scan interval s" in scan
-    assert "BACKGROUND reprice after s" in scan
-    assert "HOT scan interval s" in scan
-    assert scan.index("HOT scan interval s") < scan.index("BACKGROUND scan interval s")
-    assert "background_reprice_after_seconds: backgroundReprice" in scan
-    assert "clampBackgroundRepriceAfterSeconds" in scan
-    assert "Math.min(600, Math.max(60" in scan
+    assert "HOT target refresh s" in scan
+    assert "BACKGROUND scan interval s" not in scan
+    assert "BACKGROUND reprice after s" not in scan
+    assert "hot_target_refresh_seconds: hotTarget" in scan
+    assert "clampHotTargetRefreshSeconds" in scan
     assert "does not trigger a scan" in scan
-    assert "BACKGROUND reprice after" in scan
     assert "background_reprice_after_seconds?: number" in api
     assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 600

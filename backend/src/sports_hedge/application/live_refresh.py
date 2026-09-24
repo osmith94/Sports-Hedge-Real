@@ -240,6 +240,7 @@ class LaneRefreshStatus(BaseModel):
     cadence_seconds: int
     scan_interval_seconds: int | None = None
     reprice_after_seconds: int | None = None
+    target_refresh_seconds: int | None = None
     discovery_refresh_seconds: int | None = None
     cycle_timeout_seconds: float | None = None
     generation_budget_seconds: float | None = None
@@ -1149,6 +1150,7 @@ class LiveRefreshCoordinator:
         min_net_edge: Decimal,
         max_execution_risk: int,
         hot_cadence_seconds: int | None = None,
+        hot_target_refresh_seconds: int | None = None,
         hot_scan_interval_seconds: int | None = None,
         hot_reprice_after_seconds: int | None = None,
         background_cadence_seconds: int | None = None,
@@ -1164,6 +1166,7 @@ class LiveRefreshCoordinator:
             min_net_edge=min_net_edge,
             max_execution_risk=max_execution_risk,
             hot_cadence_seconds=hot_cadence_seconds,
+            hot_target_refresh_seconds=hot_target_refresh_seconds,
             hot_scan_interval_seconds=hot_scan_interval_seconds,
             hot_reprice_after_seconds=hot_reprice_after_seconds,
             background_cadence_seconds=background_cadence_seconds,
@@ -1317,8 +1320,8 @@ class LiveRefreshCoordinator:
             "reprice_after_seconds": operator.background_reprice_after_seconds,
         }
         if background_cadence_changed and not self._background_in_progress:
-            # Same Update contract as HOT: reschedule the next scan, do not fire a slice now.
-            self._next_background_due = self.now() + timedelta(seconds=background_scan)
+            # BACKGROUND has no scan interval. Keep the continuous cursor due.
+            self._next_background_due = self.now()
             background_update["next_due_at"] = self._next_background_due
         universe_refresh = operator.universe_discovery_refresh_seconds
         universe_update: dict[str, Any] = {
@@ -1777,6 +1780,7 @@ class LiveRefreshCoordinator:
                         "reprice_after_seconds": self._effective_hot_reprice_after_seconds(
                             resolved
                         ),
+                        "target_refresh_seconds": self._effective_hot_target_refresh_seconds(),
                     }
                 ),
                 "universe": self.status.universe.model_copy(
@@ -1996,8 +2000,8 @@ class LiveRefreshCoordinator:
         result = await engine.run_slice(priority, slice_wall_seconds=slice_wall_seconds)
         if priority is PriceEnginePriority.BACKGROUND:
             with self._state_lock:
-                cadence = self._effective_background_cadence_seconds()
-                self._next_background_due = self.now() + timedelta(seconds=cadence)
+                self._release_background_pass_unlocked()
+                self._next_background_due = self.now()
         self._apply_price_engine_slice_status(priority, result)
         return result
 
@@ -2039,6 +2043,7 @@ class LiveRefreshCoordinator:
                 "provider_capacity_saturated": tier.provider_capacity_saturated,
                 "not_started_this_cadence": tier.not_started_this_cadence,
                 "revalidation_needed": tier.revalidation_needed,
+                "coverage": self.price_engine().coverage_cursor(priority).snapshot(),
                 "persist_failures": list(getattr(result, "persist_failures", []) or []),
                 **(
                     result.viability_diagnostics()
@@ -4409,15 +4414,51 @@ class LiveRefreshCoordinator:
             self._universe_oneshot_pending = False
         self._mark_universe_checkpoint_dirty_unlocked()
 
+    def _effective_hot_target_refresh_seconds(self) -> int:
+        operator = self.status.operator_settings
+        if operator is not None:
+            return int(operator.hot_target_refresh_seconds)
+        from sports_hedge.persistence.operator_scanner_settings import (
+            DEFAULT_HOT_TARGET_REFRESH_SECONDS,
+        )
+
+        return int(DEFAULT_HOT_TARGET_REFRESH_SECONDS)
+
+    def _release_background_pass_unlocked(self) -> None:
+        """A finished BACKGROUND pass starts the next one immediately."""
+
+        engine = self._price_engine
+        if engine is None:
+            return
+        cursor = engine.coverage_cursor(PriceEnginePriority.BACKGROUND)
+        if cursor.hold_until is not None:
+            cursor.hold_for_target(target_seconds=0, now=self.now())
+
     def _advance_hot_due(self, now: datetime) -> None:
-        cadence = self._effective_hot_scan_interval_seconds() or int(self.status.interval_seconds) or 10
-        interval = timedelta(seconds=cadence)
-        due = self._hot_due_started or self._next_hot_due or now
-        nxt = due + interval
+        """Wait only when a finished HOT pass beat its target. Never reset mid-pass."""
+
         evaluated = require_aware_instant(now, "now")
-        while nxt <= evaluated:
-            nxt += interval
-        self._next_hot_due = nxt
+        target = float(self._effective_hot_target_refresh_seconds())
+        engine = self._price_engine
+        cursor = None if engine is None else engine.coverage_cursor(PriceEnginePriority.HOT)
+        pass_open = (
+            cursor is not None
+            and cursor.pass_started_at is not None
+            and cursor.hold_until is None
+        )
+        if not pass_open and (cursor is None or cursor.hold_until is None):
+            self._next_hot_due = evaluated + timedelta(seconds=target)
+            self._hot_due_started = None
+            return
+        if cursor is None or cursor.hold_until is None:
+            self._next_hot_due = evaluated
+            self._hot_due_started = None
+            return
+        wait = cursor.hold_for_target(
+            target_seconds=float(self._effective_hot_target_refresh_seconds()),
+            now=evaluated,
+        )
+        self._next_hot_due = evaluated + timedelta(seconds=wait)
         self._hot_due_started = None
 
     def _mark_lane_started(self, lane: ScanLane, started: datetime) -> None:
@@ -5216,8 +5257,7 @@ class LiveRefreshCoordinator:
                     raise
                 except Exception:
                     with self._state_lock:
-                        cadence = self._effective_background_cadence_seconds()
-                        self._next_background_due = self.now() + timedelta(seconds=cadence)
+                        self._next_background_due = self.now()
                 finally:
                     with self._state_lock:
                         self._background_in_progress = False
