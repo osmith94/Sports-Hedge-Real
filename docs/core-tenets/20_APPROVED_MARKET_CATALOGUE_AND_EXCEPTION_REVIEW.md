@@ -361,6 +361,8 @@ Useful counts include:
 
 This gives product coverage visibility without filling the operator console with unsupported market noise.
 
+Optimization must not hide an approved market because required recognition metadata was never fetched. Strict pruning is not an improvement when it turns a narrower failure into a fixture-wide rejection. UNIVERSE and HOT share the same Approved Match Register and the same recognition semantics. A market-level 404, a provider timeout, or unknown/incomplete work must not skip sibling registered relationships before they reach that gate. `0 equivalent` remains correct only when no registered relationship is structurally valid.
+
 ## 12. Engineering acceptance
 
 Any PR changing market recognition, equivalence or catalogue coverage must report both safety and coverage.

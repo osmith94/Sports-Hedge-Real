@@ -70,6 +70,18 @@ For example, successful GAME and BTTS discovery does not prove that TOTAL or FTT
 
 Parameterized families such as `TOTAL_GOALS_FT:{line}` are separate catalogue rows per exact approved line. Adding 2.5, 3.5, 4.5, 5.5, etc. increases pricing workload but does not change scanner architecture.
 
+### Evidence-scope rule
+
+HOT, BACKGROUND, and UNIVERSE share process-memory viability evidence and may overlap. A lower-level failure in one lane must not corrupt discovery truth in another.
+
+> **Evidence-scope rule:** market-level failure cannot establish fixture-level venue unavailability. Provider-level failure cannot establish fixture-level unavailability. Unknown or incomplete work is not absence. Performance pruning may skip work only from evidence at the same or broader valid scope.
+
+- A Matchbook market 404/410, a gone market payload, or one closed betting market invalidates that native market relationship only. Sibling markets on the same event stay eligible.
+- Fixture + venue may be blocked only by authoritative event evidence: the event payload is terminal, or complete discovery proves the event itself is absent.
+- Timeout, authentication failure, rate limit, and provider backoff are provider health. They do not mark the fixture unavailable.
+- A fresh authoritative non-terminal event observation restores a stale event-level unavailable or terminal mark. A successful market fetch does not clear genuine event-terminal evidence.
+- A market's closed state is not event-terminal evidence. Elapsed time still must not fabricate a finished fixture.
+
 ### Architecture-preservation rules
 
 Normal scanner changes must preserve all of the following:

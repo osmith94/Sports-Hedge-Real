@@ -13,6 +13,7 @@ import {
   kickoffClockLabel,
   marketEvaluationLabel,
   opportunityStateLabel,
+  viabilityEvidenceSummary,
 } from "./discovered-fixture-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -275,5 +276,26 @@ describe("single-venue UNIVERSE evaluation honesty", () => {
       "Not evaluated — remaining books cannot reach Min Net Arb",
     );
     assert.equal(opportunityStateLabel(row), "not evaluated");
+  });
+
+  it("separates a gone market id from event unavailability", () => {
+    const summary = viabilityEvidenceSummary({
+      event_viability: {
+        matchbook: { state: "viable", evidence_scope: "event", evidence_reason: "event_current" },
+        kalshi: { state: "unknown", evidence_scope: "event", evidence_reason: null },
+      },
+      market_gone: [
+        {
+          venue: "matchbook",
+          native_market_id: "9004",
+          evidence_scope: "market",
+          evidence_reason: "market_gone",
+        },
+      ],
+      final_reason: "no_comparable_markets",
+    });
+    assert.match(summary || "", /matchbook viable/);
+    assert.match(summary || "", /market gone matchbook 9004 market_gone/);
+    assert.doesNotMatch(summary || "", /unavailable/);
   });
 });
