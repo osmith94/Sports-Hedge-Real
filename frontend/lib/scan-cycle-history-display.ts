@@ -8,7 +8,7 @@ export const SCAN_CYCLE_RECENT_TITLE = "Recent scan cycles";
 export const SCAN_CYCLE_DIAGNOSTICS_TITLE = "Diagnostics / Scan history";
 
 export const SCAN_CYCLE_COPY =
-  "Latest 100 completed HOT pricing / BACKGROUND pricing / UNIVERSE discovery cycles, newest first. One row per cycle, including cycles with zero paper decisions. Not market-decision audit.";
+  "Latest 100 completed HOT pricing / BACKGROUND pricing / UNIVERSE discovery cycles, newest first. One row per cycle, including cycles with zero paper decisions. HOT and BACKGROUND counts are catalogue/market rows. UNIVERSE counts are fixtures. Unique fixture totals are shown only when that number is stored. Not market-decision audit.";
 
 export const SCAN_CYCLE_EMPTY = "No completed scan cycles yet. Zero-decision cycles still appear here once HOT pricing, BACKGROUND pricing or UNIVERSE discovery finishes.";
 
@@ -19,7 +19,7 @@ export const SCAN_CYCLE_HEADERS = [
   "Completed",
   "Lane",
   "Duration",
-  "Fixtures",
+  "Coverage",
   "Evaluated",
   "Matched",
   "Paper decisions",
@@ -52,6 +52,19 @@ export function scanCycleLaneLabel(lane: string | null | undefined): string {
 export function scanCycleDurationLabel(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return "—";
   return `${Math.round(ms / 100) / 10}s`;
+}
+
+export function scanCycleCoverageLabel(cycle: PaperScanCycleRecord): string {
+  const count = Number(cycle.fixture_count);
+  const n = Number.isFinite(count) ? count : 0;
+  const lane = String(cycle.scan_lane || "").trim().toLowerCase();
+  if (lane === "hot" || lane === "background") {
+    return n === 1 ? "1 catalogue row" : `${n} catalogue rows`;
+  }
+  if (lane === "universe") {
+    return n === 1 ? "1 fixture" : `${n} fixtures`;
+  }
+  return String(n);
 }
 
 export function scanCycleHealthLabel(cycle: PaperScanCycleRecord): string {
@@ -98,7 +111,7 @@ export function scanCycleRow(
     laneLabel: scanCycleLaneLabel(cycle.scan_lane),
     completedLabel: scanCycleCompletedLabel(cycle, nowMs),
     durationLabel: scanCycleDurationLabel(cycle.duration_ms),
-    fixtureLabel: String(cycle.fixture_count),
+    fixtureLabel: scanCycleCoverageLabel(cycle),
     evaluatedLabel: `${cycle.evaluated_count} / ${cycle.not_evaluated_count} leftover`,
     matchedLabel: `${cycle.matched_event_pairs} evt · ${cycle.matched_market_pairs} mkt`,
     paperDecisionLabel: String(cycle.paper_decision_count),
@@ -153,7 +166,7 @@ export function scanCycleDiagnosticLines(report: ScanCycleDiagnosticReport | nul
     `Retry wait ${terminals.retry_wait ?? 0} · capacity deferred ${terminals.deferred ?? 0} · not started ${terminals.not_started ?? 0} · collapsed leftover ${report.leftover_collapsed ?? 0}`,
     `Provider I/O sum ${report.provider_io_ms_sum ?? 0}ms · slot wait sum ${report.slot_wait_ms_sum ?? 0}ms · local evaluate sum ${report.local_evaluate_ms_sum ?? 0}ms`,
     `Saved calls ${report.saved_provider_calls ?? 0} · coalesced ${report.coalesced_provider_calls ?? 0} · repeated exact ids ${report.repeated_exact_id_calls ?? 0} / distinct ${report.distinct_exact_ids ?? 0}`,
-    `Workers ${shape.worker_limit ?? "—"} · explicit slice wall ${shape.explicit_slice_wall ? "yes" : "no"} · limits ${limitText || "—"} · provider calls ${shape.provider_calls ?? 0}`,
+    `Workers ${shape.worker_limit ?? "—"} · sequential within item ${shape.sequential_within_item ? "yes" : "no"} · explicit slice wall ${shape.explicit_slice_wall ? "yes" : "no"} · limits ${limitText || "—"} · provider calls ${shape.provider_calls ?? 0}`,
   ];
   for (const stage of report.stages ?? []) {
     lines.push(

@@ -22,6 +22,18 @@ DIAGNOSTIC_MAX_WORKER_ERRORS = 8
 DIAGNOSTIC_MAX_EXACT_IDS = 4096
 _BUCKET_EDGES_MS = (50, 250, 1000, 4000, 8000, 16000)
 _SAMPLE_KEYS = ("failed", "retry_wait", "deferred", "revalidation", "not_started")
+STAGED_PRICING_CALL_SHAPES = frozenset(
+    {
+        "provider_centric_staged_exact_id",
+        "hot_latency_staged_exact_id",
+    }
+)
+
+
+def sequential_within_item_for_shape(pricing_call_shape: str | None) -> bool:
+    """True only for the sequential per-row worker, not staged provider-centric slices."""
+
+    return str(pricing_call_shape or "") not in STAGED_PRICING_CALL_SHAPES
 
 DIAGNOSTIC_DATA_NOTE = (
     "Cycle diagnostic counters from this completed scan. Not live quotes. "
@@ -362,7 +374,9 @@ class CycleDiagnosticAccumulator:
             "distinct_exact_ids": len(self._seen_exact_ids),
             "exact_id_tracking_truncated": self._exact_ids_truncated,
             "call_shape": {
-                "sequential_within_item": True,
+                "sequential_within_item": sequential_within_item_for_shape(
+                    pricing_call_shape
+                ),
                 "pricing_call_shape": str(pricing_call_shape or ""),
                 "worker_limit": int(self.worker_limit),
                 "explicit_slice_wall": self.explicit_slice_wall,

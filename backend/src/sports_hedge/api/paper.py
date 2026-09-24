@@ -75,6 +75,7 @@ from sports_hedge.application.scan_cycle_audit import (
     BACKGROUND_CYCLE_LANE,
     build_background_price_engine_cycle_report,
     build_paper_scan_cycle_record,
+    price_engine_slice_count_fields,
 )
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.venue_degradation_incident import FIRST_CLASS_VENUES
@@ -1849,14 +1850,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 scan_diagnostics={
                     "price_engine": True,
                     "priority": PriceEnginePriority.HOT.value,
+                    **price_engine_slice_count_fields(result),
                     **(
                         {"cycle_diagnostic": dict(result.diagnostic)}
                         if isinstance(getattr(result, "diagnostic", None), dict)
                         else {}
                     ),
-                    "evaluated": list(result.evaluated),
-                    "deferred": list(result.deferred),
-                    "not_started": list(result.not_started),
                     "legacy_hot_collector": False,
                     PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
                     "persist_failures": list(result.persist_failures),

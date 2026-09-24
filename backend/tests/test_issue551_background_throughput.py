@@ -147,7 +147,7 @@ async def test_timeout_repeat_and_worker_error_are_split() -> None:
     assert report["coalesced_provider_calls"] == result.coalesced_provider_calls
     assert report["repeated_exact_id_calls"] == 0
     assert report["call_shape"]["explicit_slice_wall"] is False
-    assert report["call_shape"]["sequential_within_item"] is True
+    assert report["call_shape"]["sequential_within_item"] is False
     assert report["call_shape"]["pricing_call_shape"] == "provider_centric_staged_exact_id"
     stages = {(item["venue"], item["stage"]): item for item in report["stages"]}
     assert stages[("matchbook", "get_market")]["timeout"] >= 1 or stages[("matchbook", "get_market")]["success"] >= 1
