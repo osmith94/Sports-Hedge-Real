@@ -509,6 +509,9 @@ export type FixtureDetailReadModel = {
 
 export type LaneRefreshStatus = {
   cadence_seconds: number;
+  scan_interval_seconds?: number | null;
+  reprice_after_seconds?: number | null;
+  discovery_refresh_seconds?: number | null;
   cycle_timeout_seconds?: number | null;
   generation_budget_seconds?: number | null;
   generation_work_used_s?: number;
@@ -717,8 +720,13 @@ export type OperatorScannerSettings = {
   min_net_edge: string;
   outright_min_net_edge?: string | null;
   max_execution_risk: number;
-  hot_cadence_seconds: number;
-  background_cadence_seconds: number;
+  hot_scan_interval_seconds?: number;
+  hot_reprice_after_seconds?: number;
+  background_scan_interval_seconds?: number;
+  background_reprice_after_seconds?: number;
+  universe_discovery_refresh_seconds?: number;
+  hot_cadence_seconds?: number;
+  background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
   scanner_stopped: boolean;
@@ -732,8 +740,13 @@ export type OperatorScannerSettingsUpdate = {
   min_net_edge: string;
   outright_min_net_edge?: string | null;
   max_execution_risk: number;
-  hot_cadence_seconds: number;
-  background_cadence_seconds: number;
+  hot_scan_interval_seconds?: number;
+  hot_reprice_after_seconds?: number;
+  background_scan_interval_seconds?: number;
+  background_reprice_after_seconds?: number;
+  universe_discovery_refresh_seconds?: number;
+  hot_cadence_seconds?: number;
+  background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
 };

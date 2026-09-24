@@ -406,8 +406,13 @@ class CataloguePriceEngine:
     def now(self) -> datetime:
         return self._clock()
 
+    def set_hot_reprice_after_seconds(self, seconds: int) -> None:
+        """Apply the HOT per-row reprice age without reconstructing work."""
+
+        self._hot_interval = int(seconds)
+
     def set_background_interval_seconds(self, seconds: int) -> None:
-        """Apply the operator/env BACKGROUND cadence without reconstructing work."""
+        """Apply the BACKGROUND per-row reprice age without reconstructing work."""
 
         self._background_interval = int(seconds)
 

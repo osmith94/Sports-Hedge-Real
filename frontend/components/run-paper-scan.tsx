@@ -79,25 +79,32 @@ function reportSummary(report: PaperCollectionReport): string {
   return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} genuine issue${report.issues.length === 1 ? "" : "s"}`;
 }
 
-function clampHotCadenceSeconds(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_HOT_CADENCE_SECONDS;
+function clampScanIntervalSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_SCAN_INTERVAL_SECONDS;
+  return Math.min(60, Math.max(5, Math.round(value)));
+}
+
+function clampHotRepriceAfterSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_HOT_REPRICE_AFTER_SECONDS;
   return Math.min(60, Math.max(15, Math.round(value)));
 }
 
-function clampBackgroundCadenceSeconds(value: number): number {
-  if (!Number.isFinite(value)) return 90;
+function clampBackgroundRepriceAfterSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS;
   return Math.min(600, Math.max(60, Math.round(value)));
 }
 
-function clampUniverseCadenceSeconds(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_UNIVERSE_CADENCE_SECONDS;
+function clampUniverseDiscoveryRefreshSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS;
   return Math.min(3600, Math.max(60, Math.round(value)));
 }
 
 const DEFAULT_MIN_NET_ARB_PERCENT = "1.00";
 const DEFAULT_MAX_RISK = "60";
-const DEFAULT_HOT_CADENCE_SECONDS = 30;
-const DEFAULT_UNIVERSE_CADENCE_SECONDS = 1800;
+const DEFAULT_SCAN_INTERVAL_SECONDS = 10;
+const DEFAULT_HOT_REPRICE_AFTER_SECONDS = 30;
+const DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS = 600;
+const DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS = 3600;
 const DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = "1000";
 
 function minNetPercentFromRate(value: string | number | null | undefined): string {
@@ -238,15 +245,14 @@ export function RunPaperScan() {
   const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [intervalSeconds, setIntervalSeconds] = useState(DEFAULT_HOT_CADENCE_SECONDS);
-  const [intervalDraft, setIntervalDraft] = useState(String(DEFAULT_HOT_CADENCE_SECONDS));
-  const [backgroundIntervalSeconds, setBackgroundIntervalSeconds] = useState(90);
-  const [backgroundIntervalDraft, setBackgroundIntervalDraft] = useState("90");
-  const [universeIntervalSeconds, setUniverseIntervalSeconds] = useState(
-    DEFAULT_UNIVERSE_CADENCE_SECONDS,
+  const [hotScanDraft, setHotScanDraft] = useState(String(DEFAULT_SCAN_INTERVAL_SECONDS));
+  const [hotRepriceDraft, setHotRepriceDraft] = useState(String(DEFAULT_HOT_REPRICE_AFTER_SECONDS));
+  const [backgroundScanDraft, setBackgroundScanDraft] = useState(String(DEFAULT_SCAN_INTERVAL_SECONDS));
+  const [backgroundRepriceDraft, setBackgroundRepriceDraft] = useState(
+    String(DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS),
   );
-  const [universeIntervalDraft, setUniverseIntervalDraft] = useState(
-    String(DEFAULT_UNIVERSE_CADENCE_SECONDS),
+  const [universeRefreshDraft, setUniverseRefreshDraft] = useState(
+    String(DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS),
   );
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -308,27 +314,44 @@ export function RunPaperScan() {
   const applyLiveRefresh = useCallback(
     (status: LiveRefreshStatus, options?: { forceSettings?: boolean }) => {
       const saved = status.operator_settings;
-      const cadence = saved?.hot_cadence_seconds ?? status.interval_seconds;
-      if (cadence && (!settingsDirty || options?.forceSettings)) {
-        const clamped = clampHotCadenceSeconds(cadence);
-        setIntervalSeconds(clamped);
-        setIntervalDraft(String(clamped));
+      const hotScan =
+        saved?.hot_scan_interval_seconds ??
+        status.hot?.scan_interval_seconds ??
+        status.interval_seconds;
+      if (hotScan && (!settingsDirty || options?.forceSettings)) {
+        setHotScanDraft(String(clampScanIntervalSeconds(hotScan)));
       }
-      const backgroundCadence =
-        saved?.background_cadence_seconds ?? status.background?.cadence_seconds ?? 90;
-      if (backgroundCadence && (!settingsDirty || options?.forceSettings)) {
-        const clampedBackground = clampBackgroundCadenceSeconds(backgroundCadence);
-        setBackgroundIntervalSeconds(clampedBackground);
-        setBackgroundIntervalDraft(String(clampedBackground));
+      const hotReprice =
+        saved?.hot_reprice_after_seconds ??
+        saved?.hot_cadence_seconds ??
+        status.hot?.reprice_after_seconds ??
+        DEFAULT_HOT_REPRICE_AFTER_SECONDS;
+      if (hotReprice && (!settingsDirty || options?.forceSettings)) {
+        setHotRepriceDraft(String(clampHotRepriceAfterSeconds(hotReprice)));
       }
-      const universeCadence =
+      const backgroundScan =
+        saved?.background_scan_interval_seconds ??
+        status.background?.scan_interval_seconds ??
+        DEFAULT_SCAN_INTERVAL_SECONDS;
+      if (backgroundScan && (!settingsDirty || options?.forceSettings)) {
+        setBackgroundScanDraft(String(clampScanIntervalSeconds(backgroundScan)));
+      }
+      const backgroundReprice =
+        saved?.background_reprice_after_seconds ??
+        saved?.background_cadence_seconds ??
+        status.background?.reprice_after_seconds ??
+        DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS;
+      if (backgroundReprice && (!settingsDirty || options?.forceSettings)) {
+        setBackgroundRepriceDraft(String(clampBackgroundRepriceAfterSeconds(backgroundReprice)));
+      }
+      const universeRefresh =
+        saved?.universe_discovery_refresh_seconds ??
         saved?.universe_cadence_seconds ??
+        status.universe?.discovery_refresh_seconds ??
         status.universe?.cadence_seconds ??
-        DEFAULT_UNIVERSE_CADENCE_SECONDS;
-      if (universeCadence && (!settingsDirty || options?.forceSettings)) {
-        const clampedUniverse = clampUniverseCadenceSeconds(universeCadence);
-        setUniverseIntervalSeconds(clampedUniverse);
-        setUniverseIntervalDraft(String(clampedUniverse));
+        DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS;
+      if (universeRefresh && (!settingsDirty || options?.forceSettings)) {
+        setUniverseRefreshDraft(String(clampUniverseDiscoveryRefreshSeconds(universeRefresh)));
       }
       if (saved && (!settingsDirty || options?.forceSettings)) {
         setMinNetArbPercent(minNetPercentFromRate(saved.min_net_edge));
@@ -464,7 +487,7 @@ export function RunPaperScan() {
         applyLiveRefresh(status);
       },
     ).catch(() => {
-      // Status endpoint down: keep the 30s default cadence.
+      // Status endpoint down: keep the scan-interval and reprice defaults.
     });
     return () => {
       cancelled = true;
@@ -511,9 +534,11 @@ export function RunPaperScan() {
       if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
         throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
       }
-      const cadence = clampHotCadenceSeconds(Number(intervalDraft));
-      const backgroundCadence = clampBackgroundCadenceSeconds(Number(backgroundIntervalDraft));
-      const universeCadence = clampUniverseCadenceSeconds(Number(universeIntervalDraft));
+      const hotScan = clampScanIntervalSeconds(Number(hotScanDraft));
+      const hotReprice = clampHotRepriceAfterSeconds(Number(hotRepriceDraft));
+      const backgroundScan = clampScanIntervalSeconds(Number(backgroundScanDraft));
+      const backgroundReprice = clampBackgroundRepriceAfterSeconds(Number(backgroundRepriceDraft));
+      const universeRefresh = clampUniverseDiscoveryRefreshSeconds(Number(universeRefreshDraft));
       const allocated = optionalPositive(maxAllocatedPerTrade, "Max allocated per trade");
       if (!allocated) {
         throw new Error("Max allocated per trade is required.");
@@ -522,9 +547,11 @@ export function RunPaperScan() {
         min_net_edge: minNet,
         outright_min_net_edge: outrightMinNet ?? null,
         max_execution_risk: risk,
-        hot_cadence_seconds: cadence,
-        background_cadence_seconds: backgroundCadence,
-        universe_cadence_seconds: universeCadence,
+        hot_scan_interval_seconds: hotScan,
+        hot_reprice_after_seconds: hotReprice,
+        background_scan_interval_seconds: backgroundScan,
+        background_reprice_after_seconds: backgroundReprice,
+        universe_discovery_refresh_seconds: universeRefresh,
         max_allocated_per_trade_gbp: allocated,
       });
       applyLiveRefresh(status, { forceSettings: true });
@@ -814,57 +841,83 @@ export function RunPaperScan() {
             />
           </label>
           <label className="scan-field scan-field-compact">
-            <span>HOT cadence s</span>
+            <span>HOT scan interval s</span>
             <input
               inputMode="numeric"
-              value={intervalDraft}
+              value={hotScanDraft}
               onChange={(event) => {
-                setIntervalDraft(event.target.value);
+                setHotScanDraft(event.target.value);
                 setSettingsDirty(true);
               }}
-              onBlur={() => {
-                const clamped = clampHotCadenceSeconds(Number(intervalDraft));
-                setIntervalSeconds(clamped);
-                setIntervalDraft(String(clamped));
-              }}
-              aria-label="HOT cadence seconds"
-              title="Server-owned HOT pricing cadence. Safe range 15–60 seconds. Not the view refresh."
+              onBlur={() => setHotScanDraft(String(clampScanIntervalSeconds(Number(hotScanDraft))))}
+              aria-label="HOT scan interval seconds"
+              title="How often the HOT worker checks for due or newly promoted rows. Safe range 5–60 seconds. Default 10. Not the view refresh and not the reprice age."
             />
           </label>
           <label className="scan-field scan-field-compact">
-            <span>BACKGROUND cadence s</span>
+            <span>HOT reprice after s</span>
             <input
               inputMode="numeric"
-              value={backgroundIntervalDraft}
+              value={hotRepriceDraft}
               onChange={(event) => {
-                setBackgroundIntervalDraft(event.target.value);
+                setHotRepriceDraft(event.target.value);
                 setSettingsDirty(true);
               }}
-              onBlur={() => {
-                const clamped = clampBackgroundCadenceSeconds(Number(backgroundIntervalDraft));
-                setBackgroundIntervalSeconds(clamped);
-                setBackgroundIntervalDraft(String(clamped));
-              }}
-              aria-label="BACKGROUND cadence seconds"
-              title="Server-owned BACKGROUND pricing cadence. Safe range 60–600 seconds. Not UNIVERSE discovery."
+              onBlur={() => setHotRepriceDraft(String(clampHotRepriceAfterSeconds(Number(hotRepriceDraft))))}
+              aria-label="HOT reprice after seconds"
+              title="How old a successfully priced HOT row must be before it is due again. Safe range 15–60 seconds. Default 30. Never-priced rows do not wait this age."
             />
           </label>
           <label className="scan-field scan-field-compact">
-            <span>UNIVERSE cadence s</span>
+            <span>BACKGROUND scan interval s</span>
             <input
               inputMode="numeric"
-              value={universeIntervalDraft}
+              value={backgroundScanDraft}
               onChange={(event) => {
-                setUniverseIntervalDraft(event.target.value);
+                setBackgroundScanDraft(event.target.value);
                 setSettingsDirty(true);
               }}
-              onBlur={() => {
-                const clamped = clampUniverseCadenceSeconds(Number(universeIntervalDraft));
-                setUniverseIntervalSeconds(clamped);
-                setUniverseIntervalDraft(String(clamped));
+              onBlur={() =>
+                setBackgroundScanDraft(String(clampScanIntervalSeconds(Number(backgroundScanDraft))))
+              }
+              aria-label="BACKGROUND scan interval seconds"
+              title="How often the BACKGROUND worker checks for due rows. Safe range 5–60 seconds. Default 10. Not the reprice age and not UNIVERSE discovery."
+            />
+          </label>
+          <label className="scan-field scan-field-compact">
+            <span>BACKGROUND reprice after s</span>
+            <input
+              inputMode="numeric"
+              value={backgroundRepriceDraft}
+              onChange={(event) => {
+                setBackgroundRepriceDraft(event.target.value);
+                setSettingsDirty(true);
               }}
-              aria-label="UNIVERSE cadence seconds"
-              title="Fresh UNIVERSE discovery restart interval after a complete generation. Safe range 60–3600 seconds. Default 1800. Not radar TTL, worker cooldown, or generation budget."
+              onBlur={() =>
+                setBackgroundRepriceDraft(
+                  String(clampBackgroundRepriceAfterSeconds(Number(backgroundRepriceDraft))),
+                )
+              }
+              aria-label="BACKGROUND reprice after seconds"
+              title="How old a successfully priced BACKGROUND row must be before it is due again. Safe range 60–600 seconds. Default 600. Not UNIVERSE discovery."
+            />
+          </label>
+          <label className="scan-field scan-field-compact">
+            <span>UNIVERSE discovery refresh s</span>
+            <input
+              inputMode="numeric"
+              value={universeRefreshDraft}
+              onChange={(event) => {
+                setUniverseRefreshDraft(event.target.value);
+                setSettingsDirty(true);
+              }}
+              onBlur={() =>
+                setUniverseRefreshDraft(
+                  String(clampUniverseDiscoveryRefreshSeconds(Number(universeRefreshDraft))),
+                )
+              }
+              aria-label="UNIVERSE discovery refresh seconds"
+              title="Fresh UNIVERSE discovery restart interval after a terminal-complete generation. Safe range 60–3600 seconds. Default 3600. Not radar TTL, the ~8s worker cooldown, or generation budget."
             />
           </label>
           <label className="scan-field scan-field-compact">
@@ -1000,7 +1053,7 @@ export function RunPaperScan() {
               scannerStopped
                 ? "Scanner stopped by operator"
                 : universeScansPaused
-                  ? "Resume the persisted UNIVERSE cadence. Does not catch up missed intervals."
+                  ? "Resume the persisted UNIVERSE discovery refresh. Does not catch up missed intervals."
                   : "Pause periodic UNIVERSE rediscovery. BACKGROUND, HOT and ACTIVE TRADE continue. Run UNIVERSE now still works."
             }
           >
@@ -1058,24 +1111,25 @@ export function RunPaperScan() {
             Manual HOT refresh performs a HOT pricing refresh of current known fixtures.
             It does not rediscover the catalogue. Manual BACKGROUND refresh reprices currently due ACTIVE catalogue rows from exact known IDs.
             Neither HOT nor BACKGROUND rediscover the catalogue or advance UNIVERSE generation state.
-            Run UNIVERSE now bypasses only the UNIVERSE cadence wait and uses the real selected-scope generation worker.
+            Run UNIVERSE now bypasses only the UNIVERSE discovery refresh wait and uses the real selected-scope generation worker.
             Update existing keeps the current live UNIVERSE working set and coalesces if a chunk is already running.
             Clear & update clears the live UNIVERSE working set only, then starts a fresh selected-scope generation with no reused snapshot, cursor or skip IDs.
             Clear universe clears live UNIVERSE current-state, active generation and checkpoint only.
             Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
-            Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge cadence, and the stored cadence stays editable for resume.
-            Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT cadence, BACKGROUND cadence and UNIVERSE cadence
+            Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge discovery refresh, and the stored discovery refresh stays editable for resume.
+            Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT scan interval, HOT reprice after, BACKGROUND scan interval, BACKGROUND reprice after and UNIVERSE discovery refresh
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
             Football competitions Apply changes the current session scope, including season
             markets, and does not itself call providers.
             A material competition-scope change while UNIVERSE is paused coalesces one fresh generation, then remains paused.
             Save this selection as my default is required to persist startup scope across restart.
-            HOT cadence is how often HOT pricing is due; BACKGROUND cadence is how often the
-            rest of the known ACTIVE catalogue is repriced. UNIVERSE cadence is how often a fresh
-            discovery generation starts after the previous one completes (default 1800s).
+            HOT scan interval is how often the HOT worker checks for due rows (default 10s). HOT reprice after is how old a priced HOT row must be before it is due again (default 30s).
+            BACKGROUND scan interval is how often BACKGROUND checks for due rows (default 10s). BACKGROUND reprice after is the per-row age gate (default 600s).
+            UNIVERSE discovery refresh is how often a fresh discovery generation starts after a terminal-complete generation (default 3600s).
+            An incomplete generation resumes on the existing cooldown, not the discovery refresh.
             ACTIVE TRADE reprices open paper
             trades every 5s from exact known IDs. Auto refresh view only polls status.
-            Run UNIVERSE now is the explicit manual bypass of the cadence wait.
+            Run UNIVERSE now is the explicit manual bypass of the discovery refresh wait.
             Clear universe does not call providers and does not cancel HOT, BACKGROUND or ACTIVE TRADE.
           </div>
         </details>

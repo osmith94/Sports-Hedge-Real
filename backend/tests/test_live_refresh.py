@@ -131,7 +131,7 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert body["live_refresh"]["matching_venue"] == "polymarket"
     assert body["live_refresh"]["server_loop_enabled"] is False
     assert body["live_refresh"]["paper_autofill_enabled"] is False
-    assert body["live_refresh"]["interval_seconds"] >= 15
+    assert body["live_refresh"]["interval_seconds"] >= 5
 
     status = client.get("/paper/live-refresh")
     assert status.status_code == 200
@@ -142,9 +142,11 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert payload["paper_autofill_enabled"] is False
     assert "unavailable_unless_matchbook_payload_includes_scores" in payload["live_scores"]
     assert payload["discovered_fixtures"] == []
-    assert payload["hot"]["cadence_seconds"] == 30
-    assert payload["background"]["cadence_seconds"] == 90
-    assert payload["universe"]["cadence_seconds"] == 1800
+    assert payload["hot"]["cadence_seconds"] == 10
+    assert payload["hot"]["reprice_after_seconds"] == 30
+    assert payload["background"]["cadence_seconds"] == 10
+    assert payload["background"]["reprice_after_seconds"] == 600
+    assert payload["universe"]["cadence_seconds"] == 3600
 
 
 def test_tracked_rows_expose_source_freshness_and_narrative() -> None:

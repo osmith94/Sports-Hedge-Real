@@ -55,17 +55,19 @@ FORBIDDEN_WRITE_METHODS = ("place_order", "cancel_order", "sign_order")
 def test_cadence_authorities_are_independent_and_named_honestly() -> None:
     settings = Settings()
     assert settings.paper_live_refresh_hot_interval_seconds == 30
-    assert settings.paper_background_price_interval_seconds == 90
-    assert settings.paper_universe_discovery_interval_seconds == 1800
+    assert settings.paper_background_price_interval_seconds == 600
+    assert settings.paper_universe_discovery_interval_seconds == 3600
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     assert settings.paper_universe_worker_cooldown_seconds == 8
-    assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 90
-    assert _cooldown_seconds() == 1800
+    assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 600
+    assert _cooldown_seconds() == 3600
     coordinator = LiveRefreshCoordinator()
     coordinator.configure_from_settings()
-    assert coordinator.status.hot.cadence_seconds == 30
-    assert coordinator.status.background.cadence_seconds == 90
-    assert coordinator.status.universe.cadence_seconds == 1800
+    assert coordinator.status.hot.cadence_seconds == 10
+    assert coordinator.status.hot.reprice_after_seconds == 30
+    assert coordinator.status.background.cadence_seconds == 10
+    assert coordinator.status.background.reprice_after_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 3600
 
 
 def test_startup_universe_is_immediately_due() -> None:
@@ -100,16 +102,16 @@ def test_completed_universe_schedules_next_fresh_generation_at_plus_600s() -> No
     )
     assert coordinator._universe_generation_started_at is None
     assert coordinator.status.universe.worker_state == WORKER_COMPLETE
-    assert coordinator._next_universe_due == finished + timedelta(seconds=1800)
-    assert coordinator.status.universe.cadence_seconds == 1800
+    assert coordinator._next_universe_due == finished + timedelta(seconds=3600)
+    assert coordinator.status.universe.cadence_seconds == 3600
     status = coordinator.public_status()
-    assert status.universe.next_due_at == finished + timedelta(seconds=1800)
-    assert status.universe.cadence_seconds == 1800
+    assert status.universe.next_due_at == finished + timedelta(seconds=3600)
+    assert status.universe.cadence_seconds == 3600
 
-    idle = coordinator.plan_universe_tick(now=finished + timedelta(seconds=1799))
+    idle = coordinator.plan_universe_tick(now=finished + timedelta(seconds=3599))
     assert idle.lane == "idle"
     assert idle.reason == "universe_cooldown"
-    due = coordinator.plan_universe_tick(now=finished + timedelta(seconds=1800))
+    due = coordinator.plan_universe_tick(now=finished + timedelta(seconds=3600))
     assert due.lane == ScanLane.UNIVERSE.value
     assert due.generation_resume is False
     assert due.resume_cursor is None
@@ -127,7 +129,7 @@ def test_incomplete_generation_resumes_without_600s_sleep() -> None:
     assert plan.generation_resume is True
     assert plan.universe_generation_id == 26
     assert coordinator._seconds_until_universe() == pytest.approx(0.05)
-    assert coordinator.status.universe.cadence_seconds == 1800
+    assert coordinator.status.universe.cadence_seconds == 3600
 
 
 def test_incomplete_universe_chunk_yields_about_8s_not_zero_or_600() -> None:
@@ -147,9 +149,9 @@ def test_incomplete_universe_chunk_yields_about_8s_not_zero_or_600() -> None:
     assert waiting.reason == "universe_cooldown"
     delay = coordinator._seconds_until_universe()
     assert delay == pytest.approx(1.0)
-    assert delay < 1800
+    assert delay < 3600
     status = coordinator.public_status()
-    assert status.universe.cadence_seconds == 1800
+    assert status.universe.cadence_seconds == 3600
     assert status.universe.next_due_at == finished + timedelta(seconds=8)
     clock.now = finished + timedelta(seconds=8)
     due = coordinator.plan_universe_tick(now=clock.now)
@@ -215,12 +217,13 @@ async def test_background_next_due_is_plus_90s_after_slice() -> None:
     coordinator._clock = clock
     coordinator._next_background_due = NOW
     await coordinator.run_price_engine_slice(PriceEnginePriority.BACKGROUND)
-    assert coordinator._next_background_due == NOW + timedelta(seconds=90)
-    assert coordinator.status.background.cadence_seconds == 90
-    assert coordinator.status.background.next_due_at == NOW + timedelta(seconds=90)
-    waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=89))
+    assert coordinator._next_background_due == NOW + timedelta(seconds=10)
+    assert coordinator.status.background.cadence_seconds == 10
+    assert coordinator.status.background.reprice_after_seconds == 600
+    assert coordinator.status.background.next_due_at == NOW + timedelta(seconds=10)
+    waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=9))
     assert waiting.lane == "idle"
-    due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=90))
+    due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=10))
     assert due.lane == "background"
 
 
@@ -237,11 +240,16 @@ def test_hot_cadence_remains_operator_controlled_default_30s(tmp_path) -> None:
             background_cadence_seconds=90,
         )
         assert saved.hot_cadence_seconds == 15
+        assert saved.hot_reprice_after_seconds == 15
+        assert saved.hot_scan_interval_seconds == 10
         assert saved.background_cadence_seconds == 90
-        assert coordinator.status.hot.cadence_seconds == 15
-        assert coordinator.status.interval_seconds == 15
-        assert coordinator.status.background.cadence_seconds == 90
-        assert coordinator.status.universe.cadence_seconds == 1800
+        assert saved.background_reprice_after_seconds == 90
+        assert coordinator.status.hot.cadence_seconds == 10
+        assert coordinator.status.hot.reprice_after_seconds == 15
+        assert coordinator.status.interval_seconds == 10
+        assert coordinator.status.background.cadence_seconds == 10
+        assert coordinator.status.background.reprice_after_seconds == 90
+        assert coordinator.status.universe.cadence_seconds == 3600
         restored = coordinator.apply_operator_scan_settings(
             min_net_edge=Decimal(str(settings.min_net_edge)),
             max_execution_risk=settings.max_execution_risk,
@@ -257,15 +265,17 @@ def test_live_refresh_and_system_load_report_truthful_independent_cadences() -> 
     get_live_refresh_coordinator().reset()
     client = TestClient(app)
     payload = client.get("/paper/live-refresh").json()
-    assert payload["hot"]["cadence_seconds"] == 30
-    assert payload["background"]["cadence_seconds"] == 90
-    assert payload["universe"]["cadence_seconds"] == 1800
+    assert payload["hot"]["cadence_seconds"] == 10
+    assert payload["hot"]["reprice_after_seconds"] == 30
+    assert payload["background"]["cadence_seconds"] == 10
+    assert payload["background"]["reprice_after_seconds"] == 600
+    assert payload["universe"]["cadence_seconds"] == 3600
     load = payload["system_load"]
-    assert load["hot"]["cadence_seconds"] == 30
-    assert load["background"]["cadence_seconds"] == 90
-    assert load["universe"]["cadence_seconds"] == 1800
-    assert load["hot"]["cadence_seconds"] != load["background"]["cadence_seconds"]
-    assert load["background"]["cadence_seconds"] != load["universe"]["cadence_seconds"]
+    assert load["hot"]["cadence_seconds"] == 10
+    assert load["background"]["cadence_seconds"] == 10
+    assert load["universe"]["cadence_seconds"] == 3600
+    assert payload["hot"]["reprice_after_seconds"] != payload["background"]["reprice_after_seconds"]
+    assert payload["background"]["reprice_after_seconds"] != payload["universe"]["cadence_seconds"]
 
 
 def test_no_provider_concurrency_increase_or_new_polling_loop() -> None:
@@ -331,12 +341,13 @@ def test_old_universe_interval_env_does_not_control_background_or_discovery(
     settings = Settings()
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     assert settings.paper_universe_worker_cooldown_seconds == 8
-    assert settings.paper_background_price_interval_seconds == 90
-    assert settings.paper_universe_discovery_interval_seconds == 1800
+    assert settings.paper_background_price_interval_seconds == 600
+    assert settings.paper_universe_discovery_interval_seconds == 3600
     coordinator = LiveRefreshCoordinator()
     coordinator.configure_from_settings(settings)
-    assert coordinator.status.background.cadence_seconds == 90
-    assert coordinator.status.universe.cadence_seconds == 1800
+    assert coordinator.status.background.cadence_seconds == 10
+    assert coordinator.status.background.reprice_after_seconds == 600
+    assert coordinator.status.universe.cadence_seconds == 3600
 
 
 def test_hot_remains_schedulable_during_600s_universe_discovery_gap() -> None:
@@ -364,13 +375,15 @@ def test_background_cadence_defaults_to_90s(tmp_path) -> None:
     coordinator, store = _bind_store(tmp_path)
     try:
         resolved = coordinator.effective_scanner_settings()
-        assert resolved.background_cadence_seconds == 90
+        assert resolved.background_reprice_after_seconds == 600
+        assert resolved.background_scan_interval_seconds == 10
         assert resolved.source == "env_default"
         coordinator.configure_from_settings()
-        assert coordinator.status.background.cadence_seconds == 90
+        assert coordinator.status.background.cadence_seconds == 10
+        assert coordinator.status.background.reprice_after_seconds == 600
         assert coordinator.status.operator_settings is not None
-        assert coordinator.status.operator_settings.background_cadence_seconds == 90
-        assert coordinator.status.universe.cadence_seconds == 1800
+        assert coordinator.status.operator_settings.background_reprice_after_seconds == 600
+        assert coordinator.status.universe.cadence_seconds == 3600
     finally:
         _unbind(coordinator, store)
 
@@ -390,24 +403,28 @@ async def test_persisted_background_cadence_is_used_by_scheduler_without_restart
             min_net_edge=Decimal("0.005"),
             max_execution_risk=60,
             hot_cadence_seconds=30,
-            background_cadence_seconds=180,
+            background_scan_interval_seconds=45,
+            background_reprice_after_seconds=600,
         )
-        assert saved.background_cadence_seconds == 180
+        assert saved.background_scan_interval_seconds == 45
+        assert saved.background_reprice_after_seconds == 600
         assert saved.source == "operator"
-        assert coordinator.status.background.cadence_seconds == 180
-        assert coordinator._next_background_due == NOW + timedelta(seconds=180)
-        waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=179))
+        assert coordinator.status.background.cadence_seconds == 45
+        assert coordinator.status.background.reprice_after_seconds == 600
+        assert coordinator._next_background_due == NOW + timedelta(seconds=45)
+        waiting = coordinator.plan_background_tick(now=NOW + timedelta(seconds=44))
         assert waiting.lane == "idle"
-        due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=180))
+        due = coordinator.plan_background_tick(now=NOW + timedelta(seconds=45))
         assert due.lane == "background"
-        clock.now = NOW + timedelta(seconds=180)
+        clock.now = NOW + timedelta(seconds=45)
         coordinator._next_background_due = clock.now
         await coordinator.run_price_engine_slice(PriceEnginePriority.BACKGROUND)
-        assert coordinator._next_background_due == clock.now + timedelta(seconds=180)
-        assert coordinator.status.background.cadence_seconds == 180
+        assert coordinator._next_background_due == clock.now + timedelta(seconds=45)
+        assert coordinator.status.background.cadence_seconds == 45
+        assert coordinator.status.background.reprice_after_seconds == 600
         load = coordinator.public_status().system_load
-        assert load.background.cadence_seconds == 180
-        assert coordinator.status.universe.cadence_seconds == 1800
+        assert load.background.cadence_seconds == 45
+        assert coordinator.status.universe.cadence_seconds == 3600
     finally:
         bind_runtime_operator_scanner_settings_store(None)
         store.close()
@@ -431,9 +448,11 @@ def test_background_cadence_survives_store_reopen(tmp_path) -> None:
     assert loaded.source == "operator"
     coordinator = LiveRefreshCoordinator(operator_settings_store=restarted)
     coordinator.configure_from_settings()
-    assert coordinator.status.background.cadence_seconds == 240
-    assert coordinator.status.hot.cadence_seconds == 20
-    assert coordinator.status.universe.cadence_seconds == 1800
+    assert coordinator.status.background.reprice_after_seconds == 240
+    assert coordinator.status.background.scan_interval_seconds == 10
+    assert coordinator.status.hot.reprice_after_seconds == 20
+    assert coordinator.status.hot.scan_interval_seconds == 10
+    assert coordinator.status.universe.cadence_seconds == 3600
     restarted.close()
 
 
@@ -482,7 +501,8 @@ def test_background_cadence_invalid_range_rejected(tmp_path) -> None:
             },
         )
         assert bounds.status_code == 200
-        assert bounds.json()["background"]["cadence_seconds"] == 600
+        assert bounds.json()["background"]["reprice_after_seconds"] == 600
+        assert bounds.json()["background"]["scan_interval_seconds"] == 10
         low = client.put(
             "/paper/operator-scanner-settings",
             json={
@@ -493,7 +513,8 @@ def test_background_cadence_invalid_range_rejected(tmp_path) -> None:
             },
         )
         assert low.status_code == 200
-        assert low.json()["background"]["cadence_seconds"] == 60
+        assert low.json()["background"]["reprice_after_seconds"] == 60
+        assert low.json()["background"]["scan_interval_seconds"] == 10
     finally:
         _unbind(coordinator, store)
 
@@ -564,10 +585,12 @@ def test_background_cadence_update_does_not_trigger_scan(tmp_path) -> None:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["operator_settings"]["background_cadence_seconds"] == 120
-        assert body["background"]["cadence_seconds"] == 120
-        assert body["hot"]["cadence_seconds"] == 30
-        assert body["universe"]["cadence_seconds"] == 1800
+        assert body["operator_settings"]["background_reprice_after_seconds"] == 120
+        assert body["background"]["reprice_after_seconds"] == 120
+        assert body["background"]["scan_interval_seconds"] == 10
+        assert body["hot"]["reprice_after_seconds"] == 30
+        assert body["hot"]["scan_interval_seconds"] == 10
+        assert body["universe"]["cadence_seconds"] == 3600
         assert ticks == []
         put_src = inspect.getsource(paper_api.put_operator_scanner_settings)
         assert "collect_and_scan" not in put_src
@@ -583,13 +606,14 @@ def test_frontend_exposes_background_cadence_beside_hot() -> None:
         encoding="utf-8"
     )
     api = (REPO_ROOT / "frontend" / "lib" / "api.ts").read_text(encoding="utf-8")
-    assert "BACKGROUND cadence s" in scan
-    assert "HOT cadence s" in scan
-    assert scan.index("HOT cadence s") < scan.index("BACKGROUND cadence s")
-    assert "background_cadence_seconds: backgroundCadence" in scan
-    assert "clampBackgroundCadenceSeconds" in scan
+    assert "BACKGROUND scan interval s" in scan
+    assert "BACKGROUND reprice after s" in scan
+    assert "HOT scan interval s" in scan
+    assert scan.index("HOT scan interval s") < scan.index("BACKGROUND scan interval s")
+    assert "background_reprice_after_seconds: backgroundReprice" in scan
+    assert "clampBackgroundRepriceAfterSeconds" in scan
     assert "Math.min(600, Math.max(60" in scan
     assert "does not trigger a scan" in scan
-    assert "HOT cadence, BACKGROUND cadence and UNIVERSE cadence" in scan
-    assert "background_cadence_seconds: number" in api
-    assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 90
+    assert "BACKGROUND reprice after" in scan
+    assert "background_reprice_after_seconds?: number" in api
+    assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 600

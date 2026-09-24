@@ -6,9 +6,9 @@ One singleton SQLite row is the operator override for:
 - Outright Min Net Arb / ``outright_min_net_edge`` (COMPETITION_SEASON only;
   None is unconfigured and fails closed; never falls back to fixture)
 - Max Risk / ``maximum_execution_risk`` (scan/watchlist threshold only)
-- HOT cadence seconds
-- BACKGROUND pricing cadence seconds
-- UNIVERSE discovery cadence seconds (fresh generation restart interval)
+- HOT scan interval and HOT reprice-after age
+- BACKGROUND scan interval and BACKGROUND reprice-after age
+- UNIVERSE discovery refresh (fresh generation restart interval)
 - Max allocated per trade (GBP) — allocator per-opportunity cap authority
 - operator Stop / Resume pause flag
 - Pause scheduled UNIVERSE scans (periodic fresh-generation timer only)
@@ -16,11 +16,15 @@ One singleton SQLite row is the operator override for:
 Environment/config values remain the defaults when no operator settings
 override exists. This store never mutates ``.env``. Update, Stop, Resume and
 UNIVERSE schedule pause/resume are persistence/control seams only: they must
-not scan, discover, or call providers. UNIVERSE cadence here is the
+not scan, discover, or call providers. UNIVERSE discovery refresh here is the
 post-completion fresh-generation interval only — not radar TTL, intra-generation
 worker cooldown, or budget. Pausing scheduled UNIVERSE scans does not
-substitute a giant cadence; BACKGROUND, HOT and ACTIVE TRADE stay on their
-own timers.
+substitute a giant discovery refresh; BACKGROUND, HOT and ACTIVE TRADE stay on
+their own timers. HOT/BACKGROUND scan interval is how often the worker checks
+for due rows. Reprice-after is how old a successfully priced row must be before
+it is due again. Legacy ``*_cadence_seconds`` columns migrate to reprice-after
+or discovery refresh when the new column is absent. Scan intervals default to
+10s and are not copied from the old cadence.
 
 Backend-restart semantics (safety-first): a persisted operator Stop remains
 stopped across process restart until an explicit Resume. A persisted UNIVERSE
@@ -43,7 +47,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from sports_hedge.config import Settings, get_settings
 
@@ -53,12 +57,21 @@ _UNSET: Any = object()
 
 HOT_CADENCE_MIN_SECONDS = 15
 HOT_CADENCE_MAX_SECONDS = 60
+DEFAULT_HOT_REPRICE_AFTER_SECONDS = 30
+HOT_SCAN_INTERVAL_MIN_SECONDS = 5
+HOT_SCAN_INTERVAL_MAX_SECONDS = 60
+DEFAULT_HOT_SCAN_INTERVAL_SECONDS = 10
 BACKGROUND_CADENCE_MIN_SECONDS = 60
 BACKGROUND_CADENCE_MAX_SECONDS = 600
-DEFAULT_BACKGROUND_CADENCE_SECONDS = 90
+DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS = 600
+DEFAULT_BACKGROUND_CADENCE_SECONDS = DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS
+BACKGROUND_SCAN_INTERVAL_MIN_SECONDS = 5
+BACKGROUND_SCAN_INTERVAL_MAX_SECONDS = 60
+DEFAULT_BACKGROUND_SCAN_INTERVAL_SECONDS = 10
 UNIVERSE_CADENCE_MIN_SECONDS = 60
 UNIVERSE_CADENCE_MAX_SECONDS = 3600
-DEFAULT_UNIVERSE_CADENCE_SECONDS = 1800
+DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS = 3600
+DEFAULT_UNIVERSE_CADENCE_SECONDS = DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS
 MAX_ALLOCATED_PER_TRADE_MIN_GBP = Decimal("1")
 MAX_ALLOCATED_PER_TRADE_MAX_GBP = Decimal("1000000")
 DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = Decimal("1000")
@@ -73,14 +86,28 @@ class OperatorScannerSettings(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     outright_min_net_edge: Decimal | None = Field(default=None, ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
-    hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
-    background_cadence_seconds: int = Field(
-        default=DEFAULT_BACKGROUND_CADENCE_SECONDS,
+    hot_scan_interval_seconds: int = Field(
+        default=DEFAULT_HOT_SCAN_INTERVAL_SECONDS,
+        ge=HOT_SCAN_INTERVAL_MIN_SECONDS,
+        le=HOT_SCAN_INTERVAL_MAX_SECONDS,
+    )
+    hot_reprice_after_seconds: int = Field(
+        default=DEFAULT_HOT_REPRICE_AFTER_SECONDS,
+        ge=HOT_CADENCE_MIN_SECONDS,
+        le=HOT_CADENCE_MAX_SECONDS,
+    )
+    background_scan_interval_seconds: int = Field(
+        default=DEFAULT_BACKGROUND_SCAN_INTERVAL_SECONDS,
+        ge=BACKGROUND_SCAN_INTERVAL_MIN_SECONDS,
+        le=BACKGROUND_SCAN_INTERVAL_MAX_SECONDS,
+    )
+    background_reprice_after_seconds: int = Field(
+        default=DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS,
         ge=BACKGROUND_CADENCE_MIN_SECONDS,
         le=BACKGROUND_CADENCE_MAX_SECONDS,
     )
-    universe_cadence_seconds: int = Field(
-        default=DEFAULT_UNIVERSE_CADENCE_SECONDS,
+    universe_discovery_refresh_seconds: int = Field(
+        default=DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS,
         ge=UNIVERSE_CADENCE_MIN_SECONDS,
         le=UNIVERSE_CADENCE_MAX_SECONDS,
     )
@@ -95,15 +122,81 @@ class OperatorScannerSettings(BaseModel):
     updated_at: datetime | None = None
     restart_semantics: str = OPERATOR_SCANNER_RESTART_SEMANTICS
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_cadence_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        _copy_legacy_when_new_absent(payload, "hot_reprice_after_seconds", "hot_cadence_seconds")
+        _copy_legacy_when_new_absent(
+            payload, "background_reprice_after_seconds", "background_cadence_seconds"
+        )
+        _copy_legacy_when_new_absent(
+            payload, "universe_discovery_refresh_seconds", "universe_cadence_seconds"
+        )
+        return payload
+
+    @computed_field
+    @property
+    def hot_cadence_seconds(self) -> int:
+        """Compatibility alias for the HOT reprice-after age."""
+
+        return self.hot_reprice_after_seconds
+
+    @computed_field
+    @property
+    def background_cadence_seconds(self) -> int:
+        """Compatibility alias for the BACKGROUND reprice-after age."""
+
+        return self.background_reprice_after_seconds
+
+    @computed_field
+    @property
+    def universe_cadence_seconds(self) -> int:
+        """Compatibility alias for the UNIVERSE discovery refresh."""
+
+        return self.universe_discovery_refresh_seconds
+
 
 class OperatorScannerSettingsUpdate(BaseModel):
     min_net_edge: Decimal = Field(ge=0, lt=1)
     outright_min_net_edge: Decimal | None = Field(default=None, ge=0, lt=1)
     max_execution_risk: int = Field(ge=0, le=100)
-    hot_cadence_seconds: int = Field(ge=HOT_CADENCE_MIN_SECONDS, le=HOT_CADENCE_MAX_SECONDS)
-    background_cadence_seconds: int = Field(
+    hot_scan_interval_seconds: int | None = Field(
+        default=None,
+        ge=HOT_SCAN_INTERVAL_MIN_SECONDS,
+        le=HOT_SCAN_INTERVAL_MAX_SECONDS,
+    )
+    hot_reprice_after_seconds: int | None = Field(
+        default=None,
+        ge=HOT_CADENCE_MIN_SECONDS,
+        le=HOT_CADENCE_MAX_SECONDS,
+    )
+    hot_cadence_seconds: int | None = Field(
+        default=None,
+        ge=HOT_CADENCE_MIN_SECONDS,
+        le=HOT_CADENCE_MAX_SECONDS,
+    )
+    background_scan_interval_seconds: int | None = Field(
+        default=None,
+        ge=BACKGROUND_SCAN_INTERVAL_MIN_SECONDS,
+        le=BACKGROUND_SCAN_INTERVAL_MAX_SECONDS,
+    )
+    background_reprice_after_seconds: int | None = Field(
+        default=None,
         ge=BACKGROUND_CADENCE_MIN_SECONDS,
         le=BACKGROUND_CADENCE_MAX_SECONDS,
+    )
+    background_cadence_seconds: int | None = Field(
+        default=None,
+        ge=BACKGROUND_CADENCE_MIN_SECONDS,
+        le=BACKGROUND_CADENCE_MAX_SECONDS,
+    )
+    universe_discovery_refresh_seconds: int | None = Field(
+        default=None,
+        ge=UNIVERSE_CADENCE_MIN_SECONDS,
+        le=UNIVERSE_CADENCE_MAX_SECONDS,
     )
     universe_cadence_seconds: int | None = Field(
         default=None,
@@ -123,9 +216,49 @@ class OperatorScannerSettingsUpdate(BaseModel):
             return None
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_cadence_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        _copy_legacy_when_new_absent(payload, "hot_reprice_after_seconds", "hot_cadence_seconds")
+        _copy_legacy_when_new_absent(
+            payload, "background_reprice_after_seconds", "background_cadence_seconds"
+        )
+        _copy_legacy_when_new_absent(
+            payload, "universe_discovery_refresh_seconds", "universe_cadence_seconds"
+        )
+        return payload
+
+    @model_validator(mode="after")
+    def require_hot_and_background_timing(self) -> OperatorScannerSettingsUpdate:
+        if self.hot_reprice_after_seconds is None and self.hot_cadence_seconds is None:
+            raise ValueError("hot reprice after is required")
+        if (
+            self.background_reprice_after_seconds is None
+            and self.background_cadence_seconds is None
+        ):
+            raise ValueError("background reprice after is required")
+        return self
+
+
+def _copy_legacy_when_new_absent(payload: dict[str, Any], new_key: str, old_key: str) -> None:
+    """Map a persisted/API cadence name onto the new field only when the new field is absent."""
+
+    if payload.get(new_key) is None and payload.get(old_key) is not None:
+        payload[new_key] = payload[old_key]
+
 
 def clamp_hot_cadence_seconds(value: int) -> int:
     return min(HOT_CADENCE_MAX_SECONDS, max(HOT_CADENCE_MIN_SECONDS, int(value)))
+
+
+def clamp_hot_scan_interval_seconds(value: int) -> int:
+    return min(
+        HOT_SCAN_INTERVAL_MAX_SECONDS,
+        max(HOT_SCAN_INTERVAL_MIN_SECONDS, int(value)),
+    )
 
 
 def clamp_background_cadence_seconds(value: int) -> int:
@@ -133,6 +266,31 @@ def clamp_background_cadence_seconds(value: int) -> int:
         BACKGROUND_CADENCE_MAX_SECONDS,
         max(BACKGROUND_CADENCE_MIN_SECONDS, int(value)),
     )
+
+
+def clamp_background_scan_interval_seconds(value: int) -> int:
+    return min(
+        BACKGROUND_SCAN_INTERVAL_MAX_SECONDS,
+        max(BACKGROUND_SCAN_INTERVAL_MIN_SECONDS, int(value)),
+    )
+
+
+def _resolve_optional_seconds(
+    explicit_new: int | None,
+    explicit_legacy: int | None,
+    current: int | None,
+    fallback: int,
+    clamp,
+) -> int:
+    """New field wins, then a legacy cadence alias, then the stored value, then env/default."""
+
+    if explicit_new is not None:
+        return clamp(explicit_new)
+    if explicit_legacy is not None:
+        return clamp(explicit_legacy)
+    if current is not None:
+        return clamp(current)
+    return clamp(fallback)
 
 
 def clamp_universe_cadence_seconds(value: int) -> int:
@@ -177,13 +335,19 @@ def env_operator_scanner_settings(
         min_net_edge=Decimal(str(resolved.min_net_edge)),
         outright_min_net_edge=_env_outright_min_net_edge(resolved),
         max_execution_risk=int(resolved.max_execution_risk),
-        hot_cadence_seconds=clamp_hot_cadence_seconds(
+        hot_scan_interval_seconds=clamp_hot_scan_interval_seconds(
+            resolved.paper_hot_scan_interval_seconds
+        ),
+        hot_reprice_after_seconds=clamp_hot_cadence_seconds(
             resolved.paper_live_refresh_hot_interval_seconds
         ),
-        background_cadence_seconds=clamp_background_cadence_seconds(
+        background_scan_interval_seconds=clamp_background_scan_interval_seconds(
+            resolved.paper_background_scan_interval_seconds
+        ),
+        background_reprice_after_seconds=clamp_background_cadence_seconds(
             resolved.paper_background_price_interval_seconds
         ),
-        universe_cadence_seconds=clamp_universe_cadence_seconds(
+        universe_discovery_refresh_seconds=clamp_universe_cadence_seconds(
             resolved.paper_universe_discovery_interval_seconds
         ),
         max_allocated_per_trade_gbp=_env_max_allocated_per_trade_gbp(resolved),
@@ -254,8 +418,13 @@ class SqliteOperatorScannerSettingsStore:
                 outright_min_net_edge TEXT,
                 max_execution_risk INTEGER NOT NULL,
                 hot_cadence_seconds INTEGER NOT NULL,
+                hot_scan_interval_seconds INTEGER,
+                hot_reprice_after_seconds INTEGER,
                 background_cadence_seconds INTEGER NOT NULL DEFAULT 90,
+                background_scan_interval_seconds INTEGER,
+                background_reprice_after_seconds INTEGER,
                 universe_cadence_seconds INTEGER NOT NULL DEFAULT 1800,
+                universe_discovery_refresh_seconds INTEGER,
                 max_allocated_per_trade_gbp TEXT,
                 scanner_stopped INTEGER NOT NULL,
                 universe_scans_paused INTEGER NOT NULL DEFAULT 0,
@@ -293,6 +462,17 @@ class SqliteOperatorScannerSettingsStore:
                 "ALTER TABLE operator_scanner_settings "
                 "ADD COLUMN outright_min_net_edge TEXT"
             )
+        for column in (
+            "hot_scan_interval_seconds",
+            "hot_reprice_after_seconds",
+            "background_scan_interval_seconds",
+            "background_reprice_after_seconds",
+            "universe_discovery_refresh_seconds",
+        ):
+            if column not in columns:
+                connection.execute(
+                    f"ALTER TABLE operator_scanner_settings ADD COLUMN {column} INTEGER"
+                )
 
     def load(self) -> OperatorScannerSettings | None:
         with self._connect() as connection:
@@ -312,9 +492,14 @@ class SqliteOperatorScannerSettingsStore:
         *,
         min_net_edge: Decimal,
         max_execution_risk: int,
-        hot_cadence_seconds: int,
+        hot_cadence_seconds: int | None = None,
+        hot_scan_interval_seconds: int | None = None,
+        hot_reprice_after_seconds: int | None = None,
         background_cadence_seconds: int | None = None,
+        background_scan_interval_seconds: int | None = None,
+        background_reprice_after_seconds: int | None = None,
         universe_cadence_seconds: int | None = None,
+        universe_discovery_refresh_seconds: int | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
         outright_min_net_edge: Any = _UNSET,
         scanner_stopped: bool | None = None,
@@ -329,24 +514,41 @@ class SqliteOperatorScannerSettingsStore:
             if current is not None and universe_scans_paused is None
             else bool(universe_scans_paused if universe_scans_paused is not None else False)
         )
-        if background_cadence_seconds is None:
-            if current is not None:
-                background = current.background_cadence_seconds
-            else:
-                background = clamp_background_cadence_seconds(
-                    get_settings().paper_background_price_interval_seconds
-                )
-        else:
-            background = clamp_background_cadence_seconds(background_cadence_seconds)
-        if universe_cadence_seconds is None:
-            if current is not None:
-                universe = current.universe_cadence_seconds
-            else:
-                universe = clamp_universe_cadence_seconds(
-                    get_settings().paper_universe_discovery_interval_seconds
-                )
-        else:
-            universe = clamp_universe_cadence_seconds(universe_cadence_seconds)
+        hot_reprice = _resolve_optional_seconds(
+            hot_reprice_after_seconds,
+            hot_cadence_seconds,
+            current.hot_reprice_after_seconds if current is not None else None,
+            get_settings().paper_live_refresh_hot_interval_seconds,
+            clamp_hot_cadence_seconds,
+        )
+        hot_scan = _resolve_optional_seconds(
+            hot_scan_interval_seconds,
+            None,
+            current.hot_scan_interval_seconds if current is not None else None,
+            DEFAULT_HOT_SCAN_INTERVAL_SECONDS,
+            clamp_hot_scan_interval_seconds,
+        )
+        background = _resolve_optional_seconds(
+            background_reprice_after_seconds,
+            background_cadence_seconds,
+            current.background_reprice_after_seconds if current is not None else None,
+            get_settings().paper_background_price_interval_seconds,
+            clamp_background_cadence_seconds,
+        )
+        background_scan = _resolve_optional_seconds(
+            background_scan_interval_seconds,
+            None,
+            current.background_scan_interval_seconds if current is not None else None,
+            DEFAULT_BACKGROUND_SCAN_INTERVAL_SECONDS,
+            clamp_background_scan_interval_seconds,
+        )
+        universe = _resolve_optional_seconds(
+            universe_discovery_refresh_seconds,
+            universe_cadence_seconds,
+            current.universe_discovery_refresh_seconds if current is not None else None,
+            get_settings().paper_universe_discovery_interval_seconds,
+            clamp_universe_cadence_seconds,
+        )
         if max_allocated_per_trade_gbp is None:
             if current is not None:
                 allocated = current.max_allocated_per_trade_gbp
@@ -369,9 +571,11 @@ class SqliteOperatorScannerSettingsStore:
             min_net_edge=min_net_edge,
             outright_min_net_edge=outright,
             max_execution_risk=int(max_execution_risk),
-            hot_cadence_seconds=clamp_hot_cadence_seconds(hot_cadence_seconds),
-            background_cadence_seconds=background,
-            universe_cadence_seconds=universe,
+            hot_scan_interval_seconds=hot_scan,
+            hot_reprice_after_seconds=hot_reprice,
+            background_scan_interval_seconds=background_scan,
+            background_reprice_after_seconds=background,
+            universe_discovery_refresh_seconds=universe,
             max_allocated_per_trade_gbp=allocated,
             scanner_stopped=stopped,
             universe_scans_paused=paused,
@@ -458,19 +662,27 @@ class SqliteOperatorScannerSettingsStore:
             connection.execute(
                 """
                 INSERT INTO operator_scanner_settings (
-                    id, min_net_edge, outright_min_net_edge, max_execution_risk, hot_cadence_seconds,
-                    background_cadence_seconds, universe_cadence_seconds,
+                    id, min_net_edge, outright_min_net_edge, max_execution_risk,
+                    hot_cadence_seconds, hot_scan_interval_seconds, hot_reprice_after_seconds,
+                    background_cadence_seconds, background_scan_interval_seconds,
+                    background_reprice_after_seconds,
+                    universe_cadence_seconds, universe_discovery_refresh_seconds,
                     max_allocated_per_trade_gbp, scanner_stopped,
                     universe_scans_paused, source, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_net_edge = excluded.min_net_edge,
                     outright_min_net_edge = excluded.outright_min_net_edge,
                     max_execution_risk = excluded.max_execution_risk,
                     hot_cadence_seconds = excluded.hot_cadence_seconds,
+                    hot_scan_interval_seconds = excluded.hot_scan_interval_seconds,
+                    hot_reprice_after_seconds = excluded.hot_reprice_after_seconds,
                     background_cadence_seconds = excluded.background_cadence_seconds,
+                    background_scan_interval_seconds = excluded.background_scan_interval_seconds,
+                    background_reprice_after_seconds = excluded.background_reprice_after_seconds,
                     universe_cadence_seconds = excluded.universe_cadence_seconds,
+                    universe_discovery_refresh_seconds = excluded.universe_discovery_refresh_seconds,
                     max_allocated_per_trade_gbp = excluded.max_allocated_per_trade_gbp,
                     scanner_stopped = excluded.scanner_stopped,
                     universe_scans_paused = excluded.universe_scans_paused,
@@ -483,9 +695,14 @@ class SqliteOperatorScannerSettingsStore:
                     if payload.outright_min_net_edge is None
                     else str(payload.outright_min_net_edge),
                     int(payload.max_execution_risk),
-                    int(payload.hot_cadence_seconds),
-                    int(payload.background_cadence_seconds),
-                    int(payload.universe_cadence_seconds),
+                    int(payload.hot_reprice_after_seconds),
+                    int(payload.hot_scan_interval_seconds),
+                    int(payload.hot_reprice_after_seconds),
+                    int(payload.background_reprice_after_seconds),
+                    int(payload.background_scan_interval_seconds),
+                    int(payload.background_reprice_after_seconds),
+                    int(payload.universe_discovery_refresh_seconds),
+                    int(payload.universe_discovery_refresh_seconds),
                     str(payload.max_allocated_per_trade_gbp),
                     1 if payload.scanner_stopped else 0,
                     1 if payload.universe_scans_paused else 0,
@@ -554,6 +771,17 @@ def get_operator_scanner_settings_store() -> SqliteOperatorScannerSettingsStore:
         path = Path(database)
         path.parent.mkdir(parents=True, exist_ok=True)
     return SqliteOperatorScannerSettingsStore(database)
+
+
+def _migrated_timing_seconds(raw_new: Any, legacy: int, clamp) -> int:
+    """Use the new column when present. A NULL column keeps the legacy cadence or the scan default."""
+
+    if raw_new is None or str(raw_new).strip() == "":
+        return clamp(legacy)
+    try:
+        return clamp(int(raw_new))
+    except (TypeError, ValueError):
+        return clamp(legacy)
 
 
 def _row_optional(row: sqlite3.Row, key: str) -> Any:
@@ -631,6 +859,31 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
             get_settings().paper_universe_discovery_interval_seconds
         )
         source = "env_default"
+    hot_reprice_after_seconds = _migrated_timing_seconds(
+        _row_optional(row, "hot_reprice_after_seconds"),
+        hot_cadence_seconds,
+        clamp_hot_cadence_seconds,
+    )
+    hot_scan_interval_seconds = _migrated_timing_seconds(
+        _row_optional(row, "hot_scan_interval_seconds"),
+        DEFAULT_HOT_SCAN_INTERVAL_SECONDS,
+        clamp_hot_scan_interval_seconds,
+    )
+    background_reprice_after_seconds = _migrated_timing_seconds(
+        _row_optional(row, "background_reprice_after_seconds"),
+        background_cadence_seconds,
+        clamp_background_cadence_seconds,
+    )
+    background_scan_interval_seconds = _migrated_timing_seconds(
+        _row_optional(row, "background_scan_interval_seconds"),
+        DEFAULT_BACKGROUND_SCAN_INTERVAL_SECONDS,
+        clamp_background_scan_interval_seconds,
+    )
+    universe_discovery_refresh_seconds = _migrated_timing_seconds(
+        _row_optional(row, "universe_discovery_refresh_seconds"),
+        universe_cadence_seconds,
+        clamp_universe_cadence_seconds,
+    )
     try:
         raw_allocated = _row_optional(row, "max_allocated_per_trade_gbp")
         if raw_allocated is None or str(raw_allocated).strip() == "":
@@ -650,9 +903,11 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         min_net_edge=min_net_edge,
         outright_min_net_edge=outright_min_net_edge,
         max_execution_risk=max_execution_risk,
-        hot_cadence_seconds=hot_cadence_seconds,
-        background_cadence_seconds=background_cadence_seconds,
-        universe_cadence_seconds=universe_cadence_seconds,
+        hot_scan_interval_seconds=hot_scan_interval_seconds,
+        hot_reprice_after_seconds=hot_reprice_after_seconds,
+        background_scan_interval_seconds=background_scan_interval_seconds,
+        background_reprice_after_seconds=background_reprice_after_seconds,
+        universe_discovery_refresh_seconds=universe_discovery_refresh_seconds,
         max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
         scanner_stopped=bool(int(row["scanner_stopped"] or 0)),
         universe_scans_paused=bool(int(_row_optional(row, "universe_scans_paused") or 0)),

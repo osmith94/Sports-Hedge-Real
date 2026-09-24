@@ -124,6 +124,6 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     assert "get_shared_provider_runtime" in main
     assert "runtime.kalshi" in main
     scan = (FRONTEND / "components" / "run-paper-scan.tsx").read_text(encoding="utf-8")
-    assert "HOT cadence" in scan
+    assert "HOT scan interval" in scan
     assert "Refresh interval" not in scan
     assert "operator_summary" in scan
