@@ -5,13 +5,17 @@ import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator
 
 from pydantic import ValidationError
 
+from sports_hedge.application.cycle_diagnostics import (
+    DIAGNOSTIC_MAX_ROWS,
+    DIAGNOSTIC_RETENTION_DAYS,
+)
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.audit import (
@@ -207,6 +211,14 @@ class SqlitePaperScanRepository:
                 ON paper_scan_records(canonical_event_id, scanned_at DESC);
             CREATE INDEX IF NOT EXISTS idx_paper_scan_cycle_completed
                 ON paper_scan_cycles(completed_at DESC, started_at DESC);
+            CREATE TABLE IF NOT EXISTS paper_scan_cycle_diagnostics (
+                cycle_id TEXT PRIMARY KEY,
+                scan_lane TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                report_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_paper_scan_cycle_diagnostics_completed
+                ON paper_scan_cycle_diagnostics(completed_at);
             """
         )
         current_row = connection.execute(
@@ -355,6 +367,86 @@ class SqlitePaperScanRepository:
                 )
                 return
             raise
+
+    def append_cycle_diagnostic(
+        self,
+        *,
+        cycle_id: str,
+        scan_lane: str,
+        completed_at: datetime,
+        report: dict[str, Any],
+        now: datetime | None = None,
+    ) -> None:
+        """Insert one bounded diagnostic row, then apply retention."""
+
+        completed = completed_at if completed_at.tzinfo is not None else completed_at.replace(tzinfo=UTC)
+        payload = json.dumps(report, separators=(",", ":"), default=str)
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO paper_scan_cycle_diagnostics (
+                        cycle_id, scan_lane, completed_at, report_json
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (cycle_id, scan_lane, completed.isoformat(), payload),
+                )
+        except sqlite3.IntegrityError:
+            LOGGER.info("paper_scan_cycle_diagnostic_same_persist_attempt cycle_id=%s", cycle_id)
+        self.purge_cycle_diagnostics(now=now or datetime.now(UTC))
+
+    def get_cycle_diagnostic(self, cycle_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT report_json FROM paper_scan_cycle_diagnostics
+                WHERE cycle_id = ?
+                """,
+                (cycle_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            loaded = json.loads(row["report_json"])
+        except json.JSONDecodeError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    def purge_cycle_diagnostics(self, *, now: datetime | None = None) -> int:
+        """Drop rows older than 7 days, then the oldest rows above the fixed cap."""
+
+        evaluated = now or datetime.now(UTC)
+        if evaluated.tzinfo is None:
+            evaluated = evaluated.replace(tzinfo=UTC)
+        cutoff = (evaluated - timedelta(days=DIAGNOSTIC_RETENTION_DAYS)).isoformat()
+        with self._connect() as connection:
+            deleted = connection.execute(
+                """
+                DELETE FROM paper_scan_cycle_diagnostics
+                WHERE completed_at < ?
+                """,
+                (cutoff,),
+            ).rowcount
+            overflow = connection.execute(
+                """
+                SELECT COUNT(*) AS n FROM paper_scan_cycle_diagnostics
+                """
+            ).fetchone()
+            extra = int(overflow["n"] if overflow is not None else 0) - DIAGNOSTIC_MAX_ROWS
+            if extra > 0:
+                connection.execute(
+                    """
+                    DELETE FROM paper_scan_cycle_diagnostics
+                    WHERE cycle_id IN (
+                        SELECT cycle_id FROM paper_scan_cycle_diagnostics
+                        ORDER BY completed_at ASC, cycle_id ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (extra,),
+                )
+                deleted += extra
+        return int(deleted or 0)
 
     def _same_cycle_persist_attempt(self, record: PaperScanCycleRecord) -> bool:
         with self._connect() as connection:

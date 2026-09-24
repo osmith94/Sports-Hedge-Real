@@ -1,13 +1,22 @@
 "use client";
 
-import { PaperScanCycleRecord } from "../lib/api";
+import { useState } from "react";
+
+import {
+  PaperScanCycleRecord,
+  ScanCycleDiagnosticResponse,
+  getPaperScanCycleReport,
+} from "../lib/api";
 import {
   SCAN_CYCLE_COPY,
   SCAN_CYCLE_EMPTY,
   SCAN_CYCLE_HEADERS,
+  SCAN_CYCLE_REPORT_ACTION,
+  SCAN_CYCLE_REPORT_EMPTY,
   SCAN_CYCLE_TITLE,
   SCAN_CYCLE_UNAVAILABLE,
   scanCycleBadgeLabel,
+  scanCycleDiagnosticLines,
   scanCycleLatestSummary,
   scanCycleRows,
 } from "../lib/scan-cycle-history-display";
@@ -58,32 +67,86 @@ export function ScanCycleHistoryPanel({
 }
 
 function CycleTable({ rows }: { rows: ReturnType<typeof scanCycleRows> }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<ScanCycleDiagnosticResponse | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  async function viewReport(cycleId: string) {
+    if (selectedId === cycleId && loaded?.cycle_id === cycleId) {
+      setSelectedId(null);
+      return;
+    }
+    setSelectedId(cycleId);
+    setLoadingId(cycleId);
+    setLoadError(null);
+    try {
+      const response = await getPaperScanCycleReport(cycleId);
+      setLoaded(response);
+    } catch (error) {
+      setLoaded(null);
+      setLoadError(error instanceof Error ? error.message : "Cycle diagnostic request failed");
+    } finally {
+      setLoadingId(null);
+    }
+  }
+
+  const lines =
+    loaded && loaded.cycle_id === selectedId && loaded.available
+      ? scanCycleDiagnosticLines(loaded.report)
+      : [];
+
   return (
-    <div className="table-wrap">
-      <table className="scan-cycle-table">
-        <thead>
-          <tr>
-            {SCAN_CYCLE_HEADERS.map((header) => (
-              <th key={header}>{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.id}>
-              <td className="muted">{row.completedLabel}</td>
-              <td>{row.laneLabel}</td>
-              <td>{row.durationLabel}</td>
-              <td>{row.fixtureLabel}</td>
-              <td>{row.evaluatedLabel}</td>
-              <td>{row.matchedLabel}</td>
-              <td>{row.paperDecisionLabel}</td>
-              <td>{row.qualifyingLabel}</td>
-              <td className={row.degraded ? undefined : "muted"}>{row.healthLabel}</td>
+    <div>
+      <div className="table-wrap">
+        <table className="scan-cycle-table">
+          <thead>
+            <tr>
+              {SCAN_CYCLE_HEADERS.map((header) => (
+                <th key={header}>{header}</th>
+              ))}
+              <th>Report</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td className="muted">{row.completedLabel}</td>
+                <td>{row.laneLabel}</td>
+                <td>{row.durationLabel}</td>
+                <td>{row.fixtureLabel}</td>
+                <td>{row.evaluatedLabel}</td>
+                <td>{row.matchedLabel}</td>
+                <td>{row.paperDecisionLabel}</td>
+                <td>{row.qualifyingLabel}</td>
+                <td className={row.degraded ? undefined : "muted"}>{row.healthLabel}</td>
+                <td>
+                  <button type="button" className="sort-header" onClick={() => void viewReport(row.id)}>
+                    {selectedId === row.id ? "Hide report" : SCAN_CYCLE_REPORT_ACTION}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selectedId ? (
+        <div className="panel-meta scan-cycle-report">
+          <div>Cycle diagnostic. Not live quotes. Not a raw provider response.</div>
+          {loadingId === selectedId ? <div>Loading stored diagnostic…</div> : null}
+          {loadError ? <div>{loadError}</div> : null}
+          {loaded && loaded.cycle_id === selectedId && !loaded.available ? (
+            <div>{loaded.note || SCAN_CYCLE_REPORT_EMPTY}</div>
+          ) : null}
+          {lines.length > 0 ? (
+            <ul>
+              {lines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

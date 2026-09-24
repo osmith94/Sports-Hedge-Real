@@ -104,6 +104,11 @@ def build_background_price_engine_cycle_report(
                 if hasattr(result, "viability_diagnostics")
                 else {}
             ),
+            **(
+                {"cycle_diagnostic": dict(result.diagnostic)}
+                if isinstance(getattr(result, "diagnostic", None), dict)
+                else {}
+            ),
         },
     )
 

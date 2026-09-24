@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -50,6 +51,7 @@ from sports_hedge.application.collector import (
     MarketEvaluationState,
     _inventory_from_observation,
 )
+from sports_hedge.application.cycle_diagnostics import CycleDiagnosticAccumulator
 from sports_hedge.application.executable_liquidity import (
     decision_is_solver_arbitrage,
     decision_net_edge,
@@ -165,6 +167,10 @@ SCAN_BUDGET_EXHAUSTED_REASON = "scan_budget_exhausted"
 PRICE_ENGINE_PERSIST_STAGE = "persist_capture"
 
 LOGGER = getLogger(__name__)
+_SLICE_DIAGNOSTICS: ContextVar[CycleDiagnosticAccumulator | None] = ContextVar(
+    "price_engine_slice_diagnostics",
+    default=None,
+)
 
 
 class PriceEnginePriority(StrEnum):
@@ -280,6 +286,7 @@ class PriceEngineSliceResult:
     skip_reasons: dict[str, str] = field(default_factory=dict)
     upper_bound_net_edge: str | None = None
     viable_venue_count: int | None = None
+    diagnostic: dict[str, Any] | None = None
 
     def statuses(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -714,6 +721,12 @@ class CataloguePriceEngine:
         due = self.due_items(priority, now=evaluated)
         result = PriceEngineSliceResult()
         started_mono = monotonic()
+        diagnostics = CycleDiagnosticAccumulator()
+        diagnostics.note_slice_budget(
+            slice_wall_seconds=slice_wall_seconds,
+            worker_limit=self._slice_worker_limit(),
+        )
+        diag_token = _SLICE_DIAGNOSTICS.set(diagnostics)
         deadline = (
             None
             if slice_wall_seconds is None
@@ -744,7 +757,20 @@ class CataloguePriceEngine:
             for runtime in expensive:
                 runtime.status = PriceEngineItemStatus.NOT_STARTED
                 result.not_started.append(runtime.identity.catalogue_row_id)
+                diagnostics.note_terminal(
+                    "not_started",
+                    runtime.identity.catalogue_row_id,
+                    NOT_STARTED_THIS_CADENCE,
+                )
                 self._record_item_deadline_miss(runtime)
+            self._close_slice_diagnostic(
+                result,
+                diagnostics,
+                diag_token,
+                priority=priority,
+                due=len(due),
+                started_mono=started_mono,
+            )
             return result
 
         pending = deque(expensive)
@@ -765,27 +791,99 @@ class CataloguePriceEngine:
                         self._record_outcome(runtime, PriceEngineItemStatus.NOT_STARTED, result)
                         self._record_item_deadline_miss(runtime)
                         continue
-                    outcome = await self._price_item(runtime, result)
-                    self._record_outcome(runtime, outcome, result)
+                    try:
+                        outcome = await self._price_item(runtime, result)
+                        self._record_outcome(runtime, outcome, result)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        diagnostics.note_worker_error(exc)
+                        runtime.last_error_stage = "item_exception"
+                        runtime.last_error_detail = f"{type(exc).__name__}: {exc}"[:200]
+                        runtime.status = PriceEngineItemStatus.FAILED
+                        self._record_outcome(runtime, PriceEngineItemStatus.FAILED, result)
+                        raise
 
             worker_n = min(self._slice_worker_limit(), len(expensive))
+            diagnostics.note_slice_budget(
+                slice_wall_seconds=slice_wall_seconds,
+                worker_limit=worker_n,
+            )
             if worker_n > 0:
-                await asyncio.gather(
+                gathered = await asyncio.gather(
                     *(asyncio.create_task(_worker()) for _ in range(worker_n)),
                     return_exceptions=True,
                 )
+                for item in gathered:
+                    if isinstance(item, BaseException) and not isinstance(item, Exception):
+                        diagnostics.note_worker_error(item)
             while pending:
                 runtime = pending.popleft()
                 runtime.status = PriceEngineItemStatus.NOT_STARTED
                 result.not_started.append(runtime.identity.catalogue_row_id)
+                diagnostics.note_terminal(
+                    "not_started",
+                    runtime.identity.catalogue_row_id,
+                    NOT_STARTED_THIS_CADENCE,
+                )
                 self._record_item_deadline_miss(runtime)
         finally:
             self._slice_remaining = None
+            self._close_slice_diagnostic(
+                result,
+                diagnostics,
+                diag_token,
+                priority=priority,
+                due=len(due),
+                started_mono=started_mono,
+            )
         self._last_slice_not_started[priority.value] = len(result.not_started)
         result.operation_health = dict(self._operation_health.get(priority.value) or {})
         result.venue_health = venue_health_from_operation_health(result.operation_health)
         result.scan_budget_exhausted = False
         return result
+
+    def _close_slice_diagnostic(
+        self,
+        result: PriceEngineSliceResult,
+        diagnostics: CycleDiagnosticAccumulator,
+        diag_token: Any,
+        *,
+        priority: PriceEnginePriority,
+        due: int,
+        started_mono: float,
+    ) -> None:
+        if result.diagnostic is None:
+            diagnostics.note_saved_calls(
+                result.saved_provider_calls,
+                result.skipped_provider_calls,
+            )
+            limits = {}
+            access = self.provider_access
+            if access is not None:
+                limits = {venue.value: int(limit) for venue, limit in access.limits.items()}
+            result.diagnostic = diagnostics.finish(
+                lane=priority.value,
+                wall_ms=max(0, int((monotonic() - started_mono) * 1000)),
+                due=due,
+                evaluated=len(result.evaluated),
+                skipped=len(result.skipped),
+                revalidation=len(result.revalidation),
+                failed=len(result.failed),
+                retry_wait=len(result.retry_wait),
+                deferred=len(result.deferred),
+                not_started=len(result.not_started),
+                decisions=len(result.decisions),
+                qualifying=sum(
+                    1 for decision in result.decisions if decision_is_solver_arbitrage(decision)
+                ),
+                promotions=len(result.promotions),
+                provider_limits=limits,
+            )
+        try:
+            _SLICE_DIAGNOSTICS.reset(diag_token)
+        except ValueError:
+            return
 
     async def _price_item(
         self,
@@ -919,34 +1017,49 @@ class CataloguePriceEngine:
                         return self._finalize_provider_status(runtime, polymarket_books)
 
             if matchbook_payload is not None and kalshi_books is not None:
-                status = await self._evaluate_complete_item(
-                    runtime,
-                    matchbook=matchbook_payload,
-                    kalshi_books=kalshi_books,
-                    result=result,
+                status = await self._await_local(
+                    self._evaluate_complete_item(
+                        runtime,
+                        matchbook=matchbook_payload,
+                        kalshi_books=kalshi_books,
+                        result=result,
+                    )
                 )
                 if (
                     status is PriceEngineItemStatus.EVALUATED
                     and polymarket_books
                     and self.paper_scan is not None
                 ):
-                    await self._evaluate_extra_polymarket_pairs(
-                        runtime,
-                        matchbook=matchbook_payload,
-                        kalshi_books=kalshi_books,
-                        polymarket_books=polymarket_books,
-                        result=result,
+                    await self._await_local(
+                        self._evaluate_extra_polymarket_pairs(
+                            runtime,
+                            matchbook=matchbook_payload,
+                            kalshi_books=kalshi_books,
+                            polymarket_books=polymarket_books,
+                            result=result,
+                        )
                     )
                 return status
-            return await self._evaluate_flexible_pairs(
-                runtime,
-                matchbook=matchbook_payload,
-                kalshi_books=kalshi_books,
-                polymarket_books=polymarket_books,
-                result=result,
+            return await self._await_local(
+                self._evaluate_flexible_pairs(
+                    runtime,
+                    matchbook=matchbook_payload,
+                    kalshi_books=kalshi_books,
+                    polymarket_books=polymarket_books,
+                    result=result,
+                )
             )
         finally:
             runtime.in_flight = False
+
+    async def _await_local(self, awaitable: Any) -> Any:
+        started = monotonic()
+        try:
+            return await awaitable
+        finally:
+            diagnostics = _SLICE_DIAGNOSTICS.get()
+            if diagnostics is not None:
+                diagnostics.note_local_ms(max(0, int((monotonic() - started) * 1000)))
 
     async def _refresh_matchbook(
         self,
@@ -1735,16 +1848,27 @@ class CataloguePriceEngine:
     ) -> tuple[Any, PriceEngineItemStatus | None]:
         access = self.provider_access
         timeout = self._provider_timeout
+        row_id = None if runtime is None else runtime.identity.catalogue_row_id
         if access is None:
+            started = monotonic()
             try:
                 payload = await asyncio.wait_for(coro, timeout=timeout)
                 self._record_lane_operation(lane, venue, stage, HEALTH_OK)
+                self._note_provider_call(
+                    venue, stage, "success", monotonic() - started, source_id, row_id
+                )
                 return payload, None
             except ProviderRateLimitedError:
                 self._record_lane_operation(lane, venue, stage, HEALTH_RATE_LIMITED)
+                self._note_provider_call(
+                    venue, stage, "rate_limit", monotonic() - started, source_id, row_id
+                )
                 return None, PriceEngineItemStatus.RETRY_WAIT
             except TimeoutError:
                 self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
+                self._note_provider_call(
+                    venue, stage, "timeout", monotonic() - started, source_id, row_id
+                )
                 return None, PriceEngineItemStatus.RETRY_WAIT
 
         async def _close_unused() -> None:
@@ -1783,36 +1907,85 @@ class CataloguePriceEngine:
             await _close_unused()
             if access.venue_saturated(venue):
                 self._record_lane_operation(lane, venue, stage, PROVIDER_CAPACITY_SATURATED)
+                self._note_provider_call(
+                    venue, stage, "capacity_deferred", 0, source_id, row_id, slot_wait_s=0
+                )
                 return None, PriceEngineItemStatus.DEFERRED
+            self._note_provider_call(
+                venue, stage, "not_started", 0, source_id, row_id, slot_wait_s=0
+            )
             return None, PriceEngineItemStatus.NOT_STARTED
+        slot_started = monotonic()
         async with access.acquire_wait(
             venue, lane=lane, stage=stage, timeout=slot_wait, work=work
         ) as lease:
+            slot_wait_s = monotonic() - slot_started
             if lease is None:
                 await _close_unused()
                 if access.venue_saturated(venue):
                     self._record_lane_operation(lane, venue, stage, PROVIDER_CAPACITY_SATURATED)
+                    self._note_provider_call(
+                        venue,
+                        stage,
+                        "capacity_deferred",
+                        0,
+                        source_id,
+                        row_id,
+                        slot_wait_s=slot_wait_s,
+                    )
                     return None, PriceEngineItemStatus.DEFERRED
+                self._note_provider_call(
+                    venue, stage, "not_started", 0, source_id, row_id, slot_wait_s=slot_wait_s
+                )
                 return None, PriceEngineItemStatus.NOT_STARTED
             inflight = access.snapshot().inflight.get(venue.value, 0)
             self._peak_held_slots[venue.value] = max(
                 self._peak_held_slots.get(venue.value, 0), inflight
             )
+            diagnostics = _SLICE_DIAGNOSTICS.get()
+            if diagnostics is not None:
+                diagnostics.note_inflight(venue.value, inflight)
+            io_started = monotonic()
             task = asyncio.create_task(coro)
             done, _pending = await asyncio.wait({task}, timeout=timeout)
+            io_s = monotonic() - io_started
             if task in done:
                 try:
                     payload = task.result()
                     self._record_lane_operation(lane, venue, stage, HEALTH_OK)
+                    self._note_provider_call(
+                        venue,
+                        stage,
+                        "success",
+                        io_s,
+                        source_id,
+                        row_id,
+                        slot_wait_s=slot_wait_s,
+                    )
                     return payload, None
                 except MatchbookMarketGoneError:
+                    self._note_provider_call(
+                        venue, stage, "error", io_s, source_id, row_id, slot_wait_s=slot_wait_s
+                    )
                     raise
                 except ProviderRateLimitedError as exc:
                     access.observe_rate_limit(venue, exc.retry_after_seconds)
                     self._record_lane_operation(lane, venue, stage, HEALTH_RATE_LIMITED)
+                    self._note_provider_call(
+                        venue,
+                        stage,
+                        "rate_limit",
+                        io_s,
+                        source_id,
+                        row_id,
+                        slot_wait_s=slot_wait_s,
+                    )
                     return None, PriceEngineItemStatus.RETRY_WAIT
                 except Exception:
                     self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
+                    self._note_provider_call(
+                        venue, stage, "error", io_s, source_id, row_id, slot_wait_s=slot_wait_s
+                    )
                     return None, PriceEngineItemStatus.RETRY_WAIT
             task.cancel()
             held = False
@@ -1821,7 +1994,34 @@ class CataloguePriceEngine:
             if not held and not task.done():
                 task.add_done_callback(lambda done_task: done_task.exception() if done_task.done() else None)
             self._record_lane_operation(lane, venue, stage, HEALTH_MARKET_TIMEOUT)
+            self._note_provider_call(
+                venue, stage, "timeout", io_s, source_id, row_id, slot_wait_s=slot_wait_s
+            )
             return None, PriceEngineItemStatus.RETRY_WAIT
+
+    def _note_provider_call(
+        self,
+        venue: VenueName,
+        stage: str,
+        outcome: str,
+        elapsed_s: float,
+        source_id: str,
+        row_id: str | None,
+        *,
+        slot_wait_s: float = 0.0,
+    ) -> None:
+        diagnostics = _SLICE_DIAGNOSTICS.get()
+        if diagnostics is None:
+            return
+        diagnostics.note_provider(
+            venue=venue.value,
+            stage=stage,
+            outcome=outcome,
+            elapsed_ms=max(0, int(elapsed_s * 1000)),
+            slot_wait_ms=max(0, int(slot_wait_s * 1000)),
+            source_id=source_id,
+            row_id=row_id,
+        )
 
     def _finalize_provider_status(
         self,
@@ -1972,10 +2172,15 @@ class CataloguePriceEngine:
         result: PriceEngineSliceResult,
     ) -> None:
         row_id = runtime.identity.catalogue_row_id
+        diagnostics = _SLICE_DIAGNOSTICS.get()
         if outcome is PriceEngineItemStatus.EVALUATED:
             result.evaluated.append(row_id)
             return
         if outcome is PriceEngineItemStatus.RETRY_WAIT:
+            if diagnostics is not None:
+                diagnostics.note_terminal(
+                    "retry_wait", row_id, runtime.last_error_detail
+                )
             result.retry_wait.append(row_id)
             result.issues.append(
                 CollectorIssue(
@@ -1987,10 +2192,14 @@ class CataloguePriceEngine:
             return
         if outcome is PriceEngineItemStatus.NOT_STARTED:
             runtime.status = PriceEngineItemStatus.NOT_STARTED
+            if diagnostics is not None:
+                diagnostics.note_terminal("not_started", row_id, NOT_STARTED_THIS_CADENCE)
             result.not_started.append(row_id)
             return
         if outcome is PriceEngineItemStatus.DEFERRED:
             runtime.status = PriceEngineItemStatus.DEFERRED
+            if diagnostics is not None:
+                diagnostics.note_terminal("deferred", row_id, PROVIDER_CAPACITY_SATURATED)
             result.deferred.append(row_id)
             result.provider_capacity_saturated = True
             result.issues.append(
@@ -2002,6 +2211,10 @@ class CataloguePriceEngine:
             )
             return
         if outcome is PriceEngineItemStatus.REVALIDATION_NEEDED:
+            if diagnostics is not None:
+                diagnostics.note_terminal(
+                    "revalidation", row_id, runtime.last_error_detail
+                )
             result.revalidation.append(row_id)
             result.issues.append(
                 CollectorIssue(
@@ -2022,6 +2235,8 @@ class CataloguePriceEngine:
                 )
             )
             return
+        if diagnostics is not None:
+            diagnostics.note_terminal("failed", row_id, runtime.last_error_detail)
         result.failed.append(row_id)
 
     def _fee_snapshot_payload(self, identity: DerivedPriceEngineItem) -> dict[str, Any] | None:
