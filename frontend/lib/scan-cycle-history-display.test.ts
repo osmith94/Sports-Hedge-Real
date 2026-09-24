@@ -6,10 +6,14 @@ import { fileURLToPath } from "node:url";
 
 import { PaperScanCycleRecord } from "./api";
 import {
+  SCAN_CYCLE_COPY,
   SCAN_CYCLE_EMPTY,
+  SCAN_CYCLE_HEADERS,
   SCAN_CYCLE_TITLE,
   SCAN_CYCLE_UNAVAILABLE,
   scanCycleBadgeLabel,
+  scanCycleCoverageLabel,
+  scanCycleDiagnosticLines,
   scanCycleHealthLabel,
   scanCycleLaneLabel,
   scanCycleLatestSummary,
@@ -45,6 +49,7 @@ describe("scan cycle history presentation", () => {
   it("renders a zero-decision completed cycle without synthesizing market rows", () => {
     const row = scanCycleRow(cycle({ paper_decision_count: 0, qualifying_arb_count: 0, not_evaluated_count: 0 }));
     assert.equal(row.laneLabel, "HOT pricing");
+    assert.equal(row.fixtureLabel, "3 catalogue rows");
     assert.equal(row.paperDecisionLabel, "0");
     assert.equal(row.qualifyingLabel, "0");
     assert.equal(row.healthLabel, "venues ok");
@@ -52,10 +57,12 @@ describe("scan cycle history presentation", () => {
 
   it("keeps HOT and UNIVERSE cycle rows distinct", () => {
     const rows = scanCycleRows([
-      cycle({ cycle_id: "universe-1", scan_lane: "universe", completed_at: "2026-09-16T18:01:00Z" }),
+      cycle({ cycle_id: "universe-1", scan_lane: "universe", completed_at: "2026-09-16T18:01:00Z", fixture_count: 104 }),
       cycle({ cycle_id: "hot-1", scan_lane: "hot" }),
     ]);
     assert.deepEqual(rows.map((item) => item.laneLabel), ["UNIVERSE discovery", "HOT pricing"]);
+    assert.equal(rows[0].fixtureLabel, "104 fixtures");
+    assert.equal(rows[1].fixtureLabel, "3 catalogue rows");
     assert.equal(scanCycleLaneLabel("hot"), "HOT pricing");
     assert.equal(scanCycleLaneLabel("background"), "BACKGROUND pricing");
     assert.equal(scanCycleLaneLabel("universe"), "UNIVERSE discovery");
@@ -137,6 +144,11 @@ describe("scan cycle history presentation", () => {
       scanCycleLatestSummary(true, [cycle({ not_evaluated_count: 0 })]),
       "latest HOT pricing · venues ok",
     );
+    assert.equal(scanCycleCoverageLabel(cycle({ scan_lane: "background", fixture_count: 491 })), "491 catalogue rows");
+    assert.equal(scanCycleCoverageLabel(cycle({ scan_lane: "hot", fixture_count: 1 })), "1 catalogue row");
+    assert.equal(scanCycleCoverageLabel(cycle({ scan_lane: "universe", fixture_count: 1 })), "1 fixture");
+    assert.equal(SCAN_CYCLE_HEADERS[3], "Coverage");
+    assert.match(SCAN_CYCLE_COPY, /catalogue\/market rows/);
     assert.match(SCAN_CYCLE_EMPTY, /Zero-decision cycles still appear/);
     assert.match(SCAN_CYCLE_UNAVAILABLE, /No fabricated cycles/);
   });
@@ -178,5 +190,70 @@ describe("scan cycle history console wiring", () => {
     assert.doesNotMatch(panel, /getPaperScans/);
     assert.doesNotMatch(panel, /PaperScanRecord/);
     assert.match(page, /market-decision audit/);
+    assert.match(panel, /SCAN_CYCLE_REPORT_ACTION/);
+    assert.match(api, /\/paper\/scan-cycle-report/);
+  });
+
+  it("formats terminal splits without treating the diagnostic as a live book", () => {
+    const lines = scanCycleDiagnosticLines({
+      note: "Cycle diagnostic counters from this completed scan. Not live quotes.",
+      lane: "background",
+      wall_ms: 35400,
+      due: 491,
+      considered: 491,
+      evaluations_per_second: 0.11,
+      terminals: {
+        evaluated: 4,
+        skipped: 0,
+        revalidation: 0,
+        failed: 0,
+        retry_wait: 3,
+        deferred: 12,
+        not_started: 472,
+      },
+      leftover_collapsed: 487,
+      decisions: 4,
+      qualifying: 0,
+      promoted_hot: 0,
+      provider_io_ms_sum: 32000,
+      slot_wait_ms_sum: 4000,
+      local_evaluate_ms_sum: 40,
+      saved_provider_calls: 0,
+      coalesced_provider_calls: 0,
+      repeated_exact_id_calls: 2,
+      distinct_exact_ids: 10,
+      call_shape: {
+        sequential_within_item: false,
+        pricing_call_shape: "provider_centric_staged_exact_id",
+        worker_limit: 8,
+        explicit_slice_wall: false,
+        provider_limits: { matchbook: 4, kalshi: 4 },
+        provider_calls: 7,
+      },
+      stages: [
+        {
+          venue: "kalshi",
+          stage: "order_book",
+          count: 4,
+          avg_ms: 8000,
+          p50_ms: 8000,
+          p95_ms: 8000,
+          max_ms: 8000,
+          success: 1,
+          timeout: 3,
+          rate_limit: 0,
+          capacity_deferred: 0,
+        },
+      ],
+    });
+    const text = lines.join("\n");
+    assert.match(text, /Not live quotes/);
+    assert.match(text, /not started 472/);
+    assert.match(text, /Retry wait 3/);
+    assert.match(text, /capacity deferred 12/);
+    assert.match(text, /explicit slice wall no/);
+    assert.match(text, /sequential within item no/);
+    assert.match(text, /kalshi order_book/);
+    assert.doesNotMatch(text, /yes_dollars|orderbook_fp|"runners"/);
   });
 });

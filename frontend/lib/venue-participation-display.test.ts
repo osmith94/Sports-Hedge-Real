@@ -149,12 +149,12 @@ describe("Wave N4 venue participation honesty", () => {
     });
     const detail = fastScanCopy(live, now).detail;
     assert.match(detail, /completed 57s ago/);
-    assert.match(detail, /next due in 0s/);
+    assert.match(detail, /next scan in 0s/);
     assert.match(detail, /ran 4.1s/);
     assert.doesNotMatch(detail, /^57s ago ·/);
     const stamped = dualScanStatusLines(live, null).join(" ");
     assert.match(stamped, /completed at 2026-09-16T12:00:00Z/);
-    assert.match(stamped, /next due 2026-09-16T12:00:30Z/);
+    assert.match(stamped, /next scan 2026-09-16T12:00:30Z/);
     assert.doesNotMatch(stamped, /57s ago/);
   });
 

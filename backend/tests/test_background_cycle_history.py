@@ -101,6 +101,7 @@ def test_background_price_engine_report_uses_actual_slice_counts_only() -> None:
     assert report.scan_diagnostics["evaluated_count"] == 1
     assert report.scan_diagnostics["not_evaluated_count"] == 1
     assert report.scan_diagnostics["fixture_count"] == 2
+    assert report.scan_diagnostics["count_unit"] == "catalogue_rows"
     assert report.scan_diagnostics["price_engine"] is True
     assert report.operator_summary == OPERATOR_BACKGROUND_PRICING_LABEL
     row = build_paper_scan_cycle_record(report, scan_lane="background")

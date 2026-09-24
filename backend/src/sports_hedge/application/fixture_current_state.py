@@ -176,6 +176,7 @@ class FixtureCurrentStateStore:
         self._has_collection = False
         self._open_universe_generation_id: int | None = None
         self._universe_generation_closed_at_by_id: dict[int, datetime] = {}
+        self._execution_miss_hot_until: dict[str, datetime] = {}
 
     def clear(self, *, keep_tombstones: bool = False, keep_universe_generation: bool = False) -> None:
         with self._lock:
@@ -191,6 +192,7 @@ class FixtureCurrentStateStore:
             if not keep_universe_generation:
                 self._open_universe_generation_id = None
                 self._universe_generation_closed_at_by_id = {}
+            self._execution_miss_hot_until = {}
 
     def drop_universe_working_set(
         self,
@@ -595,6 +597,7 @@ class FixtureCurrentStateStore:
                 qualifying_promotion = False
                 surveillance_promotion = False
                 net_proximity_promotion = False
+                execution_miss_promotion = False
                 net_proximity_distance_pp = None
                 if membership is ScanLane.HOT and lifecycle is ScanLane.UNIVERSE:
                     qualifying_promotion = current_slots_prove_qualifying_opportunity(
@@ -619,6 +622,12 @@ class FixtureCurrentStateStore:
                             **market_kwargs,
                         )
                     )
+                    execution_miss_promotion = (
+                        not qualifying_promotion
+                        and not net_proximity_promotion
+                        and not surveillance_promotion
+                        and self._execution_miss_hot_active(fixture.canonical_event_id, now)
+                    )
                 rows.append(
                     fixture.model_copy(
                         update={
@@ -639,6 +648,7 @@ class FixtureCurrentStateStore:
                                 surveillance_promotion=surveillance_promotion,
                                 net_proximity_promotion=net_proximity_promotion,
                                 net_proximity_distance_pp=net_proximity_distance_pp,
+                                execution_miss_promotion=execution_miss_promotion,
                                 hot_horizon=hot_horizon,
                             ),
                         }
@@ -964,12 +974,38 @@ class FixtureCurrentStateStore:
         lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
         if lifecycle is ScanLane.DROP or lifecycle is ScanLane.HOT:
             return lifecycle
+        if self._execution_miss_hot_active(fixture.canonical_event_id, now):
+            return ScanLane.HOT
         slots = record.live_market_slots()
         if current_slots_prove_qualifying_opportunity(slots, now=now, **market_kwargs):
             return ScanLane.HOT
         if current_slots_prove_surveillance_opportunity(slots, now=now, **market_kwargs):
             return ScanLane.HOT
         return lifecycle
+
+    def note_execution_miss_hot(self, canonical_event_id: str, *, until: datetime) -> None:
+        """Remember a zero-fill execution-miss HOT window. Not a durable queue."""
+
+        with self._lock:
+            self._execution_miss_hot_until[str(canonical_event_id)] = until
+
+    def clear_execution_miss_hot(self, canonical_event_id: str | None = None) -> None:
+        with self._lock:
+            if canonical_event_id is None:
+                self._execution_miss_hot_until.clear()
+                return
+            self._execution_miss_hot_until.pop(str(canonical_event_id), None)
+
+    def _execution_miss_hot_active(self, canonical_event_id: str, now: datetime) -> bool:
+        with self._lock:
+            until = self._execution_miss_hot_until.get(str(canonical_event_id))
+            if until is None:
+                return False
+            evaluated = require_aware_instant(now, "now")
+            if evaluated < until:
+                return True
+            self._execution_miss_hot_until.pop(str(canonical_event_id), None)
+            return False
 
     def _merge_scheduling_identity(self, target_id: str, fixture: Any) -> str:
         """Record a diagnostic HOT scheduling token. Never absorbs canonical identity.

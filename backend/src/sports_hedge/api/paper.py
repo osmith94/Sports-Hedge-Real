@@ -24,6 +24,10 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
     acknowledge_task_cancellation,
 )
+from sports_hedge.application.cycle_diagnostics import (
+    DIAGNOSTIC_DATA_NOTE,
+    stored_cycle_diagnostic,
+)
 from sports_hedge.application.demo_walkthrough import (
     DemoCloseRequest,
     DemoResetRequest,
@@ -51,6 +55,7 @@ from sports_hedge.application.price_engine import (
     HotPromotionFact,
     PriceEnginePriority,
 )
+from sports_hedge.arbitrage.watchlist.service import _opportunity_id
 from sports_hedge.application.scanner_phase6 import (
     DATA_CLASS_OWNER_LIVE_OBSERVATION,
     ScannerValidationSnapshot,
@@ -70,6 +75,7 @@ from sports_hedge.application.scan_cycle_audit import (
     BACKGROUND_CYCLE_LANE,
     build_background_price_engine_cycle_report,
     build_paper_scan_cycle_record,
+    price_engine_slice_count_fields,
 )
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.venue_degradation_incident import FIRST_CLASS_VENUES
@@ -484,6 +490,56 @@ def recent_scan_cycles(
 ) -> list[PaperScanCycleRecord]:
     """Newest-first completed HOT/UNIVERSE refresh cycles. Not market-decision rows."""
     return repository.list_cycles(limit=limit)
+
+
+class ScanCycleDiagnosticResponse(BaseModel):
+    available: bool
+    paper_only: bool = True
+    places_orders: bool = False
+    execution_enabled: bool = False
+    data_kind: str = "scan_cycle_diagnostic"
+    cycle_id: str
+    report: dict[str, Any] | None = None
+    note: str = DIAGNOSTIC_DATA_NOTE
+
+
+@router.get("/scan-cycle-report", response_model=ScanCycleDiagnosticResponse)
+def scan_cycle_report(
+    cycle_id: str = Query(min_length=1, max_length=400),
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> ScanCycleDiagnosticResponse:
+    """Read one stored cycle diagnostic. Does not call venues or start a scan."""
+
+    report = repository.get_cycle_diagnostic(cycle_id)
+    return ScanCycleDiagnosticResponse(
+        available=report is not None,
+        cycle_id=cycle_id,
+        report=report,
+        note=DIAGNOSTIC_DATA_NOTE
+        if report is not None
+        else (
+            "No stored diagnostic for this cycle. Older cycles keep the short "
+            "summary only. Nothing was fabricated."
+        ),
+    )
+
+
+def _persist_cycle_diagnostic(
+    audit: SqlitePaperScanRepository,
+    report: CollectionReport,
+    record: Any,
+) -> None:
+    """One compact diagnostic row. Failure must not drop the cycle summary."""
+
+    try:
+        audit.append_cycle_diagnostic(
+            cycle_id=record.cycle_id,
+            scan_lane=record.scan_lane,
+            completed_at=record.completed_at,
+            report=stored_cycle_diagnostic(report),
+        )
+    except Exception:
+        LOGGER.exception("cycle diagnostic persist failed cycle_id=%s", record.cycle_id)
 
 
 @router.get("/treasury", response_model=PaperTreasurySnapshot)
@@ -1012,15 +1068,20 @@ def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Persist Min Net Arb, Outright Min Net Arb, Max Risk, HOT/BACKGROUND/UNIVERSE cadence and max allocated per trade. Does not scan or call providers."""
+    """Persist scanner thresholds and HOT/BACKGROUND/UNIVERSE timing. Does not scan or call providers."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scan_settings(
         min_net_edge=update.min_net_edge,
         max_execution_risk=update.max_execution_risk,
         hot_cadence_seconds=update.hot_cadence_seconds,
+        hot_scan_interval_seconds=update.hot_scan_interval_seconds,
+        hot_reprice_after_seconds=update.hot_reprice_after_seconds,
         background_cadence_seconds=update.background_cadence_seconds,
+        background_scan_interval_seconds=update.background_scan_interval_seconds,
+        background_reprice_after_seconds=update.background_reprice_after_seconds,
         universe_cadence_seconds=update.universe_cadence_seconds,
+        universe_discovery_refresh_seconds=update.universe_discovery_refresh_seconds,
         max_allocated_per_trade_gbp=update.max_allocated_per_trade_gbp,
         **(
             {"outright_min_net_edge": update.outright_min_net_edge}
@@ -1494,9 +1555,9 @@ def _persist_collection_report(
     watchlist: WatchlistService,
     scan_lane: ScanLane | str | None = None,
 ) -> None:
-    audit.append_cycle(
-        build_paper_scan_cycle_record(report, scan_lane=scan_lane or report.scan_lane)
-    )
+    record = build_paper_scan_cycle_record(report, scan_lane=scan_lane or report.scan_lane)
+    audit.append_cycle(record)
+    _persist_cycle_diagnostic(audit, report, record)
     operations = get_paper_operations_service(watchlist, get_priority_alert_service())
     already_captured = bool(
         (report.scan_diagnostics or {}).get(PRICE_ENGINE_ITEM_COMPLETION_CAPTURE)
@@ -1599,10 +1660,13 @@ async def persist_background_price_cycle_history(
     position management, or call venues/discovery.
     """
 
-    await asyncio.to_thread(
-        audit.append_cycle,
-        build_paper_scan_cycle_record(report, scan_lane=BACKGROUND_CYCLE_LANE),
-    )
+    record = build_paper_scan_cycle_record(report, scan_lane=BACKGROUND_CYCLE_LANE)
+
+    def _write() -> None:
+        audit.append_cycle(record)
+        _persist_cycle_diagnostic(audit, report, record)
+
+    await asyncio.to_thread(_write)
 
 
 async def persist_scheduled_collection_report(
@@ -1786,9 +1850,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 scan_diagnostics={
                     "price_engine": True,
                     "priority": PriceEnginePriority.HOT.value,
-                    "evaluated": list(result.evaluated),
-                    "deferred": list(result.deferred),
-                    "not_started": list(result.not_started),
+                    **price_engine_slice_count_fields(result),
+                    **(
+                        {"cycle_diagnostic": dict(result.diagnostic)}
+                        if isinstance(getattr(result, "diagnostic", None), dict)
+                        else {}
+                    ),
                     "legacy_hot_collector": False,
                     PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
                     "persist_failures": list(result.persist_failures),
@@ -2268,6 +2335,21 @@ def bind_price_engine_item_persist(
             watchlist=watchlist,
             pricing_lane=_pricing_lane_from_runtime(runtime),
         )
+        if decision.canonical_market_id:
+            operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+            miss = operations.consume_execution_miss(
+                _opportunity_id(decision.canonical_market_id)
+            )
+            if miss is not None and miss.retains_hot and miss.sticky_until is not None:
+                engine.note_recently_qualifying_execution_miss(
+                    canonical_event_id=runtime.identity.canonical_event_id,
+                    catalogue_row_id=runtime.identity.catalogue_row_id,
+                    content_version=runtime.identity.content_version,
+                    occurred_at=miss.occurred_at,
+                    sticky_until=miss.sticky_until,
+                    zero_fill_reason=miss.reason,
+                    pricing_lane=miss.pricing_lane or _pricing_lane_from_runtime(runtime),
+                )
         engine.schedule_observability(
             lambda captured=history, item=decision: record_price_engine_item_audit(
                 item, audit=audit, history=captured
@@ -2285,6 +2367,7 @@ def bind_price_engine_item_persist(
             current_net_edge=fact.current_net_edge,
             distance_to_trigger_pp=fact.distance_to_trigger_pp,
             opportunity_id=fact.opportunity_id,
+            detail=fact.detail,
         )
 
     engine.on_item_decision = _handoff

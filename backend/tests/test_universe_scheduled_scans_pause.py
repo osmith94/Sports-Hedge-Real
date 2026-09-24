@@ -66,7 +66,7 @@ def test_paused_scheduler_does_not_start_periodic_universe_after_cadence_expiry(
     public = coordinator.public_status()
     assert public.universe_scans_paused is True
     assert public.universe.next_due_at is None
-    assert public.universe.cadence_seconds == 1800
+    assert public.universe.cadence_seconds == 3600
     bind_runtime_operator_scanner_settings_store(None)
     store.close()
 

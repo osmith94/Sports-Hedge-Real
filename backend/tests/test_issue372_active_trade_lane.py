@@ -522,14 +522,19 @@ def test_clean_install_defaults_and_saved_overrides(tmp_path: Path) -> None:
     assert env.min_net_edge == Decimal("0.01")
     assert env.max_execution_risk == 60
     assert env.hot_cadence_seconds == 30
-    assert env.background_cadence_seconds == 90
+    assert env.hot_scan_interval_seconds == 10
+    assert env.background_cadence_seconds == 600
+    assert env.background_scan_interval_seconds == 10
+    assert env.universe_discovery_refresh_seconds == 3600
     assert env.max_allocated_per_trade_gbp == Decimal("1000")
     store = SqliteOperatorScannerSettingsStore(tmp_path / "defaults.sqlite")
     resolved = resolve_operator_scanner_settings(store)
     assert resolved.min_net_edge == Decimal("0.01")
     assert resolved.max_execution_risk == 60
     assert resolved.hot_cadence_seconds == 30
-    assert resolved.background_cadence_seconds == 90
+    assert resolved.hot_scan_interval_seconds == 10
+    assert resolved.background_cadence_seconds == 600
+    assert resolved.background_scan_interval_seconds == 10
     assert resolved.max_allocated_per_trade_gbp == Decimal("1000")
     saved = store.save_settings(
         min_net_edge=Decimal("0.02"),
@@ -544,7 +549,8 @@ def test_clean_install_defaults_and_saved_overrides(tmp_path: Path) -> None:
     assert loaded.min_net_edge == Decimal("0.02")
     assert loaded.max_execution_risk == 40
     assert loaded.hot_cadence_seconds == 45
-    assert loaded.background_cadence_seconds == 90
+    assert loaded.background_cadence_seconds == 600
+    assert loaded.background_scan_interval_seconds == 10
     assert loaded.max_allocated_per_trade_gbp == Decimal("750")
     restarted.close()
 

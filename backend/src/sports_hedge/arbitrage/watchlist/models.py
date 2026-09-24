@@ -80,6 +80,7 @@ class LifecycleEventType(StrEnum):
     PAPER_FILL_PARTIAL = "paper_fill_partial"
     PAPER_FILL_COMPLETE = "paper_fill_complete"
     PAPER_FILL_REJECTED = "paper_fill_rejected"
+    ZERO_FILL_EXECUTION_MISS = "zero_fill_execution_miss"
     REJECTED_STALE_QUOTE = "rejected_stale_quote"
     REJECTED_INSUFFICIENT_DEPTH = "rejected_insufficient_depth"
     REJECTED_SEMANTICS = "rejected_semantics"

@@ -509,6 +509,9 @@ export type FixtureDetailReadModel = {
 
 export type LaneRefreshStatus = {
   cadence_seconds: number;
+  scan_interval_seconds?: number | null;
+  reprice_after_seconds?: number | null;
+  discovery_refresh_seconds?: number | null;
   cycle_timeout_seconds?: number | null;
   generation_budget_seconds?: number | null;
   generation_work_used_s?: number;
@@ -717,8 +720,13 @@ export type OperatorScannerSettings = {
   min_net_edge: string;
   outright_min_net_edge?: string | null;
   max_execution_risk: number;
-  hot_cadence_seconds: number;
-  background_cadence_seconds: number;
+  hot_scan_interval_seconds?: number;
+  hot_reprice_after_seconds?: number;
+  background_scan_interval_seconds?: number;
+  background_reprice_after_seconds?: number;
+  universe_discovery_refresh_seconds?: number;
+  hot_cadence_seconds?: number;
+  background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
   scanner_stopped: boolean;
@@ -732,8 +740,13 @@ export type OperatorScannerSettingsUpdate = {
   min_net_edge: string;
   outright_min_net_edge?: string | null;
   max_execution_risk: number;
-  hot_cadence_seconds: number;
-  background_cadence_seconds: number;
+  hot_scan_interval_seconds?: number;
+  hot_reprice_after_seconds?: number;
+  background_scan_interval_seconds?: number;
+  background_reprice_after_seconds?: number;
+  universe_discovery_refresh_seconds?: number;
+  hot_cadence_seconds?: number;
+  background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
 };
@@ -1115,6 +1128,74 @@ export function getPaperScans(query = "limit=100"): Promise<PaperScanRecord[]> {
 
 export function getPaperScanCycles(query = "limit=100"): Promise<PaperScanCycleRecord[]> {
   return request(`/paper/scan-cycles${query ? `?${query}` : ""}`);
+}
+
+export type ScanCycleDiagnosticStage = {
+  venue?: string;
+  stage?: string;
+  count?: number;
+  total_ms?: number;
+  avg_ms?: number;
+  p50_ms?: number | null;
+  p95_ms?: number | null;
+  max_ms?: number | null;
+  success?: number;
+  timeout?: number;
+  rate_limit?: number;
+  capacity_deferred?: number;
+  not_started?: number;
+  error?: number;
+};
+
+export type ScanCycleDiagnosticReport = {
+  data_kind?: string;
+  lane?: string;
+  note?: string;
+  wall_ms?: number;
+  due?: number;
+  considered?: number;
+  terminals?: Record<string, number>;
+  leftover_collapsed?: number;
+  decisions?: number;
+  qualifying?: number;
+  promoted_hot?: number;
+  evaluations_per_second?: number;
+  provider_io_ms_sum?: number;
+  slot_wait_ms_sum?: number;
+  local_evaluate_ms_sum?: number;
+  timing_note?: string;
+  saved_provider_calls?: number;
+  coalesced_provider_calls?: number;
+  repeated_exact_id_calls?: number;
+  distinct_exact_ids?: number;
+  call_shape?: {
+    sequential_within_item?: boolean;
+    pricing_call_shape?: string;
+    worker_limit?: number;
+    explicit_slice_wall?: boolean;
+    slice_wall_seconds?: number | null;
+    provider_limits?: Record<string, number>;
+    provider_calls?: number;
+  };
+  stages?: ScanCycleDiagnosticStage[];
+  slowest?: Array<Record<string, unknown>>;
+  samples?: Record<string, Array<{ row_id?: string; reason?: string }>>;
+  worker_errors?: Array<{ type?: string; message?: string }>;
+};
+
+export type ScanCycleDiagnosticResponse = {
+  available: boolean;
+  paper_only?: boolean;
+  places_orders?: boolean;
+  data_kind?: string;
+  cycle_id: string;
+  report?: ScanCycleDiagnosticReport | null;
+  note?: string;
+};
+
+export function getPaperScanCycleReport(cycleId: string): Promise<ScanCycleDiagnosticResponse> {
+  const query = new URLSearchParams({ cycle_id: cycleId });
+  return request(`/paper/scan-cycle-report?${query.toString()}`);
 }
 
 export function getPaperScanSummary(query = ""): Promise<PaperScanSummary> {

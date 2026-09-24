@@ -39,22 +39,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_fresh_install_resolves_universe_cadence_to_1800s(tmp_path: Path) -> None:
     settings = Settings()
-    assert settings.paper_universe_discovery_interval_seconds == 1800
-    assert DEFAULT_UNIVERSE_CADENCE_SECONDS == 1800
-    assert DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS == 1800
+    assert settings.paper_universe_discovery_interval_seconds == 3600
+    assert DEFAULT_UNIVERSE_CADENCE_SECONDS == 3600
+    assert DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS == 3600
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     assert settings.paper_universe_worker_cooldown_seconds == 8
     assert settings.paper_scan_universe_generation_budget_seconds == 150
     assert settings.paper_universe_current_state_ttl_seconds == 360
     store = SqliteOperatorScannerSettingsStore(tmp_path / "empty.sqlite")
     resolved = resolve_operator_scanner_settings(store, settings)
-    assert resolved.universe_cadence_seconds == 1800
+    assert resolved.universe_discovery_refresh_seconds == 3600
     assert resolved.source == "env_default"
     coordinator = LiveRefreshCoordinator(operator_settings_store=store)
     coordinator.configure_from_settings(settings)
-    assert coordinator.status.universe.cadence_seconds == 1800
+    assert coordinator.status.universe.cadence_seconds == 3600
     assert coordinator.status.operator_settings is not None
-    assert coordinator.status.operator_settings.universe_cadence_seconds == 1800
+    assert coordinator.status.operator_settings.universe_discovery_refresh_seconds == 3600
     store.close()
 
 
@@ -104,8 +104,10 @@ def test_persisted_universe_cadence_is_used_by_scheduler_without_restart(
         assert due.generation_resume is False
         load = coordinator.public_status().system_load
         assert load.universe.cadence_seconds == 900
-        assert coordinator.status.hot.cadence_seconds == 30
-        assert coordinator.status.background.cadence_seconds == 90
+        assert coordinator.status.hot.reprice_after_seconds == 30
+        assert coordinator.status.hot.scan_interval_seconds == 10
+        assert coordinator.status.background.reprice_after_seconds == 90
+        assert coordinator.status.background.scan_interval_seconds == 10
     finally:
         bind_runtime_operator_scanner_settings_store(None)
         store.close()
@@ -132,8 +134,10 @@ def test_universe_cadence_survives_store_reopen(tmp_path: Path) -> None:
     coordinator = LiveRefreshCoordinator(operator_settings_store=restarted)
     coordinator.configure_from_settings()
     assert coordinator.status.universe.cadence_seconds == 2400
-    assert coordinator.status.hot.cadence_seconds == 20
-    assert coordinator.status.background.cadence_seconds == 90
+    assert coordinator.status.hot.reprice_after_seconds == 20
+    assert coordinator.status.hot.scan_interval_seconds == 10
+    assert coordinator.status.background.reprice_after_seconds == 90
+    assert coordinator.status.background.scan_interval_seconds == 10
     restarted.close()
 
 
@@ -161,8 +165,10 @@ def test_put_get_contract_exposes_universe_cadence(tmp_path: Path) -> None:
         live = client.get("/paper/live-refresh").json()
         assert live["operator_settings"]["universe_cadence_seconds"] == 1200
         assert live["universe"]["cadence_seconds"] == 1200
-        assert live["hot"]["cadence_seconds"] == 30
-        assert live["background"]["cadence_seconds"] == 90
+        assert live["hot"]["reprice_after_seconds"] == 30
+        assert live["hot"]["scan_interval_seconds"] == 10
+        assert live["background"]["reprice_after_seconds"] == 90
+        assert live["background"]["scan_interval_seconds"] == 10
     finally:
         _unbind(coordinator, store)
 
@@ -297,7 +303,8 @@ def test_changing_universe_cadence_shifts_next_due_without_running_scan(tmp_path
         body = response.json()
         assert body["operator_settings"]["universe_cadence_seconds"] == 1200
         assert body["universe"]["cadence_seconds"] == 1200
-        assert body["hot"]["cadence_seconds"] == 30
+        assert body["hot"]["reprice_after_seconds"] == 30
+        assert body["hot"]["scan_interval_seconds"] == 10
         assert ticks == []
         put_src = inspect.getsource(paper_api.put_operator_scanner_settings)
         assert "collect_and_scan" not in put_src
@@ -435,18 +442,18 @@ def test_frontend_exposes_universe_cadence_beside_hot_and_background() -> None:
         encoding="utf-8"
     )
     api = (REPO_ROOT / "frontend" / "lib" / "api.ts").read_text(encoding="utf-8")
-    assert "UNIVERSE cadence s" in scan
-    assert "HOT cadence s" in scan
-    assert "BACKGROUND cadence s" in scan
-    assert scan.index("HOT cadence s") < scan.index("BACKGROUND cadence s")
-    assert scan.index("BACKGROUND cadence s") < scan.index("UNIVERSE cadence s")
-    assert "universe_cadence_seconds: universeCadence" in scan
-    assert "clampUniverseCadenceSeconds" in scan
+    assert "UNIVERSE discovery refresh s" in scan
+    assert "HOT scan interval s" in scan
+    assert "BACKGROUND scan interval s" in scan
+    assert scan.index("HOT scan interval s") < scan.index("BACKGROUND scan interval s")
+    assert scan.index("BACKGROUND reprice after s") < scan.index("UNIVERSE discovery refresh s")
+    assert "universe_discovery_refresh_seconds: universeRefresh" in scan
+    assert "clampUniverseDiscoveryRefreshSeconds" in scan
     assert "Math.min(3600, Math.max(60" in scan
-    assert "DEFAULT_UNIVERSE_CADENCE_SECONDS = 1800" in scan
+    assert "DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS = 3600" in scan
     assert "does not trigger a scan" in scan
-    assert "universe_cadence_seconds" in api
-    assert DEFAULT_UNIVERSE_CADENCE_SECONDS == 1800
+    assert "universe_discovery_refresh_seconds" in api
+    assert DEFAULT_UNIVERSE_CADENCE_SECONDS == 3600
     assert "request_universe_run_now" not in (REPO_ROOT / "backend/src/sports_hedge/api/paper.py").read_text(
         encoding="utf-8"
     ).split("def put_operator_scanner_settings", 1)[1].split("def stop_paper_scanner", 1)[0]

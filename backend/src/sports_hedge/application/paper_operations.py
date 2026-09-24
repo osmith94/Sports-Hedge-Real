@@ -129,6 +129,15 @@ from sports_hedge.paper.provider_identity import (
     recover_persisted_catalogue_identity,
 )
 from sports_hedge.paper.settlement import PaperSettlementError, compute_paper_settlement
+from sports_hedge.lifecycle.execution_miss import (
+    REASON_RECENTLY_QUALIFYING_EXECUTION_MISS,
+    RETRYABLE_ZERO_FILL_REASONS,
+    ZeroFillExecutionMiss,
+    ZERO_FILL_PRICE_MOVEMENT,
+    classify_zero_fill_fact,
+    execution_miss_sticky_until,
+    format_zero_fill_audit_detail,
+)
 from sports_hedge.lifecycle.paper import (
     decide_active_trade_membership,
     decide_paper_settlement,
@@ -312,6 +321,9 @@ class PaperOperationsService:
         self._latest_preparation_by_opportunity: dict[str, str] = {}
         self._external_confirmations: dict[str, ExternalLegConfirmation] = {}
         self._entry_rejections: dict[str, str] = {}
+        self._pending_execution_misses: dict[str, ZeroFillExecutionMiss] = {}
+        self._requalified_after_execution_miss: set[str] = set()
+        self.on_zero_fill_execution_miss = None
         self._fill_persist_lock = threading.RLock()
 
     def query_active_trade_events(
@@ -562,13 +574,17 @@ class PaperOperationsService:
             "must_not_auto_capture",
             ORPHANED_PAPER_FILLING_RECONCILED,
         }
+        if any(reason in RETRYABLE_ZERO_FILL_REASONS for reason in current.rejection_reasons):
+            self._requalified_after_execution_miss.add(opportunity_id)
         remaining = [
             reason
             for reason in current.rejection_reasons
             if reason not in capture_skip_reasons
             and reason not in PAPER_NONBLOCKING_REJECTION_REASONS
+            and reason not in RETRYABLE_ZERO_FILL_REASONS
         ]
         if remaining:
+            self._requalified_after_execution_miss.discard(opportunity_id)
             return
         promoted = current.model_copy(
             update={
@@ -579,6 +595,7 @@ class PaperOperationsService:
                     reason
                     for reason in current.rejection_reasons
                     if reason not in capture_skip_reasons
+                    and reason not in RETRYABLE_ZERO_FILL_REASONS
                 ],
                 "last_seen_at": decision.scanned_at,
             }
@@ -2328,7 +2345,11 @@ class PaperOperationsService:
             if any(item.filled_stake > 0 for item in fills.fills):
                 recover_partial = True
             else:
-                reason = fills.rejection_reasons[0] if fills.rejection_reasons else "incomplete_opening_hedge"
+                underlying = (
+                    fills.rejection_reasons[0] if fills.rejection_reasons else "incomplete_opening_hedge"
+                )
+                fact = classify_zero_fill_fact(underlying)
+                reason = underlying
                 if bound_min_net and reason in {
                     "snapshot_stale_at_decision",
                     "snapshot_stale_at_simulated_arrival",
@@ -2338,7 +2359,11 @@ class PaperOperationsService:
                 }:
                     reason = "incomplete_opening_hedge"
                 self._fail_entry(
-                    opportunity_id, reason, simulated_at, fill_attempted=True
+                    opportunity_id,
+                    reason,
+                    simulated_at,
+                    fill_attempted=True,
+                    zero_fill_fact=fact,
                 )
         if not require_complete:
             recover_partial = False
@@ -3217,18 +3242,73 @@ class PaperOperationsService:
         occurred_at: datetime | None = None,
         *,
         fill_attempted: bool = False,
+        zero_fill_fact: str | None = None,
     ) -> None:
         when = occurred_at or datetime.now(UTC)
         plan = self._plans.get(opportunity_id)
         provenance = DataProvenance.LIVE_PAPER if plan is None else plan.provenance
+        if fill_attempted and zero_fill_fact is None:
+            zero_fill_fact = classify_zero_fill_fact(reason)
+        elif not fill_attempted:
+            zero_fill_fact = None
+        retains_hot = zero_fill_fact == ZERO_FILL_PRICE_MOVEMENT
+        existing_trade = self._get_trade_by_opportunity(opportunity_id)
+        if existing_trade is not None and existing_trade.state in {
+            PaperTradeState.OPEN,
+            PaperTradeState.PARTIAL,
+        }:
+            retains_hot = False
+        sticky_until = execution_miss_sticky_until(when) if retains_hot else None
         if plan is not None:
             self._record_opening_qualifying_decision(opportunity_id, plan, when, provenance)
             if fill_attempted:
-                self._record_opening_no_fill(opportunity_id, plan, when, provenance, reason)
+                self._record_opening_no_fill(
+                    opportunity_id,
+                    plan,
+                    when,
+                    provenance,
+                    reason,
+                    zero_fill_fact=zero_fill_fact,
+                    retains_hot=retains_hot,
+                    sticky_until=sticky_until,
+                )
             else:
                 self._record_opening_blocked(opportunity_id, plan, when, provenance, reason)
-        self._record_entry_rejection(opportunity_id, reason, occurred_at=when)
+        audit_detail = None
+        if zero_fill_fact is not None:
+            audit_detail = format_zero_fill_audit_detail(
+                reason=reason,
+                zero_fill_fact=zero_fill_fact,
+                retains_hot=retains_hot,
+                sticky_until=sticky_until,
+            )
+        self._record_entry_rejection(
+            opportunity_id,
+            reason,
+            occurred_at=when,
+            zero_fill_fact=zero_fill_fact,
+            zero_fill_audit_detail=audit_detail,
+        )
+        if retains_hot and sticky_until is not None and plan is not None:
+            miss = ZeroFillExecutionMiss(
+                opportunity_id=opportunity_id,
+                occurred_at=when,
+                reason=reason,
+                zero_fill_fact=zero_fill_fact or "",
+                retains_hot=True,
+                sticky_until=sticky_until,
+                canonical_event_id=plan.canonical_event_id,
+                pricing_lane=plan.pricing_lane,
+            )
+            self._pending_execution_misses[opportunity_id] = miss
+            callback = self.on_zero_fill_execution_miss
+            if callback is not None:
+                callback(miss)
         raise PaperOperationsError(reason)
+
+    def consume_execution_miss(self, opportunity_id: str) -> ZeroFillExecutionMiss | None:
+        with self._fill_persist_lock:
+            return self._pending_execution_misses.pop(opportunity_id, None)
 
     def _opening_journal_shell(
         self,
@@ -3267,6 +3347,15 @@ class PaperOperationsService:
         if shell is None:
             return
         lane_label = _pricing_lane_label(plan.pricing_lane)
+        payload = self._opening_journal_payload(plan)
+        requalified = opportunity_id in self._requalified_after_execution_miss
+        dedupe_key = f"entry-decision:{shell.trade_id}"
+        if requalified:
+            payload = {
+                **payload,
+                "requalification_after": REASON_RECENTLY_QUALIFYING_EXECUTION_MISS,
+            }
+            dedupe_key = f"entry-decision-requalify:{shell.trade_id}:{occurred_at.isoformat()}"
         self.record_active_lifecycle_event(
             shell,
             event_type=ActiveTradeEventType.ENTRY_DECISION,
@@ -3275,8 +3364,8 @@ class PaperOperationsService:
                 f"Qualifying {lane_label} paper opportunity; fill attempt in this same cycle"
             ),
             occurred_at=occurred_at,
-            dedupe_key=f"entry-decision:{shell.trade_id}",
-            payload=self._opening_journal_payload(plan),
+            dedupe_key=dedupe_key,
+            payload=payload,
         )
 
     def _record_opening_attempt(
@@ -3289,15 +3378,22 @@ class PaperOperationsService:
         shell = self._opening_journal_shell(opportunity_id, plan, occurred_at, provenance)
         if shell is None:
             return
+        requalified = opportunity_id in self._requalified_after_execution_miss
+        payload: dict[str, Any] = {"pricing_lane": plan.pricing_lane}
+        dedupe_key = f"entry-attempt:{shell.trade_id}:{OPENING_TRANCHE_ID}"
+        if requalified:
+            payload["requalification_after"] = REASON_RECENTLY_QUALIFYING_EXECUTION_MISS
+            dedupe_key = f"entry-attempt-requalify:{shell.trade_id}:{occurred_at.isoformat()}"
+            self._requalified_after_execution_miss.discard(opportunity_id)
         self.record_active_lifecycle_event(
             shell,
             event_type=ActiveTradeEventType.ENTRY_ATTEMPT,
             reason_code=ActiveTradeReasonCode.ENTRY_ATTEMPTED,
             operator_copy="Initial PAPER fill attempt in the qualifying pricing cycle",
             occurred_at=occurred_at,
-            dedupe_key=f"entry-attempt:{shell.trade_id}:{OPENING_TRANCHE_ID}",
+            dedupe_key=dedupe_key,
             tranche_id=OPENING_TRANCHE_ID,
-            payload={"pricing_lane": plan.pricing_lane},
+            payload=payload,
         )
 
     def _record_opening_blocked(
@@ -3329,10 +3425,25 @@ class PaperOperationsService:
         occurred_at: datetime,
         provenance: DataProvenance,
         reason: str,
+        *,
+        zero_fill_fact: str | None = None,
+        retains_hot: bool = False,
+        sticky_until: datetime | None = None,
     ) -> None:
         shell = self._opening_journal_shell(opportunity_id, plan, occurred_at, provenance)
         if shell is None:
             return
+        payload: dict[str, Any] = {
+            "reason": reason,
+            "pricing_lane": plan.pricing_lane,
+            "fill_result": "zero",
+        }
+        if zero_fill_fact is not None:
+            payload["zero_fill_fact"] = zero_fill_fact
+        if retains_hot:
+            payload["hot_promotion_reason"] = REASON_RECENTLY_QUALIFYING_EXECUTION_MISS
+            if sticky_until is not None:
+                payload["hot_sticky_until"] = sticky_until.isoformat()
         self.record_active_lifecycle_event(
             shell,
             event_type=ActiveTradeEventType.ENTRY_NO_FILL,
@@ -3341,7 +3452,7 @@ class PaperOperationsService:
             occurred_at=occurred_at,
             dedupe_key=f"entry-no-fill:{shell.trade_id}:{reason}",
             tranche_id=OPENING_TRANCHE_ID,
-            payload={"reason": reason, "pricing_lane": plan.pricing_lane},
+            payload=payload,
         )
 
     def _record_entry_rejection(
@@ -3351,6 +3462,8 @@ class PaperOperationsService:
         occurred_at: datetime | None = None,
         *,
         reject_triggered: bool = False,
+        zero_fill_fact: str | None = None,
+        zero_fill_audit_detail: str | None = None,
     ) -> None:
         self._entry_rejections[opportunity_id] = reason
         self.watchlist.record_paper_fill_rejection(
@@ -3358,6 +3471,8 @@ class PaperOperationsService:
             occurred_at=occurred_at or datetime.now(UTC),
             detail=reason,
             reject_triggered=reject_triggered,
+            zero_fill_fact=zero_fill_fact,
+            zero_fill_audit_detail=zero_fill_audit_detail,
         )
 
     def _get_trade_by_opportunity(self, opportunity_id: str) -> PaperTrade | None:

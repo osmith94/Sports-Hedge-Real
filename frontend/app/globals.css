@@ -677,6 +677,9 @@ tr:last-child td { border-bottom: none; }
 .scan-cycle-history-panel { margin-bottom: 16px; }
 .scan-cycle-history-panel .panel { margin-top: 0; }
 .scan-cycle-table td { vertical-align: top; }
+.scan-cycle-report { margin-top: 12px; }
+.scan-cycle-report ul { margin: 8px 0 0; padding-left: 18px; }
+.scan-cycle-report li { margin: 2px 0; }
 .scan-help { margin-top: 10px; color: var(--muted-2); font-size: 9px; }
 .scan-help summary { cursor: pointer; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .scan-help .scan-note { margin-top: 8px; }

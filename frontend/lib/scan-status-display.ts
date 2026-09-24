@@ -22,13 +22,17 @@ function completedClock(iso: string | null | undefined, now?: number | null): st
   return `completed ${formatObservationAge(iso, now)} ago`;
 }
 
-function nextDueClock(iso: string | null | undefined, now?: number | null): string {
-  if (!iso) return "next due —";
-  if (now == null || !Number.isFinite(now)) return `next due ${iso}`;
+function nextClock(
+  iso: string | null | undefined,
+  now: number | null | undefined,
+  label: "next due" | "next scan" | "next discovery",
+): string {
+  if (!iso) return `${label} —`;
+  if (now == null || !Number.isFinite(now)) return `${label} ${iso}`;
   const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return "next due —";
+  if (!Number.isFinite(then)) return `${label} —`;
   const delta = Math.max(0, Math.round((then - now) / 1000));
-  return `next due in ${delta}s`;
+  return `${label} in ${delta}s`;
 }
 
 export function hotPricingCopy(
@@ -62,7 +66,7 @@ export function hotPricingCopy(
   }
   return {
     label: HOT_PRICING_LABEL,
-    detail: `${completedClock(hot.last_completed_at, now)} · ran ${durationLabel(hot.last_duration_ms)} · ${nextDueClock(hot.next_due_at, now)} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
+    detail: `${completedClock(hot.last_completed_at, now)} · ran ${durationLabel(hot.last_duration_ms)} · ${nextClock(hot.next_due_at, now, "next scan")} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
   };
 }
 
@@ -95,7 +99,8 @@ export function universeDiscoveryCopy(
       detail: `in progress · ${progress}${venueSuffix}${persist}`,
     };
   }
-  const cadence = universe.cadence_seconds ? ` · cadence ${universe.cadence_seconds}s` : "";
+  const refreshSeconds = universe.discovery_refresh_seconds ?? universe.cadence_seconds;
+  const cadence = refreshSeconds ? ` · discovery refresh ${refreshSeconds}s` : "";
   if (
     status?.universe_scans_paused &&
     (universe.last_plan_reason === "universe_scheduled_paused" || universe.next_due_at == null)
@@ -107,7 +112,7 @@ export function universeDiscoveryCopy(
   }
   const elapsed = durationLabel(universe.chunk_last_duration_ms ?? universe.last_duration_ms);
   const state = universe.worker_state && universe.worker_state !== "idle" ? ` · ${universe.worker_state}` : "";
-  const due = universe.next_due_at ? ` · ${nextDueClock(universe.next_due_at, now)}` : "";
+  const due = universe.next_due_at ? ` · ${nextClock(universe.next_due_at, now, "next discovery")}` : "";
   return {
     label: UNIVERSE_DISCOVERY_LABEL,
     detail: `elapsed ${elapsed}${state} · ${universe.fixture_count} universe · ${evaluated} evaluated / ${remaining} not evaluated${due}${cadence}${venueSuffix}${persist}`,
@@ -157,7 +162,7 @@ export function activeTradeCopy(
   const overdueBit = overdue > 0 ? ` · ${overdue} overdue` : "";
   return {
     label: "ACTIVE TRADE",
-    detail: `${open} open · exact-ID 5s${overdueBit} · ${nextDueClock(lane.next_due_at, now)}`,
+    detail: `${open} open · exact-ID 5s${overdueBit} · ${nextClock(lane.next_due_at, now, "next due")}`,
   };
 }
 
@@ -177,10 +182,13 @@ export function backgroundPriceCopy(
   const working = engine?.working_set ?? 0;
   const inFlight = engine?.in_flight ?? 0;
   const suffix = lane?.cycle_in_progress ? " · in progress" : "";
-  const cadence = lane?.cadence_seconds ? ` · cadence ${lane.cadence_seconds}s` : "";
-  const due = nextDueClock(lane?.next_due_at, now);
+  const scanSeconds = lane?.scan_interval_seconds ?? lane?.cadence_seconds;
+  const repriceSeconds = lane?.reprice_after_seconds;
+  const cadence = scanSeconds ? ` · scan interval ${scanSeconds}s` : "";
+  const reprice = repriceSeconds ? ` · reprice after ${repriceSeconds}s` : "";
+  const due = nextClock(lane?.next_due_at, now, "next scan");
   return {
     label: BACKGROUND_PRICING_LABEL,
-    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${cadence} · ${due}${suffix}`,
+    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${cadence}${reprice} · ${due}${suffix}`,
   };
 }

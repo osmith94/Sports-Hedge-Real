@@ -674,12 +674,17 @@ async def test_collector_resume_cursor_without_skip_does_not_empty_the_sweep() -
 
 def test_universe_status_cadence_is_discovery_interval_not_chunk_pause() -> None:
     settings = Settings()
-    assert settings.paper_universe_discovery_interval_seconds == 1800
+    assert settings.paper_universe_discovery_interval_seconds == 3600
     assert settings.paper_universe_worker_cooldown_seconds == 8
-    assert settings.paper_background_price_interval_seconds == 90
+    assert settings.paper_background_price_interval_seconds == 600
     assert settings.paper_live_refresh_universe_interval_seconds == 180
     coordinator = LiveRefreshCoordinator()
     coordinator.configure_from_settings()
-    assert coordinator.status.universe.cadence_seconds == 1800
-    assert coordinator.status.background.cadence_seconds == 90
-    assert coordinator.status.hot.cadence_seconds == 30
+    assert coordinator.status.universe.cadence_seconds == 3600
+    assert coordinator.status.universe.discovery_refresh_seconds == 3600
+    assert coordinator.status.background.cadence_seconds == 10
+    assert coordinator.status.background.scan_interval_seconds == 10
+    assert coordinator.status.background.reprice_after_seconds == 600
+    assert coordinator.status.hot.cadence_seconds == 10
+    assert coordinator.status.hot.scan_interval_seconds == 10
+    assert coordinator.status.hot.reprice_after_seconds == 30

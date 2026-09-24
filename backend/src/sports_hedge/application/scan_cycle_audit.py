@@ -36,6 +36,36 @@ PROVIDER_FAILURE_STAGES = frozenset(
 )
 
 
+def price_engine_slice_count_fields(result: Any) -> dict[str, Any]:
+    """Counts for HOT/BACKGROUND cycle history.
+
+    ``fixture_count`` here is considered catalogue/market rows, not unique
+    fixtures. Unique fixture count is omitted rather than invented.
+    """
+
+    evaluated = list(getattr(result, "evaluated", []) or [])
+    failed = list(getattr(result, "failed", []) or [])
+    deferred = list(getattr(result, "deferred", []) or [])
+    not_started = list(getattr(result, "not_started", []) or [])
+    retry_wait = list(getattr(result, "retry_wait", []) or [])
+    revalidation = list(getattr(result, "revalidation", []) or [])
+    considered = list(
+        dict.fromkeys(
+            [*evaluated, *failed, *deferred, *not_started, *retry_wait, *revalidation]
+        )
+    )
+    leftover = len(not_started) + len(deferred) + len(retry_wait)
+    return {
+        "evaluated": evaluated,
+        "evaluated_count": len(evaluated),
+        "not_evaluated_count": leftover,
+        "fixture_count": len(considered),
+        "count_unit": "catalogue_rows",
+        "deferred": deferred,
+        "not_started": not_started,
+    }
+
+
 def coerce_cycle_lane(scan_lane: ScanLane | str | None) -> str:
     if scan_lane is ScanLane.HOT:
         return ScanLane.HOT.value
@@ -62,18 +92,7 @@ def build_background_price_engine_cycle_report(
     """
 
     decisions = list(getattr(result, "decisions", []) or [])
-    evaluated = list(getattr(result, "evaluated", []) or [])
-    failed = list(getattr(result, "failed", []) or [])
-    deferred = list(getattr(result, "deferred", []) or [])
-    not_started = list(getattr(result, "not_started", []) or [])
-    retry_wait = list(getattr(result, "retry_wait", []) or [])
-    revalidation = list(getattr(result, "revalidation", []) or [])
-    considered = list(
-        dict.fromkeys(
-            [*evaluated, *failed, *deferred, *not_started, *retry_wait, *revalidation]
-        )
-    )
-    leftover = len(not_started) + len(deferred) + len(retry_wait)
+    counts = price_engine_slice_count_fields(result)
     qualifying = sum(1 for decision in decisions if decision_is_solver_arbitrage(decision))
     return CollectionReport(
         started_at=started_at,
@@ -90,18 +109,18 @@ def build_background_price_engine_cycle_report(
         scan_diagnostics={
             "price_engine": True,
             "priority": BACKGROUND_CYCLE_LANE,
-            "evaluated": evaluated,
-            "evaluated_count": len(evaluated),
-            "not_evaluated_count": leftover,
-            "fixture_count": len(considered),
-            "deferred": deferred,
-            "not_started": not_started,
+            **counts,
             "legacy_hot_collector": False,
             PRICE_ENGINE_ITEM_COMPLETION_CAPTURE: True,
             "persist_failures": list(getattr(result, "persist_failures", []) or []),
             **(
                 result.viability_diagnostics()
                 if hasattr(result, "viability_diagnostics")
+                else {}
+            ),
+            **(
+                {"cycle_diagnostic": dict(result.diagnostic)}
+                if isinstance(getattr(result, "diagnostic", None), dict)
                 else {}
             ),
         },
