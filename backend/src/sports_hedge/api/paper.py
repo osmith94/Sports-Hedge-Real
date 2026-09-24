@@ -1167,6 +1167,8 @@ async def refresh_hot_read_only_market_data(
     kwargs = request.model_dump()
     coordinator.remember_request(kwargs)
     plan = coordinator.manual_hot_plan()
+    if plan.reason == "startup_universe_pending":
+        raise HTTPException(status_code=409, detail="startup universe pending")
 
     async def runner() -> CollectionReport:
         return await _collect_report(

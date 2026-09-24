@@ -327,6 +327,45 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(lines.join(" "), /Fast scan|Full sweep|Fast Scan|Full Sweep/);
   });
 
+  it("distinguishes waiting for startup universe from failed, paused, and normal wait", () => {
+    const gated = status({
+      startup_pricing_ready: false,
+      hot: {
+        last_plan_reason: "startup_universe_pending",
+        worker_state: "waiting",
+        cycle_in_progress: false,
+        last_heartbeat_at: "2026-09-24T12:00:00Z",
+      },
+      background: {
+        cadence_seconds: 10,
+        last_plan_reason: "startup_universe_pending",
+        worker_state: "waiting",
+        cycle_in_progress: false,
+      },
+      universe: {
+        cycle_in_progress: true,
+        worker_state: "running",
+        evaluated_count: 3,
+        discovered_total: 10,
+        canonical_evaluated: 3,
+        canonical_work_total: 10,
+      },
+    });
+    assert.equal(fastScanCopy(gated).detail, "waiting for startup universe");
+    assert.equal(backgroundPriceCopy(gated).detail, "waiting for startup universe");
+    assert.match(fullSweepCopy(gated).detail, /startup discovery \/ generation running/);
+    assert.doesNotMatch(fastScanCopy(gated).detail, /in progress/);
+    assert.doesNotMatch(backgroundPriceCopy(gated).detail, /in progress/);
+    const failed = status({
+      hot: {
+        last_error: "matchbook discovery timeout",
+        last_plan_reason: "waiting",
+        cycle_in_progress: false,
+      },
+    });
+    assert.doesNotMatch(fastScanCopy(failed).detail, /waiting for startup universe/);
+  });
+
   it("says Paused for UNIVERSE instead of a ticking next-due countdown", () => {
     const now = Date.parse("2026-09-21T12:00:10Z");
     const paused = status({

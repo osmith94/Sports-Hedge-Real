@@ -46,7 +46,7 @@ def _finish_startup_oneshot(coordinator: LiveRefreshCoordinator, when: datetime)
     if coordinator._universe_generation_started_at is None:
         coordinator._universe_generation_started_at = when
         coordinator._universe_generation_id = max(1, int(coordinator._universe_generation_id))
-    coordinator._close_universe_generation(when)
+    coordinator._close_universe_generation(when, lifecycle_action="complete")
 
 
 def test_paused_scheduler_does_not_start_periodic_universe_after_cadence_expiry(
