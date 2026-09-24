@@ -475,7 +475,9 @@ def test_background_cadence_invalid_range_rejected(tmp_path) -> None:
                 "hot_cadence_seconds": 30,
             },
         )
-        assert missing.status_code == 422
+        assert missing.status_code == 200
+        assert missing.json()["operator_settings"]["background_cadence_seconds"] == 600
+        assert missing.json()["operator_settings"]["hot_cadence_seconds"] == 30
         ok = client.put(
             "/paper/operator-scanner-settings",
             json={
