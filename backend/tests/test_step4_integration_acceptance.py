@@ -455,8 +455,11 @@ def test_operator_console_keeps_steps_1_to_3_console_contract() -> None:
     assert "econ-strip" in scan
     assert "getEconomicsStatus" in scan
     assert "PAPER MODE · NO EXECUTION" in scan
-    assert "demo-walkthrough" in page
-    assert "Demo walkthrough · not live operations" in page
+    assert "<GenerateMatchingReport" in page
+    assert "Generate matching report" in (
+        FRONTEND / "components" / "generate-matching-report.tsx"
+    ).read_text(encoding="utf-8")
+    assert "Demo walkthrough · not live operations" not in page
     assert "DEMO_LIQUIDITY_POOLS" not in page
     assert "liveConnected" in page
     assert "excluded from solver" in pools

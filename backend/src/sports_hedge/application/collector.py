@@ -12,6 +12,19 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application.adaptive_scheduler import work_from_lane
+from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
+from sports_hedge.application.catalogue_maintenance import (
+    FamilyDiscoveryCompleteness,
+    family_key_from_kalshi_series,
+    pair_identity_from_markets,
+    persist_universe_catalogue_pass_offloop,
+)
+from sports_hedge.application.equivalence_diagnostics import (
+    zero_equivalent_reason_counts,
+    zero_equivalent_reason_from_inventory,
+)
+from sports_hedge.application.event_loop_activity import mark_loop_phase, yield_event_loop
 from sports_hedge.application.executable_liquidity import (
     NO_EXECUTABLE_ARB,
     HeadlineBand,
@@ -19,7 +32,6 @@ from sports_hedge.application.executable_liquidity import (
     headline_band_for,
     select_fixture_headline,
 )
-from sports_hedge.application.event_loop_activity import mark_loop_phase, yield_event_loop
 from sports_hedge.application.fixture_clusters import (
     COOP_MAX_SLICE_SECONDS,
     FixtureCluster,
@@ -28,20 +40,6 @@ from sports_hedge.application.fixture_clusters import (
     cluster_member_events,
     to_venue_event,
     universe_cluster_sort_key,
-)
-from sports_hedge.application.universe_identity_cache import (
-    CrossGenerationIdentityCache,
-    GenerationIdentityCache,
-    bind_universe_identity_cache,
-    get_cross_generation_identity_cache,
-)
-from sports_hedge.application.universe_identity_shards import (
-    cluster_events_sharded,
-    count_raw_events_by_competition,
-)
-from sports_hedge.application.equivalence_diagnostics import (
-    zero_equivalent_reason_counts,
-    zero_equivalent_reason_from_inventory,
 )
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
@@ -55,10 +53,15 @@ from sports_hedge.application.fixture_inventory import (
     raw_runner_labels,
     scan_eligible_pair,
 )
+from sports_hedge.application.fixture_sport import (
+    provider_sport_label,
+    resolve_discovered_fixture_sport,
+)
+from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.hot_market_relationships import (
     HOT_RELATIONSHIP_MISSING_REASON,
-    HOT_REVALIDATION_NEEDED_REASON,
     HOT_RELATIONSHIP_UNAVAILABLE_REASON,
+    HOT_REVALIDATION_NEEDED_REASON,
     HotMarketRelationship,
     HotVenueLeg,
     canonical_market_from_leg,
@@ -69,7 +72,6 @@ from sports_hedge.application.hot_market_relationships import (
     kalshi_tickers_for_leg,
     matchbook_payload_is_terminal,
 )
-from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.lane_venues import (
     INSUFFICIENT_VENUES_REASON,
     OPERATOR_SCAN_VENUES,
@@ -85,8 +87,14 @@ from sports_hedge.application.market_observation import (
     PolymarketObservationBuilder,
     VenueMarketObservation,
 )
+from sports_hedge.application.opportunity_viability import (
+    CROSS_VENUE_UNAVAILABLE,
+    NO_CROSS_VENUE_CANDIDATE,
+    UPPER_BOUND_BELOW_MIN_NET,
+    assess_cluster_viability,
+    get_opportunity_viability_cache,
+)
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.adaptive_scheduler import work_from_lane
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -104,34 +112,7 @@ from sports_hedge.application.quote_freshness import (
     polymarket_books_quote_age,
     retrieval_quote_age,
 )
-from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
-from sports_hedge.application.catalogue_maintenance import (
-    FamilyDiscoveryCompleteness,
-    family_key_from_kalshi_series,
-    pair_identity_from_markets,
-    persist_universe_catalogue_pass_offloop,
-)
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
-from sports_hedge.application.opportunity_viability import (
-    CROSS_VENUE_UNAVAILABLE,
-    NO_CROSS_VENUE_CANDIDATE,
-    UPPER_BOUND_BELOW_MIN_NET,
-    assess_cluster_viability,
-    get_opportunity_viability_cache,
-)
-from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
-from sports_hedge.venues.matchbook import MatchbookMarketGoneError
-from sports_hedge.catalogue.classify import classify_pair
-from sports_hedge.catalogue.coverage_rows import (
-    FixtureCatalogueCoverage,
-    aggregate_coverage_by_archetype,
-    fixture_catalogue_coverage,
-)
-from sports_hedge.catalogue.registry import (
-    family_is_phase1_expensive_work,
-    operational_kalshi_families,
-)
-from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     KALSHI_SERIES_TICKERS_BY_CODE,
@@ -146,21 +127,46 @@ from sports_hedge.application.target_competitions import (
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
+    selected_includes_mlb,
     selected_includes_nba,
-    selected_includes_nfl,
     selected_includes_ncaab,
+    selected_includes_nfl,
     selected_includes_soccer,
+    selected_includes_tennis,
 )
-from sports_hedge.outrights.universe_scopes import (
-    kalshi_series_tickers_for_season_scopes,
-    observe_selected_season_kalshi_events,
-    partition_kalshi_season_events,
+from sports_hedge.application.universe_identity_cache import (
+    CrossGenerationIdentityCache,
+    GenerationIdentityCache,
+    bind_universe_identity_cache,
+    get_cross_generation_identity_cache,
+)
+from sports_hedge.application.universe_identity_shards import (
+    cluster_events_sharded,
+    count_raw_events_by_competition,
+)
+from sports_hedge.application.universe_matching_report import (
+    MAX_STORED_NORMALIZATION_REJECTIONS,
+    MAX_STORED_SCOPE_REJECTIONS,
+    attach_universe_matching_evidence,
+    new_matching_review_slot,
+    raw_display_fields,
 )
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     net_edge_from_implied_sum,
     quantized_edge,
 )
+from sports_hedge.catalogue.classify import classify_pair
+from sports_hedge.catalogue.coverage_rows import (
+    FixtureCatalogueCoverage,
+    aggregate_coverage_by_archetype,
+    fixture_catalogue_coverage,
+)
+from sports_hedge.catalogue.registry import (
+    family_is_phase1_expensive_work,
+    operational_kalshi_families,
+)
+from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -193,8 +199,15 @@ from sports_hedge.normalization.venues import (
     promote_polymarket_complete_match_result,
     safe_kalshi_match_result_rule_layers,
 )
+from sports_hedge.outrights.universe_scopes import (
+    kalshi_series_tickers_for_season_scopes,
+    observe_selected_season_kalshi_events,
+    partition_kalshi_season_events,
+)
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import PreparablePaperOpportunity
+from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
+from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 
 LOGGER = getLogger(__name__)
 
@@ -417,25 +430,67 @@ DEFAULT_PROVIDER_CONCURRENCY = {
 }
 
 
+def universe_catalogue_pairs(
+    selected_pairs: list[
+        tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+    ],
+) -> list[tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]]:
+    """Pairs persisted as catalogue identity before depth and the solver.
+
+    Scan-eligible pairs stay the admission set for football, NFL, NBA, NCAAB
+    and MLB. Tennis Match Winner is structurally registered and deliberately
+    non-executable, so those rows are kept for exact native-ID observation.
+    A registered-but-not-scan-eligible football/NFL/NBA/NCAAB/MLB pair is not
+    catalogued by this path.
+    """
+
+    from sports_hedge.matching.approved_register import registered_canonical_key
+    from sports_hedge.tennis.detect import is_tennis_canonical_event
+
+    kept: list[
+        tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+    ] = []
+    for item in selected_pairs:
+        left = item[2].canonical
+        right = item[3].canonical
+        if scan_eligible_pair(left, right, item[4]):
+            kept.append(item)
+            continue
+        if not (
+            is_tennis_canonical_event(left.event) or is_tennis_canonical_event(right.event)
+        ):
+            continue
+        if registered_canonical_key(left, right) is not None:
+            kept.append(item)
+    return kept
+
+
 def matchbook_scope_discovery_params(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
     *,
     football_sport_id: str | None = None,
     american_football_sport_id: str | None = None,
     basketball_sport_id: str | None = None,
+    baseball_sport_id: str | None = None,
+    tennis_sport_id: str | None = None,
 ) -> dict[str, str]:
     """Matchbook list_events filters for the selected operator scope.
 
-    NBA-only scopes add the captured NBA competition tag. Mixed soccer/NFL/NBA
-    or NCAAB scopes cannot apply that tag without dropping football or NCAAB
-    events. NCAAB has no Matchbook competition tag.
+    NBA-only scopes add the captured NBA competition tag. MLB-only scopes add
+    the captured Major League Baseball tag. Mixed scopes cannot apply either
+    tag without dropping the other sport. NCAAB has no Matchbook competition tag.
     """
 
+    from sports_hedge.mlb.constants import MATCHBOOK_MLB_COMPETITION_TAG_ID
     from sports_hedge.nba.constants import MATCHBOOK_NBA_COMPETITION_TAG_ID
 
-    if not selected_includes_nfl(selected_codes) and not selected_includes_nba(
-        selected_codes
-    ) and not selected_includes_ncaab(selected_codes):
+    if (
+        not selected_includes_nfl(selected_codes)
+        and not selected_includes_nba(selected_codes)
+        and not selected_includes_ncaab(selected_codes)
+        and not selected_includes_mlb(selected_codes)
+        and not selected_includes_tennis(selected_codes)
+    ):
         return {}
     ids: list[str] = []
     if selected_includes_soccer(selected_codes) and football_sport_id:
@@ -444,6 +499,10 @@ def matchbook_scope_discovery_params(
         ids.append(str(american_football_sport_id))
     if (selected_includes_nba(selected_codes) or selected_includes_ncaab(selected_codes)) and basketball_sport_id:
         ids.append(str(basketball_sport_id))
+    if selected_includes_mlb(selected_codes) and baseball_sport_id:
+        ids.append(str(baseball_sport_id))
+    if selected_includes_tennis(selected_codes) and tennis_sport_id:
+        ids.append(str(tennis_sport_id))
     params: dict[str, str] = {}
     if ids:
         params["sport-ids"] = ",".join(ids)
@@ -452,9 +511,21 @@ def matchbook_scope_discovery_params(
         and not selected_includes_nfl(selected_codes)
         and not selected_includes_soccer(selected_codes)
         and not selected_includes_ncaab(selected_codes)
+        and not selected_includes_mlb(selected_codes)
+        and not selected_includes_tennis(selected_codes)
+    )
+    mlb_only = (
+        selected_includes_mlb(selected_codes)
+        and not selected_includes_nfl(selected_codes)
+        and not selected_includes_soccer(selected_codes)
+        and not selected_includes_ncaab(selected_codes)
+        and not selected_includes_nba(selected_codes)
+        and not selected_includes_tennis(selected_codes)
     )
     if nba_only:
         params["tag-ids"] = MATCHBOOK_NBA_COMPETITION_TAG_ID
+    elif mlb_only:
+        params["tag-ids"] = MATCHBOOK_MLB_COMPETITION_TAG_ID
     return params
 _WALL_STAGE_NAME = {
     "normalize_match": "mapping_equivalence",
@@ -529,6 +600,7 @@ class DiscoveredFixture(BaseModel):
     home_team: str
     away_team: str
     competition: str
+    sport: str = "unknown"
     target_competition_code: str | None = None
     kickoff_utc: datetime
     matchbook_matched: bool = False
@@ -784,6 +856,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_books_skipped_unapproved = 0
         self._kalshi_get_market_failed_tickers: set[str] = set()
         self._identity_cache: GenerationIdentityCache | None = None
+        self._op_matching_review: dict[str, Any] | None = None
         self._incremental_cache: CrossGenerationIdentityCache | None = None
         self._op_partial_clusters: list[FixtureCluster] = []
         self._op_clustering_truncated = False
@@ -963,6 +1036,11 @@ class ReadOnlyCrossVenueCollector:
         self._op_raw_competition_counts = {}
         self._op_partial_clusters = []
         resolved_lane = (scan_lane or "").strip().casefold() or None
+        self._op_matching_review = (
+            new_matching_review_slot()
+            if resolved_lane == ScanLane.UNIVERSE.value
+            else None
+        )
         hot_scope = {item.strip() for item in (identity_scope or []) if item and item.strip()}
         skip_ids = {item.strip() for item in (skip_event_ids or []) if item and item.strip()}
         clusters_before_resume = 0
@@ -1155,6 +1233,7 @@ class ReadOnlyCrossVenueCollector:
                     50,
                 )
                 skipped_out_of_scope = mb_scope.skipped + pm_scope.skipped + k_scope.skipped
+                self._retain_scope_rejections(mb_scope, pm_scope, k_scope)
                 self._op_raw_competition_counts = {
                     VenueName.MATCHBOOK.value: count_raw_events_by_competition(
                         mb_scope.allowed, venue=VenueName.MATCHBOOK
@@ -1634,8 +1713,7 @@ class ReadOnlyCrossVenueCollector:
         task = asyncio.create_task(coro)
         self._inflight.add(task)
         self._provider_calls += 1
-        if len(self._inflight) > self._peak_inflight:
-            self._peak_inflight = len(self._inflight)
+        self._peak_inflight = max(self._peak_inflight, len(self._inflight))
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task in done:
@@ -1889,11 +1967,15 @@ class ReadOnlyCrossVenueCollector:
             not selected_includes_nfl(codes)
             and not selected_includes_nba(codes)
             and not selected_includes_ncaab(codes)
+            and not selected_includes_mlb(codes)
+            and not selected_includes_tennis(codes)
         ):
             return {}
         football = None
         american = None
         basketball = None
+        baseball = None
+        tennis = None
         if selected_includes_soccer(codes):
             resolver = getattr(client, "resolve_football_sport_id", None)
             if callable(resolver):
@@ -1906,11 +1988,21 @@ class ReadOnlyCrossVenueCollector:
             resolver = getattr(client, "resolve_basketball_sport_id", None)
             if callable(resolver):
                 basketball = str(await resolver())
+        if selected_includes_mlb(codes):
+            resolver = getattr(client, "resolve_baseball_sport_id", None)
+            if callable(resolver):
+                baseball = str(await resolver())
+        if selected_includes_tennis(codes):
+            resolver = getattr(client, "resolve_tennis_sport_id", None)
+            if callable(resolver):
+                tennis = str(await resolver())
         return matchbook_scope_discovery_params(
             codes,
             football_sport_id=football,
             american_football_sport_id=american,
             basketball_sport_id=basketball,
+            baseball_sport_id=baseball,
+            tennis_sport_id=tennis,
         )
 
     async def _discovery_task(
@@ -2670,7 +2762,7 @@ class ReadOnlyCrossVenueCollector:
             "viable_venue_count": None,
         }
         LOGGER.info("scan_diagnostics %s", diagnostics)
-        return CollectionReport(
+        report = CollectionReport(
             started_at=started_at,
             completed_at=completed_at,
             discovery_source=VenueName.MATCHBOOK,
@@ -2724,6 +2816,95 @@ class ReadOnlyCrossVenueCollector:
             scan_lane=scan_lane,
             resume_cursor=resume_cursor,
         )
+        self._publish_matching_review(
+            report,
+            completeness=completeness,
+            partial=bool(diagnostics.get("partial")),
+            clustering_truncated=bool(clustering_truncated),
+            venue_health=venue_health,
+            enabled_venues=[item.value for item in enabled_list],
+            raw_counts={
+                VenueName.MATCHBOOK.value: len(raw_matchbook_events),
+                VenueName.POLYMARKET.value: len(raw_polymarket_events),
+                VenueName.KALSHI.value: len(raw_kalshi_events),
+            },
+            normalized_counts={
+                VenueName.MATCHBOOK.value: len(matchbook_events),
+                VenueName.POLYMARKET.value: len(polymarket_events),
+                VenueName.KALSHI.value: len(kalshi_events),
+            },
+            skipped_out_of_scope=skipped_out_of_scope,
+            skipped_by_reason=skipped_by_reason,
+            universe_generation_id=universe_generation_id,
+            generated_at=completed_at,
+        )
+        return report
+
+    def _retain_scope_rejections(self, *scopes: Any) -> None:
+        review = self._op_matching_review
+        if review is None:
+            return
+        rows = review["scope_rejections"]
+        for scope in scopes:
+            for item in getattr(scope, "rejected_events", ()) or ():
+                if len(rows) >= MAX_STORED_SCOPE_REJECTIONS:
+                    review["scope_rejections_truncated"] = True
+                    return
+                rows.append(item)
+            if getattr(scope, "rejected_events_truncated", False):
+                review["scope_rejections_truncated"] = True
+
+    def _retain_normalization_rejection(
+        self,
+        payload: dict[str, Any],
+        *,
+        venue: VenueName,
+        reason: str,
+        source_id: str | None,
+    ) -> None:
+        review = self._op_matching_review
+        if review is None:
+            return
+        rows = review["normalization_rejections"]
+        if len(rows) >= MAX_STORED_NORMALIZATION_REJECTIONS:
+            review["normalization_rejections_truncated"] = True
+            return
+        display = raw_display_fields(payload)
+        rows.append(
+            {
+                "venue": venue.value,
+                "source_event_id": source_id,
+                "provider_label": display["provider_label"],
+                "provider_label_evidence": display["provider_label_evidence"],
+                "reason": reason[:300],
+            }
+        )
+
+    def _publish_matching_review(self, report: CollectionReport, **context: Any) -> None:
+        review = self._op_matching_review
+        if review is None:
+            return
+        payload = dict(review)
+        payload["meta"] = {
+            "generated_at": context["generated_at"].isoformat(),
+            "universe_generation_id": context["universe_generation_id"],
+            "completeness": context["completeness"],
+            "partial": bool(context["partial"]),
+            "clustering_truncated": bool(context["clustering_truncated"]),
+            "selected_competition_codes": list(self._op_selected_competition_codes or ()),
+            "selected_season_scope_codes": list(self._op_selected_season_scope_codes or ()),
+            "matcher_threshold": review.get("matcher_threshold"),
+            "matcher_semantic_version": review.get("matcher_semantic_version"),
+            "enabled_venues": list(context["enabled_venues"]),
+            "venue_health": dict(context["venue_health"]),
+            "source_event_counts": {
+                "raw_by_venue": dict(context["raw_counts"]),
+                "normalized_by_venue": dict(context["normalized_counts"]),
+                "skipped_out_of_scope": context["skipped_out_of_scope"],
+                "skipped_by_reason": dict(context["skipped_by_reason"]),
+            },
+        }
+        attach_universe_matching_evidence(report, payload)
 
     def _cluster_identity_incomplete(self, cluster: FixtureCluster) -> bool:
         """True when truncated clustering still has unscored pairs for this fixture."""
@@ -3404,6 +3585,7 @@ class ReadOnlyCrossVenueCollector:
                 (left_venue, right_venue, left_market, right_market, match)
                 for left_market, right_market, match in market_pairs
             )
+        catalogue_pairs = universe_catalogue_pairs(selected_pairs)
         eligible_pairs = [
             item
             for item in selected_pairs
@@ -3430,7 +3612,7 @@ class ReadOnlyCrossVenueCollector:
         self._kalshi_books_skipped_unapproved += len(leftover_kalshi)
         await self._persist_universe_catalogue_from_pairs(
             fixture=fixture,
-            eligible_pairs=eligible_pairs,
+            eligible_pairs=catalogue_pairs,
             k_events=k_events,
             family_discovery=FamilyDiscoveryCompleteness(
                 matchbook_listing_complete=matchbook_side.listing_complete,
@@ -4645,6 +4827,7 @@ class ReadOnlyCrossVenueCollector:
                 incremental_cache=self._incremental_cache if allow_incremental else None,
                 stop=_stop,
                 on_partial=_remember,
+                review_slot=getattr(self, "_op_matching_review", None),
             )
         except asyncio.CancelledError:
             # Shard checkpoints are stored before the cancel leaves the
@@ -4686,6 +4869,7 @@ class ReadOnlyCrossVenueCollector:
                     detail=str(exc),
                 )
             )
+            self._retain_normalization_rejection(payload, venue=venue, reason=str(exc), source_id=source_id)
             return None
 
     async def _clusters_from_known_source_events(
@@ -5929,6 +6113,15 @@ def _fixture_from_cluster(
         home_team=canonical.home_team,
         away_team=canonical.away_team,
         competition=canonical.competition,
+        sport=resolve_discovered_fixture_sport(
+            competition=canonical.competition,
+            target_competition_code=competition.code.value if competition else None,
+            provider_sport=provider_sport_label(
+                anchor.venue,
+                anchor.raw if isinstance(anchor.raw, dict) else None,
+            ),
+            canonical_sport=canonical.sport,
+        ),
         target_competition_code=competition.code.value if competition else None,
         kickoff_utc=canonical.kickoff_utc,
         matchbook_matched=cluster.matchbook is not None,

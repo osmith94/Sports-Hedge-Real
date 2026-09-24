@@ -3,16 +3,6 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from sports_hedge.domain.football import CanonicalMarket
-from sports_hedge.matching.events import EventMatcher
-from sports_hedge.matching.learned_rules import (
-    MappingProvenance,
-    participant_identity_preserved,
-)
-from sports_hedge.matching.paper_assumed import (
-    OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
-    PAPER_ASSUMED_REASON,
-    paper_assumed_match_reasons,
-)
 from sports_hedge.matching.approved_register import (
     NOT_REGISTERED_REASON,
     REGISTER_ADMITTED_REASON,
@@ -20,12 +10,22 @@ from sports_hedge.matching.approved_register import (
     registered_canonical_key,
     structural_mismatch_reasons,
 )
+from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.learned_rules import (
+    MappingProvenance,
+    participant_identity_preserved,
+)
 from sports_hedge.matching.ordinary_1x2 import (
     GAMEWIN_ORDINARY_1X2_AUDIT_REASON,
     UNKNOWN_SETTLEMENT_ALLOWED_REASON,
     allow_unknown_settlement_for_ordinary_1x2,
     kalshi_gamewin_scope_unavailable,
     ordinary_1x2_match_reasons,
+)
+from sports_hedge.matching.paper_assumed import (
+    OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    PAPER_ASSUMED_REASON,
+    paper_assumed_match_reasons,
 )
 
 
@@ -74,10 +74,42 @@ class MarketMatcher:
                 ],
                 provenance=event_result.provenance,
             )
+        from sports_hedge.mlb.detect import is_mlb_canonical_event
+        from sports_hedge.mlb.teams import is_canonical_mlb_team
         from sports_hedge.nfl.detect import is_nfl_canonical_event
         from sports_hedge.nfl.teams import is_canonical_nfl_team
+        from sports_hedge.tennis.detect import is_tennis_canonical_event
+        from sports_hedge.tennis.players import same_player_pair
 
-        if is_nfl_canonical_event(left.event) or is_nfl_canonical_event(right.event):
+        if is_tennis_canonical_event(left.event) or is_tennis_canonical_event(right.event):
+            if not same_player_pair(
+                left.event.home_team,
+                left.event.away_team,
+                right.event.home_team,
+                right.event.away_team,
+            ):
+                return MarketMatchResult(
+                    matched=False,
+                    confidence=event_result.confidence,
+                    reasons=["event_mismatch", "participant_identity_unproven", *event_result.reasons],
+                    provenance=event_result.provenance,
+                )
+        elif is_mlb_canonical_event(left.event) or is_mlb_canonical_event(right.event):
+            if not (
+                is_canonical_mlb_team(left.event.home_team)
+                and is_canonical_mlb_team(left.event.away_team)
+                and left.event.home_team == right.event.home_team
+                and left.event.away_team == right.event.away_team
+                and left.event.scheduled_game_key
+                and left.event.scheduled_game_key == right.event.scheduled_game_key
+            ):
+                return MarketMatchResult(
+                    matched=False,
+                    confidence=event_result.confidence,
+                    reasons=["event_mismatch", "participant_identity_unproven", *event_result.reasons],
+                    provenance=event_result.provenance,
+                )
+        elif is_nfl_canonical_event(left.event) or is_nfl_canonical_event(right.event):
             if not (
                 is_canonical_nfl_team(left.event.home_team)
                 and is_canonical_nfl_team(left.event.away_team)
@@ -137,6 +169,24 @@ class MarketMatcher:
 
         key = registered_canonical_key(left, right)
         if key is not None:
+            from sports_hedge.tennis.settlement import tennis_executable_block_reason
+
+            block = tennis_executable_block_reason(left, right)
+            if block is not None:
+                match_reasons = list(event_result.reasons)
+                if block not in match_reasons:
+                    match_reasons.append(block)
+                if REGISTER_ADMITTED_REASON not in match_reasons:
+                    match_reasons.append(REGISTER_ADMITTED_REASON)
+                key_reason = register_key_reason(key)
+                if key_reason not in match_reasons:
+                    match_reasons.append(key_reason)
+                return MarketMatchResult(
+                    matched=True,
+                    confidence=event_result.confidence,
+                    reasons=match_reasons,
+                    provenance=event_result.provenance,
+                )
             match_reasons = list(event_result.reasons)
             match_reasons.extend(paper_assumed_match_reasons())
             if REGISTER_ADMITTED_REASON not in match_reasons:
@@ -148,9 +198,18 @@ class MarketMatcher:
                 match_reasons.append(PAPER_ASSUMED_REASON)
             if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in match_reasons:
                 match_reasons.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
-            from sports_hedge.nba.settlement import nba_market_uses_paper_caveat, nba_paper_audit_reasons
-            from sports_hedge.ncaab.settlement import ncaab_market_uses_paper_caveat, ncaab_paper_audit_reasons
-            from sports_hedge.nfl.settlement import nfl_market_uses_paper_caveat, nfl_paper_audit_reasons
+            from sports_hedge.nba.settlement import (
+                nba_market_uses_paper_caveat,
+                nba_paper_audit_reasons,
+            )
+            from sports_hedge.ncaab.settlement import (
+                ncaab_market_uses_paper_caveat,
+                ncaab_paper_audit_reasons,
+            )
+            from sports_hedge.nfl.settlement import (
+                nfl_market_uses_paper_caveat,
+                nfl_paper_audit_reasons,
+            )
 
             if nfl_market_uses_paper_caveat(left) or nfl_market_uses_paper_caveat(right):
                 for reason in nfl_paper_audit_reasons():
@@ -184,7 +243,10 @@ class MarketMatcher:
 
         reasons = structural_mismatch_reasons(left, right)
         if not reasons:
-            reasons = [NOT_REGISTERED_REASON]
+            from sports_hedge.mlb.settlement import mlb_pair_non_executable_reason
+
+            settlement_reason = mlb_pair_non_executable_reason(left, right)
+            reasons = [settlement_reason or NOT_REGISTERED_REASON]
         return MarketMatchResult(
             matched=False,
             confidence=event_result.confidence,

@@ -327,7 +327,7 @@ def test_nba_is_permanently_selectable_and_not_default() -> None:
     assert selected_includes_nfl(["nba"]) is False
     assert selected_includes_soccer(["nba"]) is False
     assert selected_includes_soccer(["premier_league", "nba"]) is True
-    assert PRINCIPAL_OPERATOR_COMPETITION_COUNT == 34
+    assert PRINCIPAL_OPERATOR_COMPETITION_COUNT == 37
     assert resolve_target_competition("NBA") is not None
     assert resolve_target_competition("WNBA") is None
     assert resolve_target_competition("NCAAB") is not None
@@ -748,7 +748,9 @@ def test_matchbook_nba_only_scope_uses_competition_tag() -> None:
     soccer_only_gate = (
         "if (\n            not selected_includes_nfl(codes)\n"
         "            and not selected_includes_nba(codes)\n"
-        "            and not selected_includes_ncaab(codes)\n        ):"
+        "            and not selected_includes_ncaab(codes)\n"
+        "            and not selected_includes_mlb(codes)\n"
+        "            and not selected_includes_tennis(codes)\n        ):"
     )
     assert soccer_only_gate in discovery_src
     assert discovery_src.index(soccer_only_gate) < discovery_src.index(

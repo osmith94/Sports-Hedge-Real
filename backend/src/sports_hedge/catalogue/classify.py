@@ -34,6 +34,12 @@ from sports_hedge.domain.football import (
     line_push_possible,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.matching.approved_register import (
+    NOT_REGISTERED_REASON,
+    REGISTER_ADMITTED_REASON,
+    canonical_key_for_market,
+    registered_structural_match,
+)
 from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import (
     allow_unknown_settlement_for_ordinary_1x2,
@@ -42,12 +48,6 @@ from sports_hedge.matching.paper_assumed import (
     FAIR_PRICE_PAPER_ADMITTED_REASON,
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
     both_independently_proven_regulation,
-)
-from sports_hedge.matching.approved_register import (
-    NOT_REGISTERED_REASON,
-    REGISTER_ADMITTED_REASON,
-    canonical_key_for_market,
-    registered_structural_match,
 )
 from sports_hedge.normalization.venues import (
     KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON,
@@ -193,8 +193,13 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
     )
     archetype = _archetype_from_markets(left, right)
     state, reason, notes = _economic_state(left, right)
-    paper_assumed = state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-    paper_admitted = matcher.matched and registered_structural_match(left, right)
+    from sports_hedge.tennis.settlement import tennis_executable_block_reason
+
+    tennis_blocked = tennis_executable_block_reason(left, right) is not None
+    paper_assumed = state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT and not tennis_blocked
+    paper_admitted = (
+        matcher.matched and registered_structural_match(left, right) and not tennis_blocked
+    )
     conflict = (
         state is not CatalogueApprovalState.APPROVED_EQUIVALENT
         and not paper_assumed
@@ -207,10 +212,16 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         )
     settlement_assumption = None
     if paper_assumed:
-        from sports_hedge.nba.settlement import nba_market_uses_paper_caveat, NBA_PAPER_NORMAL_COMPLETION_REASON
         from sports_hedge.nba.constants import NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT
-        from sports_hedge.nfl.settlement import nfl_market_uses_paper_caveat, NFL_PAPER_NORMAL_COMPLETION_REASON
+        from sports_hedge.nba.settlement import (
+            NBA_PAPER_NORMAL_COMPLETION_REASON,
+            nba_market_uses_paper_caveat,
+        )
         from sports_hedge.nfl.constants import NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT
+        from sports_hedge.nfl.settlement import (
+            NFL_PAPER_NORMAL_COMPLETION_REASON,
+            nfl_market_uses_paper_caveat,
+        )
 
         if nfl_market_uses_paper_caveat(left) or nfl_market_uses_paper_caveat(right):
             settlement_assumption = "normal_full_game_completion"
@@ -269,6 +280,13 @@ def _economic_state(
 ) -> tuple[CatalogueApprovalState, str, list[str]]:
     notes: list[str] = []
     from sports_hedge.catalogue.registry import target_market_families
+    from sports_hedge.tennis.settlement import tennis_executable_block_reason
+
+    block = tennis_executable_block_reason(left, right)
+    if block is not None and registered_structural_match(left, right):
+        notes.append(block)
+        notes.append("match_winner_catalogued_not_solver_executable")
+        return CatalogueApprovalState.REVIEW_REQUIRED, block, notes
 
     if registered_structural_match(left, right):
         notes.append(REGISTER_ADMITTED_REASON)
@@ -287,6 +305,13 @@ def _economic_state(
             "paper_assumed_equivalent",
             notes,
         )
+
+    from sports_hedge.mlb.settlement import mlb_pair_non_executable_reason
+
+    mlb_reason = mlb_pair_non_executable_reason(left, right)
+    if mlb_reason is not None:
+        notes.append("mlb_stage1_settlement_not_proven")
+        return CatalogueApprovalState.UNSUPPORTED, mlb_reason, notes
 
     from sports_hedge.nba.detect import NBA_MARKET_FAMILIES
     from sports_hedge.ncaab.detect import NCAAB_MARKET_FAMILIES

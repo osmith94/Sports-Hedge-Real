@@ -38,6 +38,8 @@ const GROUP_ORDER = [
     "nfl",
     "nba",
     "college_basketball",
+    "mlb",
+    "tennis",
 ];
 
 type FootballCompetitionsModalProps = {

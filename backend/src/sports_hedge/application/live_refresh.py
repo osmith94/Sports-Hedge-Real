@@ -551,6 +551,7 @@ class LiveRefreshCoordinator:
         self._universe_retry_at: datetime | None = None
         self._universe_provider_failures = 0
         self._universe_last_report_snapshot: dict[str, Any] | None = None
+        self._universe_matching_evidence: dict[str, Any] | None = None
         self._universe_sweep_id: str | None = None
         self._universe_discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
         self._universe_discovered_total = 0
@@ -1049,6 +1050,7 @@ class LiveRefreshCoordinator:
         self._universe_retry_at = None
         self._universe_provider_failures = 0
         self._universe_last_report_snapshot = None
+        self._universe_matching_evidence = None
         self._universe_sweep_id = None
         self._universe_discovery_snapshot = None
         self._universe_discovered_total = 0
@@ -1585,6 +1587,7 @@ class LiveRefreshCoordinator:
             self._universe_retry_at = None
             self._universe_provider_failures = 0
             self._universe_last_report_snapshot = None
+            self._universe_matching_evidence = None
             self._universe_sweep_id = None
             self._universe_discovery_snapshot = None
             self._universe_discovered_total = 0
@@ -2406,6 +2409,8 @@ class LiveRefreshCoordinator:
 
         self._last_report = report
         lane = _coerce_lane(report.scan_lane or ScanLane.UNIVERSE)
+        if lane is ScanLane.UNIVERSE:
+            self._remember_universe_matching_evidence(report)
         generation_id = (
             self._universe_generation_id_for_upsert() if lane is ScanLane.UNIVERSE else None
         )
@@ -2491,6 +2496,7 @@ class LiveRefreshCoordinator:
             if fenced:
                 self._finish_fenced_universe_cycle(report)
                 return
+            self._remember_universe_matching_evidence(report)
         self._last_report = report
         generation_id = (
             self._universe_generation_id_for_upsert() if lane is ScanLane.UNIVERSE else None
@@ -4503,6 +4509,37 @@ class LiveRefreshCoordinator:
 
     def last_report(self) -> CollectionReport | None:
         return self._last_report
+
+    def _remember_universe_matching_evidence(self, report: CollectionReport) -> None:
+        from sports_hedge.application.universe_matching_report import (
+            take_universe_matching_evidence,
+        )
+
+        payload = take_universe_matching_evidence(report)
+        if payload is None:
+            return
+        with self._state_lock:
+            self._universe_matching_evidence = payload
+
+    def latest_universe_matching_report(self) -> dict[str, Any] | None:
+        """Read-only diagnostic JSON. Does not start a scan or call a venue."""
+
+        from sports_hedge.application.universe_matching_report import (
+            build_universe_matching_report,
+        )
+
+        with self._state_lock:
+            evidence = self._universe_matching_evidence
+            active_generation = self._universe_generation_id
+            generation_open = self._universe_generation_started_at is not None
+        if not evidence:
+            return None
+        report = build_universe_matching_report(evidence)
+        stored_generation = report.get("meta", {}).get("universe_generation_id")
+        if generation_open and stored_generation not in (None, active_generation):
+            report["meta"]["active_universe_generation_id"] = active_generation
+            report["meta"]["newer_generation_in_progress"] = True
+        return report
 
     def fixture_current_state(self) -> FixtureCurrentStateStore:
         return self._fixture_state

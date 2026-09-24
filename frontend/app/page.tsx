@@ -3,15 +3,13 @@ import { CapitalSummary } from "../components/capital-summary";
 import { FixtureDiscoverySection } from "../components/fixture-discovery-section";
 import { HotFixturesPanel } from "../components/hot-fixtures-panel";
 import { LiquidityPools } from "../components/liquidity-pools";
-import { OpportunityCard } from "../components/opportunity-card";
+import { GenerateMatchingReport } from "../components/generate-matching-report";
 import { OpportunityMonitor } from "../components/opportunity-monitor";
 import { PaperTradeBook } from "../components/paper-trade-book";
 import { RunPaperScan } from "../components/run-paper-scan";
 import { PaperScanHistoryTable } from "../components/paper-scan-history-table";
 import { ScanCycleHistoryPanel } from "../components/scan-cycle-history-panel";
 import { PriorityAlertsSeam } from "../components/arbitrage/priority-alerts/priority-alerts-seam";
-import { ExternalLegWorkflow } from "../components/arbitrage/priority-alerts/external-leg-workflow";
-import { getPriorityAlert } from "../lib/priority-alerts/provider";
 import {
   getActivePaperTrades,
   getLivePriorityAlerts,
@@ -34,11 +32,7 @@ import {
   PaperTradeBookSummary,
   PaperTreasurySnapshot,
 } from "../lib/api";
-import {
-  DEFAULT_SCANNER_ASSUMPTIONS,
-  DEMO_MANUAL_EXTERNAL,
-  buildCapitalSnapshot,
-} from "../lib/arbitrage-ops";
+import { DEFAULT_SCANNER_ASSUMPTIONS, buildCapitalSnapshot } from "../lib/arbitrage-ops";
 import { activityFromWatchlist } from "../lib/watchlist";
 
 export const dynamic = "force-dynamic";
@@ -125,8 +119,6 @@ export default async function ArbitragePage() {
     usedFixture: false,
   };
   const capital = buildCapitalSnapshot(apiAvailable ? scans : [], summary, assumptions);
-  const externalAlert = getPriorityAlert("pa-ncl-ars-2026-04-12-mr");
-
   return (
     <>
       <div className="page-heading">
@@ -253,17 +245,7 @@ export default async function ArbitragePage() {
         </section>
       </details>
 
-      <details className="demo-walkthrough" id="demo-walkthrough">
-        <summary>Demo walkthrough · not live operations</summary>
-        <p className="section-copy">
-          Advanced / test fixture replay only. Labelled DEMO / FIXTURE training content, including the
-          Newcastle United v Arsenal MANUAL_EXTERNAL ticket. Not mixed into discovery, watchlist,
-          P&amp;L or standing pools. Open{" "}
-          <a className="pool-link" href="/demo">/demo</a> for the labelled replay utility.
-        </p>
-        <OpportunityCard item={DEMO_MANUAL_EXTERNAL} />
-        {externalAlert ? <ExternalLegWorkflow alert={externalAlert} /> : null}
-      </details>
+      <GenerateMatchingReport />
     </>
   );
 }

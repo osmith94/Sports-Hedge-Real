@@ -517,6 +517,8 @@ def football_series_ticker(series: dict[str, Any]) -> bool:
     ).casefold()
     if "nfl" in tokens or "american football" in tokens:
         return False
+    if "mlb" in tokens or "baseball" in tokens:
+        return False
     if "nba" in tokens or "basketball" in tokens:
         return False
     if "ncaab" in tokens or "college basketball" in tokens or "ncaa men" in tokens:

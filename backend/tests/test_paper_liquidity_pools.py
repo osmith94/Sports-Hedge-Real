@@ -254,7 +254,11 @@ def test_live_console_hides_demo_pools_and_compacts_empty_states() -> None:
     assert "getPaperLiquidityPools" in page
     assert "getPaperTreasury" in page
     assert "empty-live-compact" in page
-    assert "demo-walkthrough" in page
+    assert "demo-walkthrough" not in page
+    assert "<GenerateMatchingReport" in page
+    assert "Generate matching report" in (
+        repo / "frontend" / "components" / "generate-matching-report.tsx"
+    ).read_text(encoding="utf-8")
     assert "PAPER MODE · NO EXECUTION" in scan
     assert "Advanced · FX / fees / provenance" in scan
     assert "getEconomicsStatus" in scan

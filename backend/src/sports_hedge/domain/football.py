@@ -36,6 +36,7 @@ class MarketFamily(StrEnum):
     GAME_WINNER = "game_winner"
     POINT_SPREAD = "point_spread"
     TOTAL_POINTS = "total_points"
+    TOTAL_RUNS = "total_runs"
     UNKNOWN = "unknown"
 
 
@@ -135,6 +136,7 @@ LINE_PARAMETER_FAMILIES: frozenset[MarketFamily] = frozenset(
         MarketFamily.TEAM_TOTAL,
         MarketFamily.POINT_SPREAD,
         MarketFamily.TOTAL_POINTS,
+        MarketFamily.TOTAL_RUNS,
     }
 )
 
@@ -167,14 +169,24 @@ class CanonicalEvent(BaseModel):
     source_venue: VenueName
     source_event_id: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Tennis identity. Empty for football, NFL, basketball and baseball.
+    # Participant order is canonicalised separately; these fields are not a second matcher.
+    tournament: str = ""
+    round_label: str = ""
+    event_type: str = ""
+    # Scheduled game identity beyond team names. MLB doubleheaders set this
+    # from provider start plus an explicit game/header number when present.
+    # Absent means the provider did not prove which game this is.
+    scheduled_game_key: str | None = None
 
-    def identity_tuple(self) -> tuple[str, str, str, str, datetime]:
+    def identity_tuple(self) -> tuple[str, str, str, str, datetime, str]:
         return (
             self.sport,
             self.competition,
             self.home_team,
             self.away_team,
             self.kickoff_utc,
+            self.scheduled_game_key or "",
         )
 
 

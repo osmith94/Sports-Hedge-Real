@@ -22,6 +22,7 @@ _ASSOCIATION_FOOTBALL_SPORT_NAMES = frozenset(
 )
 _AMERICAN_FOOTBALL_SPORT_NAMES = frozenset({"american football"})
 _BASKETBALL_SPORT_NAMES = frozenset({"basketball"})
+_BASEBALL_SPORT_NAMES = frozenset({"baseball"})
 
 MATCHBOOK_SESSION_PATH = "/bpapi/rest/security/session"
 DEFAULT_LOGIN_COOLDOWN_SECONDS = 30.0
@@ -226,6 +227,8 @@ class MatchbookClient(ReadOnlyVenue):
         self._football_sport_id: int | None = None
         self._american_football_sport_id: int | None = None
         self._basketball_sport_id: int | None = None
+        self._baseball_sport_id: int | None = None
+        self._tennis_sport_id: int | None = None
         self._login_lock = asyncio.Lock()
         self._closed = False
 
@@ -418,6 +421,22 @@ class MatchbookClient(ReadOnlyVenue):
         sports = await self._list_sports()
         sport_id = select_basketball_sport_id(sports)
         self._basketball_sport_id = sport_id
+        return sport_id
+
+    async def resolve_baseball_sport_id(self) -> int:
+        if self._baseball_sport_id is not None:
+            return self._baseball_sport_id
+        sports = await self._list_sports()
+        sport_id = select_baseball_sport_id(sports)
+        self._baseball_sport_id = sport_id
+        return sport_id
+
+    async def resolve_tennis_sport_id(self) -> int:
+        if self._tennis_sport_id is not None:
+            return self._tennis_sport_id
+        sports = await self._list_sports()
+        sport_id = select_tennis_sport_id(sports)
+        self._tennis_sport_id = sport_id
         return sport_id
 
     async def _list_sports(self) -> list[dict[str, Any]]:
@@ -794,6 +813,55 @@ def select_basketball_sport_id(sports: list[dict[str, Any]]) -> int:
     if len(matched_ids) > 1:
         raise MatchbookDiscoveryError(
             "Matchbook lookups/sports returned multiple Basketball sport ids: "
+            f"{sorted(matched_ids)} ({matched_names})"
+        )
+    return next(iter(matched_ids))
+
+
+def select_baseball_sport_id(sports: list[dict[str, Any]]) -> int:
+    """Pick Baseball. The name must be exactly baseball, not a prefix such as base."""
+
+    return _select_exact_sport_id(
+        sports,
+        names=_BASEBALL_SPORT_NAMES,
+        label="Baseball",
+    )
+
+
+def select_tennis_sport_id(sports: list[dict[str, Any]]) -> int:
+    """Pick Tennis. Table Tennis is a different sport and is not selected."""
+
+    return _select_exact_sport_id(sports, names=frozenset({"tennis"}), label="Tennis")
+
+
+def _select_exact_sport_id(
+    sports: list[dict[str, Any]],
+    *,
+    names: frozenset[str],
+    label: str,
+) -> int:
+    matched_ids: set[int] = set()
+    matched_names: list[str] = []
+    for item in sports:
+        if not isinstance(item, dict):
+            continue
+        name = normalize_text(str(item.get("name", "")))
+        if name not in names:
+            continue
+        sport_id = _optional_int(item.get("id"))
+        if sport_id is None:
+            raise MatchbookDiscoveryError(
+                f"Matchbook {label} sport {name!r} has no numeric id"
+            )
+        matched_ids.add(sport_id)
+        matched_names.append(name)
+    if not matched_ids:
+        raise MatchbookDiscoveryError(
+            f"Matchbook lookups/sports did not include an active {label} sport"
+        )
+    if len(matched_ids) > 1:
+        raise MatchbookDiscoveryError(
+            f"Matchbook lookups/sports returned multiple {label} sport ids: "
             f"{sorted(matched_ids)} ({matched_names})"
         )
     return next(iter(matched_ids))

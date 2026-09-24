@@ -34,6 +34,7 @@ from logging import getLogger
 from time import monotonic
 from typing import Any
 
+from sports_hedge.application.fixture_sport import resolve_discovered_fixture_sport
 from sports_hedge.application.approved_market_catalogue import (
     ApprovedMarketCatalogueRow,
     DerivedPriceEngineItem,
@@ -1534,6 +1535,7 @@ class CataloguePriceEngine:
             home_team=identity.home_canonical or "Home",
             away_team=identity.away_canonical or "Away",
             competition=identity.competition or "Premier League",
+            sport=_discovered_fixture_sport(identity),
             kickoff_utc=identity.kickoff_utc or observed_at,
             last_seen_at=observed_at,
             last_scanned_at=observed_at,
@@ -1892,6 +1894,7 @@ class CataloguePriceEngine:
             home_team=identity.home_canonical or "Home",
             away_team=identity.away_canonical or "Away",
             competition=identity.competition or "Premier League",
+            sport=_discovered_fixture_sport(identity),
             kickoff_utc=identity.kickoff_utc or observed_at,
             last_seen_at=observed_at,
             last_scanned_at=observed_at,
@@ -2242,7 +2245,10 @@ def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, An
     kickoff = identity.kickoff_utc or datetime.now(UTC)
     key = str(identity.register_canonical_key or "")
     competition = str(identity.competition or "").upper()
-    if key.startswith("NFL_") or competition == "NFL":
+    if key.startswith("MLB_") or competition == "MLB":
+        sport_name = "Baseball"
+        competition_name = identity.competition or "mlb"
+    elif key.startswith("NFL_") or competition == "NFL":
         sport_name = "American Football"
         competition_name = identity.competition or "NFL"
     elif key.startswith("NBA_") or competition == "NBA":
@@ -2359,9 +2365,22 @@ def _canonical_polymarket_market(identity: DerivedPriceEngineItem) -> CanonicalM
     )
 
 
+def _discovered_fixture_sport(identity: DerivedPriceEngineItem) -> str:
+    """Read-model sport only. Does not change catalogue identity or pricing."""
+
+    return resolve_discovered_fixture_sport(
+        competition=identity.competition,
+        register_canonical_key=identity.register_canonical_key,
+    )
+
+
 def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:
     key = str(identity.register_canonical_key or "")
     competition = str(identity.competition or "").upper()
+    if key.startswith("MLB_") or competition == "MLB":
+        from sports_hedge.mlb.constants import MLB_SPORT
+
+        return MLB_SPORT
     if key.startswith("NFL_") or competition == "NFL":
         from sports_hedge.nfl.constants import NFL_SPORT
 
@@ -2374,6 +2393,10 @@ def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:
         from sports_hedge.ncaab.constants import NCAAB_SPORT
 
         return NCAAB_SPORT
+    if key == "TENNIS_MATCH_WINNER" or competition in {"ATP", "WTA"}:
+        from sports_hedge.tennis.constants import TENNIS_SPORT
+
+        return TENNIS_SPORT
     from sports_hedge.ncaab.detect import is_ncaab_competition_label
 
     if is_ncaab_competition_label(str(identity.competition or "")):
@@ -2393,6 +2416,10 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
         return MarketFamily.FIRST_TEAM_TO_SCORE
     if key.startswith("TOTAL_GOALS_FT:"):
         return MarketFamily.TOTAL_GOALS
+    if key == "MLB_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER
+    if key.startswith("MLB_TOTAL_RUNS_FT:"):
+        return MarketFamily.TOTAL_RUNS
     if key == "NFL_GAME_WINNER_FT":
         return MarketFamily.GAME_WINNER
     if key.startswith("NFL_POINT_SPREAD_FT:"):
@@ -2406,6 +2433,8 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     if key.startswith("NBA_TOTAL_POINTS_FT:"):
         return MarketFamily.TOTAL_POINTS
     if key == "NCAAB_GAME_WINNER_FT":
+        return MarketFamily.GAME_WINNER
+    if key == "TENNIS_MATCH_WINNER":
         return MarketFamily.GAME_WINNER
     if key.startswith("NCAAB_POINT_SPREAD_FT:"):
         return MarketFamily.POINT_SPREAD

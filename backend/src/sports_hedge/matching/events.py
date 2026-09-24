@@ -53,12 +53,26 @@ def known_target_competition_mismatch(left: str | None, right: str | None) -> bo
     return left_code is not None and right_code is not None and left_code != right_code
 
 
+def _mlb_game_keys_compatible(left: CanonicalEvent, right: CanonicalEvent) -> tuple[bool, str | None]:
+    """Both keys must be present and equal. A one-sided key is ambiguous."""
+
+    from sports_hedge.mlb.constants import MLB_GAME_IDENTITY_AMBIGUOUS, MLB_GAME_IDENTITY_MISMATCH
+
+    left_key = str(getattr(left, "scheduled_game_key", None) or "").strip()
+    right_key = str(getattr(right, "scheduled_game_key", None) or "").strip()
+    if not left_key or not right_key:
+        return False, MLB_GAME_IDENTITY_AMBIGUOUS
+    if left_key != right_key:
+        return False, MLB_GAME_IDENTITY_MISMATCH
+    return True, None
+
+
 def paper_event_matcher(
     settings: object | None = None,
     *,
     learned_applicator: LearnedMappingApplicator | None = None,
     kickoff_tolerance: timedelta = timedelta(minutes=5),
-) -> "EventMatcher":
+) -> EventMatcher:
     """PAPER collector/scanner EventMatcher using the configurable experiment threshold."""
 
     if settings is None:
@@ -67,7 +81,7 @@ def paper_event_matcher(
         settings = get_settings()
     return EventMatcher(
         kickoff_tolerance=kickoff_tolerance,
-        threshold=float(getattr(settings, "paper_event_match_threshold")),
+        threshold=float(settings.paper_event_match_threshold),
         learned_applicator=learned_applicator,
     )
 
@@ -134,9 +148,15 @@ class EventMatcher:
 
         if left.sport != right.sport:
             return False
+        tennis_prefilter = self._tennis_could_match(left, right)
+        if tennis_prefilter is not None:
+            return tennis_prefilter
         ncaab_prefilter = self._ncaab_could_match(left, right)
         if ncaab_prefilter is not None:
             return ncaab_prefilter
+        mlb_prefilter = self._mlb_could_match(left, right)
+        if mlb_prefilter is not None:
+            return mlb_prefilter
         from sports_hedge.nba.constants import NBA_SPORT
         from sports_hedge.nfl.constants import NFL_SPORT
 
@@ -223,9 +243,16 @@ class EventMatcher:
         if left.sport != right.sport:
             return EventMatchResult(matched=False, confidence=0.0, reasons=["sport_mismatch"])
 
+        tennis_result = self._tennis_match(left, right)
+        if tennis_result is not None:
+            return tennis_result
+
         ncaab_result = self._ncaab_match(left, right)
         if ncaab_result is not None:
             return ncaab_result
+        mlb_result = self._mlb_match(left, right)
+        if mlb_result is not None:
+            return mlb_result
         from sports_hedge.nba.constants import NBA_SPORT
         from sports_hedge.nfl.constants import NFL_SPORT
 
@@ -371,6 +398,97 @@ class EventMatcher:
             provenance=provenance,
         )
 
+    def _tennis_could_match(self, left: CanonicalEvent, right: CanonicalEvent) -> bool | None:
+        status = self._tennis_identity(left, right)
+        if status is None:
+            return None
+        return status[0]
+
+    def _tennis_match(self, left: CanonicalEvent, right: CanonicalEvent) -> EventMatchResult | None:
+        status = self._tennis_identity(left, right)
+        if status is None:
+            return None
+        matched, reasons = status
+        return EventMatchResult(
+            matched=matched,
+            confidence=1.0 if matched else 0.0,
+            reasons=reasons,
+        )
+
+    @staticmethod
+    def _tennis_identity(
+        left: CanonicalEvent, right: CanonicalEvent
+    ) -> tuple[bool, list[str]] | None:
+        """Player pair, tour, tournament and round. Kickoff is supporting only.
+
+        Returns None when neither event is tennis so football keeps its
+        5-minute kickoff veto. A matched pair may drift for up to 14 days.
+
+        The window does not join a later meeting. Tour, admitted tournament,
+        round label and unordered player pair must all match first. A singles
+        draw has one meeting of a pair in a round, so a rematch is a different
+        round or tournament and fails closed. The window only rejects the same
+        keys when the clocks are more than 14 days apart.
+        """
+
+        from datetime import timedelta
+
+        from sports_hedge.tennis.constants import (
+            TENNIS_EVENT_SINGLES,
+            TENNIS_EVENT_TYPE_NOT_SINGLES,
+            TENNIS_PARTICIPANT_ORDER_REVERSED,
+            TENNIS_PLAYER_IDENTITY_AMBIGUOUS,
+            TENNIS_PLAYER_MISMATCH,
+            TENNIS_ROUND_MISMATCH,
+            TENNIS_ROUND_UNAVAILABLE,
+            TENNIS_SCHEDULE_DRIFT,
+            TENNIS_SCHEDULE_OUTSIDE_SUPPORTING_WINDOW,
+            TENNIS_SPORT,
+            TENNIS_TOUR_MISMATCH,
+            TENNIS_TOURNAMENT_MISMATCH,
+            TENNIS_TOURNAMENT_NOT_ADMITTED,
+        )
+        from sports_hedge.tennis.players import resolve_tennis_player, same_player_pair
+
+        if left.sport != TENNIS_SPORT and right.sport != TENNIS_SPORT:
+            return None
+        if left.sport != TENNIS_SPORT or right.sport != TENNIS_SPORT:
+            return False, ["sport_mismatch"]
+        if left.event_type != TENNIS_EVENT_SINGLES or right.event_type != TENNIS_EVENT_SINGLES:
+            return False, [TENNIS_EVENT_TYPE_NOT_SINGLES]
+        if left.competition != right.competition:
+            return False, [TENNIS_TOUR_MISMATCH]
+        if not left.tournament or not right.tournament:
+            return False, [TENNIS_TOURNAMENT_NOT_ADMITTED]
+        if left.tournament != right.tournament:
+            return False, [TENNIS_TOURNAMENT_MISMATCH]
+        if not left.round_label or not right.round_label:
+            return False, [TENNIS_ROUND_UNAVAILABLE]
+        if left.round_label != right.round_label:
+            return False, [TENNIS_ROUND_MISMATCH]
+        resolved = [
+            resolve_tennis_player(label)
+            for label in (left.home_team, left.away_team, right.home_team, right.away_team)
+        ]
+        if any(not item.ok or not item.canonical for item in resolved):
+            reason = next(
+                (item.reason for item in resolved if not item.ok),
+                TENNIS_PLAYER_IDENTITY_AMBIGUOUS,
+            )
+            return False, [reason or TENNIS_PLAYER_IDENTITY_AMBIGUOUS]
+        left_home, left_away, right_home, right_away = (item.canonical or "" for item in resolved)
+        if not same_player_pair(left_home, left_away, right_home, right_away):
+            return False, [TENNIS_PLAYER_MISMATCH]
+        kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
+        if kickoff_delta > timedelta(days=14):
+            return False, [TENNIS_SCHEDULE_OUTSIDE_SUPPORTING_WINDOW]
+        reasons: list[str] = []
+        if (left.home_team, left.away_team) != (right.home_team, right.away_team):
+            reasons.append(TENNIS_PARTICIPANT_ORDER_REVERSED)
+        if kickoff_delta.total_seconds() > 0:
+            reasons.append(TENNIS_SCHEDULE_DRIFT)
+        return True, reasons
+
     def _ncaab_could_match(self, left: CanonicalEvent, right: CanonicalEvent) -> bool | None:
         """Exact NCAAB prefilter, or None when neither event is NCAAB.
 
@@ -455,6 +573,108 @@ class EventMatcher:
             reasons.append("kickoff_offset")
         return EventMatchResult(matched=True, confidence=1.0, reasons=reasons)
 
+    def _mlb_could_match(self, left: CanonicalEvent, right: CanonicalEvent) -> bool | None:
+        """Exact MLB prefilter, or None when neither event is baseball.
+
+        Same clubs and the same calendar date are not identity. Game 1 and
+        Game 2 stay distinct, and missing game keys fail closed.
+
+        The scheduled game key is minute-precision UTC start, plus an explicit
+        game number when the provider states one. The shared 5-minute
+        EventMatcher tolerance still applies after that key matches. It does
+        not widen identity: unequal minute keys fail closed even when the
+        kickoffs are inside five minutes. The tolerance stays so MLB does not
+        drop the collector clock veto used by the other sports.
+        """
+
+        from sports_hedge.mlb.constants import MLB_SPORT
+
+        if left.sport != MLB_SPORT and right.sport != MLB_SPORT:
+            return None
+        from sports_hedge.mlb.detect import is_mlb_canonical_event
+        from sports_hedge.mlb.teams import mlb_teams_conflict, resolve_mlb_team
+
+        if not (is_mlb_canonical_event(left) and is_mlb_canonical_event(right)):
+            return False
+        labels = (left.home_team, left.away_team, right.home_team, right.away_team)
+        resolved = [resolve_mlb_team(label) for label in labels]
+        if any((item.ambiguous or item.rejected or not item.ok) for item in resolved):
+            return False
+        if mlb_teams_conflict(resolved[0].canonical or "", resolved[2].canonical or "") or mlb_teams_conflict(
+            resolved[1].canonical or "", resolved[3].canonical or ""
+        ):
+            return False
+        if (resolved[0].canonical, resolved[1].canonical) != (
+            resolved[2].canonical,
+            resolved[3].canonical,
+        ):
+            return False
+        compatible, _reason = _mlb_game_keys_compatible(left, right)
+        if not compatible:
+            return False
+        return abs(left.kickoff_utc - right.kickoff_utc) <= self.kickoff_tolerance
+
+    def _mlb_match(self, left: CanonicalEvent, right: CanonicalEvent) -> EventMatchResult | None:
+        from sports_hedge.mlb.constants import MLB_SPORT
+
+        if left.sport != MLB_SPORT and right.sport != MLB_SPORT:
+            return None
+        from sports_hedge.mlb.detect import is_mlb_canonical_event
+        from sports_hedge.mlb.teams import mlb_teams_conflict, resolve_mlb_team
+
+        if not (is_mlb_canonical_event(left) and is_mlb_canonical_event(right)):
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["rejected_non_mlb_baseball"],
+            )
+        resolved_rows = []
+        for label in (left.home_team, left.away_team, right.home_team, right.away_team):
+            resolved = resolve_mlb_team(label)
+            if resolved.ambiguous:
+                return EventMatchResult(
+                    matched=False,
+                    confidence=0.0,
+                    reasons=["mlb_team_identity_ambiguous"],
+                )
+            if resolved.rejected or not resolved.ok:
+                return EventMatchResult(
+                    matched=False,
+                    confidence=0.0,
+                    reasons=[resolved.reason or "mlb_team_identity_unresolved"],
+                )
+            resolved_rows.append(resolved)
+        compatible, game_reason = _mlb_game_keys_compatible(left, right)
+        if not compatible:
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=[game_reason or "mlb_game_identity_ambiguous"],
+            )
+        kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
+        if kickoff_delta > self.kickoff_tolerance:
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["kickoff_outside_tolerance"],
+            )
+        left_home = resolved_rows[0].canonical or ""
+        left_away = resolved_rows[1].canonical or ""
+        right_home = resolved_rows[2].canonical or ""
+        right_away = resolved_rows[3].canonical or ""
+        if mlb_teams_conflict(left_home, right_home) or mlb_teams_conflict(left_away, right_away):
+            return EventMatchResult(matched=False, confidence=0.0, reasons=["curated_team_mismatch"])
+        if left_home != right_home or left_away != right_away or not left_home or not left_away:
+            return EventMatchResult(
+                matched=False,
+                confidence=0.0,
+                reasons=["mlb_team_identity_not_exact"],
+            )
+        reasons: list[str] = []
+        if kickoff_delta.total_seconds() > 0:
+            reasons.append("kickoff_offset")
+        return EventMatchResult(matched=True, confidence=1.0, reasons=reasons)
+
     def _resolved_teams(
         self,
         event: CanonicalEvent,
@@ -463,9 +683,20 @@ class EventMatcher:
         market: CanonicalMarket | None,
         counterpart_market: CanonicalMarket | None,
     ) -> tuple[str, str, list[AppliedLearnedRule]]:
+        from sports_hedge.mlb.constants import MLB_SPORT
         from sports_hedge.nba.constants import NBA_SPORT
         from sports_hedge.nfl.constants import NFL_SPORT
 
+        if event.sport == MLB_SPORT:
+            from sports_hedge.mlb.teams import resolve_mlb_team
+
+            home = resolve_mlb_team(event.home_team)
+            away = resolve_mlb_team(event.away_team)
+            return (
+                home.canonical or event.home_team,
+                away.canonical or event.away_team,
+                [],
+            )
         if event.sport == "basketball":
             from sports_hedge.ncaab.detect import is_ncaab_canonical_event
             from sports_hedge.ncaab.teams import resolve_ncaab_team
@@ -533,9 +764,16 @@ class EventMatcher:
 
         if left_home != right_home or left_away != right_away:
             return False
+        from sports_hedge.mlb.constants import MLB_SPORT
         from sports_hedge.nba.constants import NBA_SPORT
         from sports_hedge.nfl.constants import NFL_SPORT
 
+        if sport == MLB_SPORT:
+            from sports_hedge.mlb.teams import is_canonical_mlb_team
+
+            if is_canonical_mlb_team(left_home) and is_canonical_mlb_team(left_away):
+                return EventMatcher._same_target_competition(left_competition, right_competition)
+            return False
         if sport == NFL_SPORT:
             from sports_hedge.nfl.teams import is_canonical_nfl_team
 

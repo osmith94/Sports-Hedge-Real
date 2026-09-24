@@ -89,10 +89,16 @@ def catalogue_family_key(register_canonical_key: str) -> str:
     key = str(register_canonical_key or "").strip()
     if key.startswith(f"{CANONICAL_TOTAL_GOALS_FT}:"):
         return CANONICAL_TOTAL_GOALS_FT
+    from sports_hedge.mlb.constants import CANONICAL_MLB_TOTAL_RUNS
     from sports_hedge.nba.constants import CANONICAL_NBA_POINT_SPREAD, CANONICAL_NBA_TOTAL_POINTS
-    from sports_hedge.ncaab.constants import CANONICAL_NCAAB_POINT_SPREAD, CANONICAL_NCAAB_TOTAL_POINTS
+    from sports_hedge.ncaab.constants import (
+        CANONICAL_NCAAB_POINT_SPREAD,
+        CANONICAL_NCAAB_TOTAL_POINTS,
+    )
     from sports_hedge.nfl.constants import CANONICAL_NFL_POINT_SPREAD, CANONICAL_NFL_TOTAL_POINTS
 
+    if key.startswith(f"{CANONICAL_MLB_TOTAL_RUNS}:"):
+        return CANONICAL_MLB_TOTAL_RUNS
     if key.startswith(f"{CANONICAL_NFL_POINT_SPREAD}:"):
         return CANONICAL_NFL_POINT_SPREAD
     if key.startswith(f"{CANONICAL_NFL_TOTAL_POINTS}:"):
@@ -114,6 +120,20 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
     ticker = str(series_ticker or "").strip().upper()
     if not ticker:
         return None
+    from sports_hedge.tennis.constants import CANONICAL_TENNIS_MATCH_WINNER
+    from sports_hedge.tennis.detect import approved_kalshi_tennis_series, is_tennis_kalshi_ticker
+
+    if approved_kalshi_tennis_series(ticker) is not None:
+        return CANONICAL_TENNIS_MATCH_WINNER
+    if is_tennis_kalshi_ticker(ticker):
+        return None
+    from sports_hedge.mlb.constants import (
+        CANONICAL_MLB_GAME_WINNER,
+        CANONICAL_MLB_TOTAL_RUNS,
+        MLB_KALSHI_GAME_SERIES,
+        MLB_KALSHI_TOTAL_SERIES,
+    )
+    from sports_hedge.mlb.detect import approved_kalshi_mlb_series, rejected_kalshi_mlb_series
     from sports_hedge.nba.constants import (
         CANONICAL_NBA_GAME_WINNER,
         CANONICAL_NBA_POINT_SPREAD,
@@ -145,6 +165,13 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
     )
     from sports_hedge.nfl.detect import approved_kalshi_nfl_series
 
+    if rejected_kalshi_mlb_series(ticker):
+        return None
+    mlb_series = approved_kalshi_mlb_series(ticker)
+    if mlb_series == MLB_KALSHI_GAME_SERIES:
+        return CANONICAL_MLB_GAME_WINNER
+    if mlb_series == MLB_KALSHI_TOTAL_SERIES:
+        return CANONICAL_MLB_TOTAL_RUNS
     ncaab_series = approved_kalshi_ncaab_series(ticker)
     if ncaab_series == NCAAB_KALSHI_GAME_SERIES:
         return CANONICAL_NCAAB_GAME_WINNER

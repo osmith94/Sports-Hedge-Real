@@ -57,6 +57,15 @@ def _fixture_is_ncaab(fixture: Any) -> bool:
     )
 
 
+def _fixture_is_mlb(fixture: Any) -> bool:
+    from sports_hedge.mlb.constants import MLB_COMPETITION, MLB_SPORT
+
+    sport = str(getattr(fixture, "sport", "") or "").strip()
+    competition = str(getattr(fixture, "competition", "") or "").strip()
+    code = _fixture_competition_code(fixture)
+    return sport == MLB_SPORT or competition.casefold() == MLB_COMPETITION or code == "mlb"
+
+
 def scheduling_team_key(
     name: str | None,
     competition: str | None = None,
@@ -64,6 +73,7 @@ def scheduling_team_key(
     nfl: bool = False,
     nba: bool = False,
     ncaab: bool = False,
+    mlb: bool = False,
 ) -> str:
     """Resolve a team label to the longest curated canonical prefix.
 
@@ -71,6 +81,13 @@ def scheduling_team_key(
     labels such as Saints/Chiefs/Kings cannot leak into those identities.
     """
 
+    if mlb:
+        from sports_hedge.mlb.teams import resolve_mlb_team
+
+        resolved_mlb = resolve_mlb_team(str(name or ""))
+        if resolved_mlb.ok and resolved_mlb.canonical:
+            return resolved_mlb.canonical
+        return str(name or "")
     if ncaab:
         from sports_hedge.ncaab.teams import resolve_ncaab_team
 
@@ -117,11 +134,12 @@ def hot_scheduling_team_pair(fixture: Any) -> tuple[str, str] | None:
     nfl = _fixture_is_nfl(fixture)
     nba = _fixture_is_nba(fixture)
     ncaab = _fixture_is_ncaab(fixture)
+    mlb = _fixture_is_mlb(fixture)
     home = scheduling_team_key(
-        getattr(fixture, "home_team", None), code, nfl=nfl, nba=nba, ncaab=ncaab
+        getattr(fixture, "home_team", None), code, nfl=nfl, nba=nba, ncaab=ncaab, mlb=mlb
     )
     away = scheduling_team_key(
-        getattr(fixture, "away_team", None), code, nfl=nfl, nba=nba, ncaab=ncaab
+        getattr(fixture, "away_team", None), code, nfl=nfl, nba=nba, ncaab=ncaab, mlb=mlb
     )
     if not home or not away:
         return None
@@ -131,6 +149,11 @@ def hot_scheduling_team_pair(fixture: Any) -> tuple[str, str] | None:
         from sports_hedge.nfl.teams import is_canonical_nfl_team
 
         if ncaab and is_canonical_ncaab_team(home) and is_canonical_ncaab_team(away):
+            pair = tuple(sorted((home, away)))
+            return pair[0], pair[1]
+        from sports_hedge.mlb.teams import is_canonical_mlb_team
+
+        if mlb and is_canonical_mlb_team(home) and is_canonical_mlb_team(away):
             pair = tuple(sorted((home, away)))
             return pair[0], pair[1]
         if not (nfl and is_canonical_nfl_team(home) and is_canonical_nfl_team(away)) and not (
@@ -180,6 +203,13 @@ def same_hot_scheduling_unit(left: Any, right: Any) -> bool:
     right_kickoff = hot_scheduling_kickoff(right)
     if left_kickoff is None or right_kickoff is None:
         return False
+    if _fixture_is_mlb(left) or _fixture_is_mlb(right):
+        if not (_fixture_is_mlb(left) and _fixture_is_mlb(right)):
+            return False
+        left_key = str(getattr(left, "scheduled_game_key", None) or "").strip()
+        right_key = str(getattr(right, "scheduled_game_key", None) or "").strip()
+        if not left_key or not right_key or left_key != right_key:
+            return False
     return abs(left_kickoff - right_kickoff) <= HOT_KICKOFF_TOLERANCE
 
 

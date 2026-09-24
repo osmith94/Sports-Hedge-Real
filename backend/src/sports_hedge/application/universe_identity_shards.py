@@ -583,6 +583,7 @@ async def cluster_events_sharded(
     on_shard_complete: Callable[[str, list[FixtureCluster]], None] | None = None,
     on_partial: Callable[[list[FixtureCluster]], None] | None = None,
     hot_pair_budget: int | None = None,
+    review_slot: dict[str, Any] | None = None,
 ) -> tuple[list[FixtureCluster], dict[str, int], bool, dict[str, Any], set[tuple[VenueName, str]]]:
     """Cluster by competition shard, round-robin, and publish finished shards.
 
@@ -839,6 +840,19 @@ async def cluster_events_sharded(
     )
     diagnostics["partition_ms"] = partition_ms
     diagnostics.update(loop_activity_snapshot())
+    if review_slot is not None:
+        from sports_hedge.application.universe_matching_report import (
+            capture_identity_review_evidence,
+        )
+
+        review_slot.update(
+            await capture_identity_review_evidence(
+                runs=runs,
+                matcher=matcher,
+                truncated=truncated,
+                unscored=unscored,
+            )
+        )
     blocking = diagnostics.get("blocking_shard_key")
     LOGGER.info(
         "identity_shards total=%s complete=%s hot=%s blocking=%s truncated=%s "

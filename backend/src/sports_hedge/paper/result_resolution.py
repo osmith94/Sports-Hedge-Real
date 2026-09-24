@@ -519,6 +519,11 @@ def _family_blocker(trade: PaperTrade) -> str | None:
     ncaab_block = ncaab_family_settlement_blocker(trade)
     if ncaab_block is not None:
         return ncaab_block
+    from sports_hedge.mlb.constants import MLB_SETTLEMENT_NOT_EXECUTABLE
+    from sports_hedge.mlb.settlement import is_mlb_paper_trade
+
+    if is_mlb_paper_trade(trade):
+        return MLB_SETTLEMENT_NOT_EXECUTABLE
     family = trade.market_family
     if is_nfl_paper_trade(trade):
         if family not in {

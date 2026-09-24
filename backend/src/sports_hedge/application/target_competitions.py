@@ -44,6 +44,9 @@ class TargetCompetitionCode(StrEnum):
     NFL = "nfl"
     NBA = "nba"
     NCAAB = "ncaab"
+    MLB = "mlb"
+    ATP = "atp"
+    WTA = "wta"
 
 
 class VenueMappingStatus(StrEnum):
@@ -51,7 +54,7 @@ class VenueMappingStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
-PRINCIPAL_OPERATOR_COMPETITION_COUNT = 34
+PRINCIPAL_OPERATOR_COMPETITION_COUNT = 37
 VERIFIED_ALL_3 = "VERIFIED_ALL_3"
 PARTIAL_PROVIDER_MAPPING = "PARTIAL"
 PROVIDER_MATRIX_RETRIEVED_AT = "2026-09-22"
@@ -808,6 +811,50 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
         polymarket_gamma_sport="cbb",
         kalshi_series_prefixes=("KXNCAAMBGAME", "KXNCAAMBSPREAD", "KXNCAAMBTOTAL"),
     ),
+    TargetCompetition(
+        code=TargetCompetitionCode.MLB,
+        display_name="MLB",
+        aliases=(
+            "mlb",
+            "major league baseball",
+            "pro baseball",
+        ),
+        polymarket_gamma_series_id="3",
+        polymarket_gamma_sport="mlb",
+        # Stage-1 families only. KXMLBSPREAD and inning/series/futures tickers
+        # are observed and deliberately not registered.
+        kalshi_series_prefixes=("KXMLBGAME", "KXMLBTOTAL"),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.ATP,
+        display_name="ATP",
+        aliases=(
+            "atp",
+            "atp tour",
+            "atp hangzhou",
+            "hangzhou open",
+            "atp chengdu",
+            "chengdu open",
+        ),
+        polymarket_gamma_series_id="10365",
+        polymarket_gamma_sport="atp",
+        # Exact match series only. KXATPGAME and challenger/doubles series are excluded.
+        kalshi_series_prefixes=("KXATPMATCH",),
+    ),
+    TargetCompetition(
+        code=TargetCompetitionCode.WTA,
+        display_name="WTA",
+        aliases=(
+            "wta",
+            "wta tour",
+            "wta singapore",
+            "singapore open",
+            "wta seoul",
+        ),
+        polymarket_gamma_series_id="10366",
+        polymarket_gamma_sport="wta",
+        kalshi_series_prefixes=("KXWTAMATCH",),
+    ),
 )
 
 _ALIAS_INDEX: dict[str, TargetCompetition] = {}
@@ -837,7 +884,6 @@ _NON_FOOTBALL_SPORTS = {
     "nba basketball",
     "wnba",
     "nhl",
-    "mlb",
     "baseball",
     "ice hockey",
     "snooker",
@@ -864,7 +910,7 @@ SEASON_PROPOSITION_NOT_FIXTURE = "season_proposition_not_fixture"
 
 # Operator selector grouping. Canonical codes are the operator model; venue
 # tickers stay backend-only.
-OPERATOR_COMPETITION_REGISTRY_VERSION = 7
+OPERATOR_COMPETITION_REGISTRY_VERSION = 9
 OPERATOR_UNIVERSE_SPORT = "football"
 OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("uefa", "UEFA"),
@@ -890,6 +936,8 @@ OPERATOR_GROUP_ORDER: tuple[tuple[str, str], ...] = (
     ("nfl", "NFL"),
     ("nba", "NBA"),
     ("college_basketball", "College Basketball"),
+    ("mlb", "MLB"),
+    ("tennis", "Tennis"),
 )
 OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.CHAMPIONS_LEAGUE: ("uefa", "UEFA", "Champions League"),
@@ -934,6 +982,11 @@ OPERATOR_SELECTOR_META: dict[TargetCompetitionCode, tuple[str, str, str]] = {
     TargetCompetitionCode.NFL: ("nfl", "NFL", "NFL"),
     TargetCompetitionCode.NBA: ("nba", "NBA", "NBA"),
     TargetCompetitionCode.NCAAB: ("college_basketball", "College Basketball", "NCAA Men"),
+    TargetCompetitionCode.MLB: ("mlb", "MLB", "MLB"),
+    # Selector labels name the evidence-backed tournaments. Selecting ATP/WTA
+    # does not cover the rest of either tour.
+    TargetCompetitionCode.ATP: ("tennis", "Tennis", "ATP (Hangzhou, Chengdu)"),
+    TargetCompetitionCode.WTA: ("tennis", "Tennis", "WTA (Singapore, Seoul)"),
 }
 DEFAULT_OPERATOR_COMPETITION_CODES: tuple[TargetCompetitionCode, ...] = (
     TargetCompetitionCode.PREMIER_LEAGUE,
@@ -1122,6 +1175,12 @@ KALSHI_SERIES_TICKERS_BY_CODE: dict[TargetCompetitionCode, tuple[str, ...]] = {
         "KXNCAAMBSPREAD",
         "KXNCAAMBTOTAL",
     ),
+    TargetCompetitionCode.MLB: (
+        "KXMLBGAME",
+        "KXMLBTOTAL",
+    ),
+    TargetCompetitionCode.ATP: ("KXATPMATCH",),
+    TargetCompetitionCode.WTA: ("KXWTAMATCH",),
 }
 
 
@@ -1138,11 +1197,28 @@ class ScopeFilterResult(BaseModel):
     skipped: int = 0
     skipped_by_reason: dict[str, int] = Field(default_factory=dict)
     rejected_labels: list[str] = Field(default_factory=list)
+    rejected_events: list[dict[str, Any]] = Field(default_factory=list)
+    rejected_events_truncated: bool = False
 
 
 def _scope_diagnostic_sport(competition: TargetCompetition | None) -> str:
-    if competition is not None and competition.code is TargetCompetitionCode.NBA:
+    """Sport token for scope diagnostics. Unknown competitions stay football.
+
+    NFL, basketball, baseball and tennis must not be labelled football once
+    the competition is resolved.
+    """
+
+    if competition is None:
+        return "football"
+    code = competition.code
+    if code is TargetCompetitionCode.NFL:
+        return "american_football"
+    if code in {TargetCompetitionCode.NBA, TargetCompetitionCode.NCAAB}:
         return "basketball"
+    if code is TargetCompetitionCode.MLB:
+        return "baseball"
+    if code in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA}:
+        return "tennis"
     return "football"
 
 
@@ -1429,7 +1505,13 @@ def operator_competition_catalog() -> list[dict[str, Any]]:
                 "unavailable_reason": competition_unavailable_reason(item),
                 "market_scope": "FIXTURE_MATCH",
                 "observation_only": False,
-                "paper_executable": selectable,
+                "paper_executable": selectable
+                and item.code
+                not in {
+                    TargetCompetitionCode.MLB,
+                    TargetCompetitionCode.ATP,
+                    TargetCompetitionCode.WTA,
+                },
             }
         )
     return rows
@@ -1447,10 +1529,23 @@ def selected_includes_nba(
     return TargetCompetitionCode.NBA.value in _selected_code_set(selected_codes)
 
 
+def selected_includes_mlb(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> bool:
+    return TargetCompetitionCode.MLB.value in _selected_code_set(selected_codes)
+
+
 def selected_includes_ncaab(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
 ) -> bool:
     return TargetCompetitionCode.NCAAB.value in _selected_code_set(selected_codes)
+
+
+def selected_includes_tennis(
+    selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
+) -> bool:
+    codes = _selected_code_set(selected_codes)
+    return TargetCompetitionCode.ATP.value in codes or TargetCompetitionCode.WTA.value in codes
 
 
 _NON_SOCCER_COMPETITION_CODES = frozenset(
@@ -1458,6 +1553,9 @@ _NON_SOCCER_COMPETITION_CODES = frozenset(
         TargetCompetitionCode.NFL.value,
         TargetCompetitionCode.NBA.value,
         TargetCompetitionCode.NCAAB.value,
+        TargetCompetitionCode.MLB.value,
+        TargetCompetitionCode.ATP.value,
+        TargetCompetitionCode.WTA.value,
     }
 )
 
@@ -1519,6 +1617,7 @@ def scope_matchbook_event(
         nfl_selected = TargetCompetitionCode.NFL.value in selected
         nba_selected = TargetCompetitionCode.NBA.value in selected
         ncaab_selected = TargetCompetitionCode.NCAAB.value in selected
+        mlb_selected = TargetCompetitionCode.MLB.value in selected
         if sport_norm in {"american football", "nfl"}:
             if not nfl_selected:
                 return ScopeDecision(
@@ -1527,6 +1626,43 @@ def scope_matchbook_event(
                     label=matchbook_competition_label(payload),
                     sport=sport,
                 )
+        elif sport_norm == "tennis":
+            if not selected_includes_tennis(selected):
+                return ScopeDecision(
+                    allowed=False,
+                    reason=NON_FOOTBALL_SPORT,
+                    label=matchbook_competition_label(payload),
+                    sport=sport,
+                )
+            label = matchbook_competition_label(payload)
+            from sports_hedge.tennis.constants import TENNIS_TOUR_ATP
+            from sports_hedge.tennis.tournaments import admitted_tournament
+
+            admitted = admitted_tournament(label)
+            if admitted is None:
+                return ScopeDecision(
+                    allowed=False,
+                    reason="tennis_tournament_not_admitted",
+                    label=label,
+                    sport=sport,
+                )
+            tour, _tournament = admitted
+            code = TargetCompetitionCode.ATP if tour == TENNIS_TOUR_ATP else TargetCompetitionCode.WTA
+            competition = competition_by_code(code)
+            if code.value not in selected:
+                return ScopeDecision(
+                    allowed=False,
+                    reason=OUT_OF_SCOPE_COMPETITION,
+                    competition=competition,
+                    label=label,
+                    sport=sport,
+                )
+            return ScopeDecision(
+                allowed=True,
+                competition=competition,
+                label=label or (competition.display_name if competition else None),
+                sport=sport,
+            )
         elif sport_norm in {"basketball", "nba", "nba basketball"}:
             if not nba_selected and not ncaab_selected:
                 return ScopeDecision(
@@ -1569,14 +1705,43 @@ def scope_matchbook_event(
                         label=matchbook_competition_label(payload),
                         sport=sport,
                     )
-        elif sport_norm in _NON_FOOTBALL_SPORTS:
+        elif sport_norm in {"baseball", "mlb"}:
+            if not mlb_selected:
+                return ScopeDecision(
+                    allowed=False,
+                    reason=NON_FOOTBALL_SPORT,
+                    label=matchbook_competition_label(payload),
+                    sport=sport,
+                )
+            from sports_hedge.mlb.constants import MLB_NON_MLB_BASEBALL
+            from sports_hedge.mlb.detect import matchbook_is_mlb_competition
+
+            if not matchbook_is_mlb_competition(payload):
+                return ScopeDecision(
+                    allowed=False,
+                    reason=MLB_NON_MLB_BASEBALL,
+                    label=matchbook_competition_label(payload),
+                    sport=sport,
+                )
+            from sports_hedge.mlb.constants import MLB_UNSUPPORTED_FAMILY_REASON
+            from sports_hedge.mlb.markets import mlb_text_is_rejected_family
+
+            event_name = str(payload.get("name") or payload.get("title") or "")
+            if mlb_text_is_rejected_family(event_name):
+                return ScopeDecision(
+                    allowed=False,
+                    reason=MLB_UNSUPPORTED_FAMILY_REASON,
+                    label=event_name or matchbook_competition_label(payload),
+                    sport=sport,
+                )
+            mlb = competition_by_code(TargetCompetitionCode.MLB)
             return ScopeDecision(
-                allowed=False,
-                reason=NON_FOOTBALL_SPORT,
-                label=matchbook_competition_label(payload),
+                allowed=True,
+                competition=mlb,
+                label=matchbook_competition_label(payload) or (mlb.display_name if mlb else None),
                 sport=sport,
             )
-        elif sport_norm not in _FOOTBALL_SPORTS:
+        elif sport_norm in _NON_FOOTBALL_SPORTS or sport_norm not in _FOOTBALL_SPORTS:
             return ScopeDecision(
                 allowed=False,
                 reason=NON_FOOTBALL_SPORT,
@@ -1633,6 +1798,44 @@ def scope_polymarket_event(
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
         )
+    if resolved.code in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA}:
+        from sports_hedge.tennis.normalize import polymarket_stage1_rejection
+
+        rejected = polymarket_stage1_rejection(payload)
+        if rejected is not None:
+            return ScopeDecision(
+                allowed=False,
+                reason=rejected,
+                competition=resolved,
+                label=label or resolved.display_name,
+                sport="tennis",
+            )
+    if resolved.code is TargetCompetitionCode.MLB:
+        from sports_hedge.mlb.constants import MLB_NON_MLB_BASEBALL, MLB_UNSUPPORTED_FAMILY_REASON
+        from sports_hedge.mlb.markets import mlb_text_is_rejected_family
+
+        sport_obj = payload.get("sport")
+        sport_code = ""
+        if isinstance(sport_obj, dict):
+            sport_code = normalize_text(str(sport_obj.get("sport") or ""))
+        if sport_code in {"kbo", "npb", "wbc", "ncaabaseball", "cuba", "mlbb"}:
+            return ScopeDecision(
+                allowed=False,
+                reason=MLB_NON_MLB_BASEBALL,
+                competition=resolved,
+                label=label or resolved.display_name,
+                sport="baseball",
+            )
+        blob = " ".join(str(payload.get(key) or "") for key in ("slug", "title", "question"))
+        normalized_blob = normalize_text(blob)
+        if mlb_text_is_rejected_family(blob) or "player props" in normalized_blob:
+            return ScopeDecision(
+                allowed=False,
+                reason=MLB_UNSUPPORTED_FAMILY_REASON,
+                competition=resolved,
+                label=label or _first_str(payload, "title", "slug") or resolved.display_name,
+                sport="baseball",
+            )
     if (
         resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE
         and _polymarket_payload_is_season_proposition(payload)
@@ -1658,6 +1861,18 @@ def scope_kalshi_event(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
 ) -> ScopeDecision:
     ticker = str(payload.get("series_ticker") or payload.get("ticker") or "").strip()
+    from sports_hedge.mlb.constants import MLB_NON_MLB_BASEBALL, MLB_UNSUPPORTED_FAMILY_REASON
+    from sports_hedge.mlb.detect import rejected_kalshi_mlb_series
+
+    if rejected_kalshi_mlb_series(ticker):
+        head = ticker.split("-", 1)[0].upper()
+        reason = MLB_UNSUPPORTED_FAMILY_REASON if head.startswith("KXMLB") else MLB_NON_MLB_BASEBALL
+        return ScopeDecision(
+            allowed=False,
+            reason=reason,
+            label=ticker,
+            sport="baseball",
+        )
     series_target = resolve_target_competition_from_kalshi_ticker(ticker)
     if series_target is None:
         nested = payload.get("series")
@@ -1684,6 +1899,21 @@ def scope_kalshi_event(
             label=label or resolved.display_name,
             sport=_scope_diagnostic_sport(resolved),
         )
+    if resolved.code in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA}:
+        meta = payload.get("product_metadata")
+        competition_label = None
+        if isinstance(meta, dict):
+            competition_label = str(meta.get("competition") or "").strip() or None
+        from sports_hedge.tennis.tournaments import admitted_tournament
+
+        if admitted_tournament(competition_label) is None:
+            return ScopeDecision(
+                allowed=False,
+                reason="tennis_tournament_not_admitted",
+                competition=resolved,
+                label=competition_label or label or resolved.display_name,
+                sport="tennis",
+            )
     if resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE and (
         (ticker and series_target is None)
         or _polymarket_payload_is_season_proposition(payload)
@@ -1705,6 +1935,37 @@ def scope_kalshi_event(
     )
 
 
+_MAX_RETAINED_SCOPE_REJECTIONS = 2000
+_SCOPE_LABEL_KEYS = ("title", "name", "question", "event_title", "subtitle")
+
+
+def _scope_rejection_record(
+    payload: dict[str, Any], venue: VenueName, decision: ScopeDecision
+) -> dict[str, Any]:
+    """Identity fields only. Full provider payloads stay out of the diagnostic."""
+
+    source_id = str(
+        payload.get("id") or payload.get("event_ticker") or payload.get("ticker") or ""
+    ).strip()
+    label = None
+    for key in _SCOPE_LABEL_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            label = value.strip()[:300]
+            break
+    if label is None and decision.label:
+        label = decision.label.strip()[:300]
+    return {
+        "venue": venue.value,
+        "source_event_id": source_id or None,
+        "provider_label": label,
+        "provider_label_evidence": "retained" if label else "unavailable",
+        "scope_reason": decision.reason or OUT_OF_SCOPE_COMPETITION,
+        "competition_label": decision.label,
+        "sport": decision.sport,
+    }
+
+
 def filter_in_scope_events(
     payloads: list[dict[str, Any]],
     *,
@@ -1716,8 +1977,10 @@ def filter_in_scope_events(
     allowed: list[dict[str, Any]] = []
     skipped_by_reason: dict[str, int] = {}
     rejected: list[str] = []
+    rejected_events: list[dict[str, Any]] = []
     seen_labels: set[str] = set()
     skipped = 0
+    truncated = False
     for payload in payloads:
         decision = _scope_for_venue(payload, venue, selected_codes=selected_codes)
         if decision.allowed:
@@ -1730,11 +1993,17 @@ def filter_in_scope_events(
         if label and label not in seen_labels:
             seen_labels.add(label)
             rejected.append(label)
+        if len(rejected_events) < _MAX_RETAINED_SCOPE_REJECTIONS:
+            rejected_events.append(_scope_rejection_record(payload, venue, decision))
+        else:
+            truncated = True
     return ScopeFilterResult(
         allowed=allowed,
         skipped=skipped,
         skipped_by_reason=skipped_by_reason,
         rejected_labels=rejected[:50],
+        rejected_events=rejected_events,
+        rejected_events_truncated=truncated,
     )
 
 

@@ -26,6 +26,10 @@ from sports_hedge.domain.football import (
     line_push_possible,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.matching.approved_register import (
+    REGISTER_ADMITTED_REASON,
+    registered_structural_match,
+)
 from sports_hedge.matching.ordinary_1x2 import (
     ORDINARY_1X2_OUTCOMES,
     PAPER_ASSUMED_1X2_REASON,
@@ -34,10 +38,6 @@ from sports_hedge.matching.ordinary_1x2 import (
     is_complete_regulation_time_1x2,
     is_ordinary_full_time_1x2,
     settlement_fingerprints_contradict,
-)
-from sports_hedge.matching.approved_register import (
-    REGISTER_ADMITTED_REASON,
-    registered_structural_match,
 )
 from sports_hedge.normalization.kalshi_contract_terms import (
     KALSHI_CONTRACT_FAMILY_NOT_MATCH_RESULT_REASON,
@@ -216,7 +216,10 @@ def kalshi_has_proven_settlement_contradiction(market: CanonicalMarket) -> bool:
 def both_independently_proven_regulation(left: CanonicalMarket, right: CanonicalMarket) -> bool:
     from sports_hedge.nba.settlement import nba_market_uses_paper_caveat
     from sports_hedge.nfl.settlement import nfl_market_uses_paper_caveat
+    from sports_hedge.tennis.settlement import tennis_executable_block_reason
 
+    if tennis_executable_block_reason(left, right) is not None:
+        return False
     if nfl_market_uses_paper_caveat(left) or nfl_market_uses_paper_caveat(right):
         return False
     if nba_market_uses_paper_caveat(left) or nba_market_uses_paper_caveat(right):
@@ -257,6 +260,10 @@ def paper_assumed_match_reasons() -> list[str]:
 def paper_assumed_solver_model(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     """Solver path for a registered PAPER pair. None if the register does not admit."""
 
+    from sports_hedge.tennis.settlement import tennis_executable_block_reason
+
+    if tennis_executable_block_reason(left, right) is not None:
+        return None
     if not registered_structural_match(left, right):
         return None
     if left.family is MarketFamily.FIRST_TEAM_TO_SCORE:

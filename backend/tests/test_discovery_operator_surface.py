@@ -95,9 +95,13 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     assert "fixtureHref" in source or "canonical_event_id" in source
     assert "/arbitrage/fixtures/" in source or "fixtureHref" in display
     page = (FRONTEND / "app" / "page.tsx").read_text(encoding="utf-8")
-    assert "Demo walkthrough · not live operations" in page
+    assert "Demo walkthrough · not live operations" not in page
+    assert "<GenerateMatchingReport" in page
+    report = (FRONTEND / "components" / "generate-matching-report.tsx").read_text(encoding="utf-8")
+    assert "Generate matching report" in report
+    assert "does not start a scan" in report
     assert "liveConnected" in page
-    assert "Newcastle" in page
+    assert "Newcastle" not in page
     assert "Start paper demo walkthrough" not in page
     sidebar = (FRONTEND / "components" / "sidebar.tsx").read_text(encoding="utf-8")
     assert "Operator demo" not in sidebar

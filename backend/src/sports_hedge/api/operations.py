@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 
 from sports_hedge.application.collector import FixtureDetailReadModel, FixturePaperEntry
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
@@ -9,6 +12,29 @@ from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.paper.trades import PaperTradeState
 
 router = APIRouter(prefix="/operations", tags=["operations"])
+
+
+@router.get("/universe-matching-report")
+def universe_matching_report() -> Response:
+    """Download the latest retained UNIVERSE matching review. Does not scan."""
+
+    report = get_live_refresh_coordinator().latest_universe_matching_report()
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No UNIVERSE matching evidence is retained yet. "
+                "This download does not start a scan."
+            ),
+        )
+    body = json.dumps(report, sort_keys=True, separators=(",", ":"), default=str)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": 'attachment; filename="universe-matching-report.json"'
+        },
+    )
 
 
 @router.get("/fixtures/{canonical_event_id}", response_model=FixtureDetailReadModel)

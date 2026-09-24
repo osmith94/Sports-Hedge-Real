@@ -394,6 +394,51 @@ tr:last-child td { border-bottom: none; }
 
 .ops-section { margin-bottom: 16px; }
 .discovery-disclosure { margin: 0; }
+.discovery-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 0 10px;
+}
+.discovery-filter-note { margin: 0; flex: 1 0 100%; font-size: 10px; }
+.discovery-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.discovery-filter-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  color: var(--muted);
+}
+.discovery-filter-chip {
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  cursor: pointer;
+}
+.discovery-filter-chip.on {
+  color: var(--accent);
+  border-color: rgba(124, 242, 176, .35);
+  background: var(--accent-soft);
+}
+.discovery-filter-chip:focus-visible,
+.discovery-filter-row select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.discovery-filter-row select {
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  max-width: 280px;
+}
 .discovery-summary {
   display: flex;
   flex-wrap: wrap;

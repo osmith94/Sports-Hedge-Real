@@ -65,6 +65,7 @@ REQUIRED_OUTCOMES: dict[MarketFamily, frozenset[CanonicalOutcome]] = {
     MarketFamily.GAME_WINNER: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
     MarketFamily.POINT_SPREAD: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
     MarketFamily.TOTAL_POINTS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
+    MarketFamily.TOTAL_RUNS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
 }
 
 VENUE_PAIR_ORDER: tuple[str, ...] = (

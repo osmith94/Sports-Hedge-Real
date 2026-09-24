@@ -42,6 +42,16 @@ HARD_VETO_REASONS = frozenset(
         "curated_team_mismatch",
         "nfl_team_identity_ambiguous",
         "nba_team_identity_ambiguous",
+        "tennis_player_identity_ambiguous",
+        "tennis_player_identity_unresolved",
+        "tennis_player_mismatch",
+        "tennis_round_unavailable",
+        "tennis_round_mismatch",
+        "tennis_tournament_mismatch",
+        "tennis_tournament_not_admitted",
+        "tennis_event_type_not_singles",
+        "tennis_tour_mismatch",
+        "tennis_schedule_outside_supporting_window",
         "prefilter_rejected",
     }
 )
@@ -87,6 +97,7 @@ def is_hard_identity_veto(reasons: Sequence[str], *, matched: bool, confidence: 
         reason in HARD_VETO_REASONS
         or reason.startswith("nfl_team_identity")
         or reason.startswith("nba_team_identity")
+        or reason.startswith("tennis_")
         for reason in reasons
     ):
         return True

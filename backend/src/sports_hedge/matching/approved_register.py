@@ -214,10 +214,18 @@ def venue_native_archetype_for(market: CanonicalMarket) -> VenueNativeArchetype 
 def canonical_key_for_market(market: CanonicalMarket) -> str | None:
     """Instance canonical key. TOTAL includes the exact safe half-line."""
 
+    from sports_hedge.mlb.register import mlb_canonical_key_for_market
     from sports_hedge.nba.register import nba_canonical_key_for_market
     from sports_hedge.ncaab.register import ncaab_canonical_key_for_market
     from sports_hedge.nfl.register import nfl_canonical_key_for_market
+    from sports_hedge.tennis.register import tennis_canonical_key_for_market
 
+    tennis_key = tennis_canonical_key_for_market(market)
+    if tennis_key is not None:
+        return tennis_key
+    mlb_key = mlb_canonical_key_for_market(market)
+    if mlb_key is not None:
+        return mlb_key
     nfl_key = nfl_canonical_key_for_market(market)
     if nfl_key is not None:
         return nfl_key
@@ -243,10 +251,21 @@ def approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> 
 def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     """Same canonical key on an approved PAPER venue pair, or None."""
 
+    from sports_hedge.mlb.register import is_mlb_register_market, mlb_registered_canonical_key
     from sports_hedge.nba.register import is_nba_register_market, nba_registered_canonical_key
     from sports_hedge.ncaab.register import is_ncaab_register_market, ncaab_registered_canonical_key
     from sports_hedge.nfl.register import is_nfl_register_market, nfl_registered_canonical_key
+    from sports_hedge.tennis.register import (
+        is_tennis_register_market,
+        tennis_registered_canonical_key,
+    )
 
+    tennis_key = tennis_registered_canonical_key(left, right)
+    if tennis_key is not None:
+        return tennis_key
+    mlb_key = mlb_registered_canonical_key(left, right)
+    if mlb_key is not None:
+        return mlb_key
     nfl_key = nfl_registered_canonical_key(left, right)
     if nfl_key is not None:
         return nfl_key
@@ -262,7 +281,11 @@ def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> s
         return None
     if is_ncaab_register_market(left) or is_ncaab_register_market(right):
         return None
+    if is_mlb_register_market(left) or is_mlb_register_market(right):
+        return None
     if is_nfl_register_market(left) or is_nfl_register_market(right):
+        return None
+    if is_tennis_register_market(left) or is_tennis_register_market(right):
         return None
     if not approved_paper_venue_pair(left, right):
         return None

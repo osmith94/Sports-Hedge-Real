@@ -506,6 +506,7 @@ def test_verified_new_competition_mappings_and_no_guessed_tickers() -> None:
         "nfl",
         "nba",
         "ncaab",
+        "mlb",
     ):
         assert catalog[code]["selectable"] is True
         assert catalog[code]["unavailable_reason"] is None
@@ -696,7 +697,7 @@ def test_thirty_row_matrix_only_verified_all_three_are_selectable() -> None:
             assert "KX" in "".join(row.kalshi_series_tickers)
     docs = Path(__file__).resolve().parents[2] / "docs" / "OPERATOR_COMPETITION_VERIFICATION_MATRIX.md"
     text = docs.read_text(encoding="utf-8")
-    assert "OPERATOR_COMPETITION_REGISTRY_VERSION = 7" in text
+    assert "OPERATOR_COMPETITION_REGISTRY_VERSION = 9" in text
     assert "VERIFIED_ALL_3" in text
     for row in matrix:
         assert row.code in text

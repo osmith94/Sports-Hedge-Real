@@ -147,6 +147,9 @@ class _IndexRecord:
     squad_away: frozenset[str]
     ncaab_home: str | None = None
     ncaab_away: str | None = None
+    mlb_home: str | None = None
+    mlb_away: str | None = None
+    scheduled_game_key: str | None = None
 
 
 def _kickoff_bucket(timestamp: float, window_seconds: float) -> int:
@@ -159,6 +162,7 @@ def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
     timestamp = kickoff.timestamp()
     sport = str(getattr(canonical, "sport", "") or "")
     ncaab_home, ncaab_away = _ncaab_index_teams(sport, canonical)
+    mlb_home, mlb_away, game_key = _mlb_index_identity(sport, canonical)
     return _IndexRecord(
         index=index,
         item=item,
@@ -169,6 +173,9 @@ def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
         squad_away=squad_category_fingerprint(canonical.away_team),
         ncaab_home=ncaab_home,
         ncaab_away=ncaab_away,
+        mlb_home=mlb_home,
+        mlb_away=mlb_away,
+        scheduled_game_key=game_key,
     )
 
 
@@ -187,6 +194,24 @@ def _ncaab_index_teams(sport: str, canonical: object) -> tuple[str | None, str |
     if not (home.ok and away.ok and home.canonical and away.canonical):
         return None, None
     return home.canonical, away.canonical
+
+
+def _mlb_index_identity(sport: str, canonical: object) -> tuple[str | None, str | None, str | None]:
+    """Resolve MLB clubs and the scheduled game key. Other sports stay unset."""
+
+    if sport != "baseball":
+        return None, None, None
+    from sports_hedge.mlb.detect import is_mlb_canonical_event
+    from sports_hedge.mlb.teams import resolve_mlb_team
+
+    if not is_mlb_canonical_event(canonical):
+        return None, None, None
+    home = resolve_mlb_team(str(getattr(canonical, "home_team", "") or ""))
+    away = resolve_mlb_team(str(getattr(canonical, "away_team", "") or ""))
+    game_key = str(getattr(canonical, "scheduled_game_key", None) or "").strip() or None
+    if not (home.ok and away.ok and home.canonical and away.canonical and game_key):
+        return None, None, None
+    return home.canonical, away.canonical, game_key
 
 
 def identity_name_block_keys(item: VenueEvent) -> frozenset[str]:
@@ -254,8 +279,20 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
             and left.ncaab_home == right.ncaab_home
             and left.ncaab_away == right.ncaab_away
         )
+    from sports_hedge.mlb.constants import MLB_SPORT
     from sports_hedge.nfl.constants import NFL_SPORT
 
+    if left.sport == MLB_SPORT or right.sport == MLB_SPORT:
+        return (
+            left.sport == MLB_SPORT
+            and right.sport == MLB_SPORT
+            and bool(left.mlb_home)
+            and bool(left.mlb_away)
+            and left.mlb_home == right.mlb_home
+            and left.mlb_away == right.mlb_away
+            and bool(left.scheduled_game_key)
+            and left.scheduled_game_key == right.scheduled_game_key
+        )
     if left.sport != NFL_SPORT and (
         left.squad_home != right.squad_home or left.squad_away != right.squad_away
     ):

@@ -212,6 +212,7 @@ export type DiscoveredFixture = {
   home_team: string;
   away_team: string;
   competition: string;
+  sport?: string | null;
   target_competition_code?: string | null;
   kickoff_utc: string;
   matchbook_matched?: boolean;
@@ -1015,7 +1016,7 @@ export type EventReaction = {
   }>;
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_SPORTS_HEDGE_API_URL ?? "http://localhost:8000";
 /** Browser abort for the bounded manual diagnostic. Do not raise this to wait out UNIVERSE discovery. */
 export const PAPER_COLLECTION_TIMEOUT_MS = 60_000;
 /** Slightly above the shared 25s HOT collector + 5s coordinator envelope. */
