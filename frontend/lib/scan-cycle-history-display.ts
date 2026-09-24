@@ -1,4 +1,4 @@
-import { PaperScanCycleRecord } from "./api";
+import { PaperScanCycleRecord, ScanCycleDiagnosticReport } from "./api";
 import { formatObservationAge } from "./observation-age";
 
 export const MAIN_SCAN_CYCLE_LIMIT = 8;
@@ -130,6 +130,52 @@ export function scanCycleBadgeLabel(
   if (!available) return "UNAVAILABLE";
   const count = cycles?.length ?? 0;
   return count ? `${Math.min(count, 100)} CYCLES` : "EMPTY";
+}
+
+export const SCAN_CYCLE_REPORT_ACTION = "View report";
+
+export const SCAN_CYCLE_REPORT_EMPTY =
+  "No stored diagnostic for this cycle. The short summary above is unchanged. Nothing was fabricated.";
+
+export function scanCycleDiagnosticLines(report: ScanCycleDiagnosticReport | null | undefined): string[] {
+  if (!report) return [];
+  const terminals = report.terminals ?? {};
+  const shape = report.call_shape ?? {};
+  const limits = shape.provider_limits ?? {};
+  const limitText = Object.entries(limits)
+    .map(([venue, value]) => `${venue} ${value}`)
+    .join(", ");
+  const lines = [
+    report.note || "Cycle diagnostic counters. Not live quotes.",
+    `Lane ${report.lane || "—"} · wall ${scanCycleDurationLabel(report.wall_ms)} · ${report.evaluations_per_second ?? 0} evaluated/s`,
+    `Due ${report.due ?? 0} · considered ${report.considered ?? 0} · decisions ${report.decisions ?? 0} · qualifying ${report.qualifying ?? 0} · promoted HOT ${report.promoted_hot ?? 0}`,
+    `Evaluated ${terminals.evaluated ?? 0} · skipped ${terminals.skipped ?? 0} · revalidation ${terminals.revalidation ?? 0} · failed ${terminals.failed ?? 0}`,
+    `Retry wait ${terminals.retry_wait ?? 0} · capacity deferred ${terminals.deferred ?? 0} · not started ${terminals.not_started ?? 0} · collapsed leftover ${report.leftover_collapsed ?? 0}`,
+    `Provider I/O sum ${report.provider_io_ms_sum ?? 0}ms · slot wait sum ${report.slot_wait_ms_sum ?? 0}ms · local evaluate sum ${report.local_evaluate_ms_sum ?? 0}ms`,
+    `Saved calls ${report.saved_provider_calls ?? 0} · coalesced ${report.coalesced_provider_calls ?? 0} · repeated exact ids ${report.repeated_exact_id_calls ?? 0} / distinct ${report.distinct_exact_ids ?? 0}`,
+    `Workers ${shape.worker_limit ?? "—"} · explicit slice wall ${shape.explicit_slice_wall ? "yes" : "no"} · limits ${limitText || "—"} · provider calls ${shape.provider_calls ?? 0}`,
+  ];
+  for (const stage of report.stages ?? []) {
+    lines.push(
+      `${stage.venue || "stage"} ${stage.stage || "—"} · n ${stage.count ?? 0} · avg ${stage.avg_ms ?? 0}ms · p50 ${stage.p50_ms ?? "—"} · p95 ${stage.p95_ms ?? "—"} · max ${stage.max_ms ?? "—"} · ok ${stage.success ?? 0} · timeout ${stage.timeout ?? 0} · rate limit ${stage.rate_limit ?? 0} · deferred ${stage.capacity_deferred ?? 0}`,
+    );
+  }
+  for (const slow of report.slowest ?? []) {
+    lines.push(
+      `Slow ${String(slow.venue || "")} ${String(slow.stage || "")} ${String(slow.elapsed_ms || 0)}ms ${String(slow.outcome || "")} ${String(slow.source_id || "")}`.trim(),
+    );
+  }
+  for (const error of report.worker_errors ?? []) {
+    lines.push(`Worker error ${error.type || "error"} · ${error.message || ""}`.trim());
+  }
+  const samples = report.samples ?? {};
+  for (const [bucket, rows] of Object.entries(samples)) {
+    for (const row of rows ?? []) {
+      lines.push(`${bucket} ${row.row_id || "—"} · ${row.reason || ""}`.trim());
+    }
+  }
+  if (report.timing_note) lines.push(report.timing_note);
+  return lines;
 }
 
 export function scanCycleLatestSummary(

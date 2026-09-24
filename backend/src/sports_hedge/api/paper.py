@@ -24,6 +24,10 @@ from sports_hedge.application.collector import (
     ReadOnlyCrossVenueCollector,
     acknowledge_task_cancellation,
 )
+from sports_hedge.application.cycle_diagnostics import (
+    DIAGNOSTIC_DATA_NOTE,
+    stored_cycle_diagnostic,
+)
 from sports_hedge.application.demo_walkthrough import (
     DemoCloseRequest,
     DemoResetRequest,
@@ -484,6 +488,56 @@ def recent_scan_cycles(
 ) -> list[PaperScanCycleRecord]:
     """Newest-first completed HOT/UNIVERSE refresh cycles. Not market-decision rows."""
     return repository.list_cycles(limit=limit)
+
+
+class ScanCycleDiagnosticResponse(BaseModel):
+    available: bool
+    paper_only: bool = True
+    places_orders: bool = False
+    execution_enabled: bool = False
+    data_kind: str = "scan_cycle_diagnostic"
+    cycle_id: str
+    report: dict[str, Any] | None = None
+    note: str = DIAGNOSTIC_DATA_NOTE
+
+
+@router.get("/scan-cycle-report", response_model=ScanCycleDiagnosticResponse)
+def scan_cycle_report(
+    cycle_id: str = Query(min_length=1, max_length=400),
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> ScanCycleDiagnosticResponse:
+    """Read one stored cycle diagnostic. Does not call venues or start a scan."""
+
+    report = repository.get_cycle_diagnostic(cycle_id)
+    return ScanCycleDiagnosticResponse(
+        available=report is not None,
+        cycle_id=cycle_id,
+        report=report,
+        note=DIAGNOSTIC_DATA_NOTE
+        if report is not None
+        else (
+            "No stored diagnostic for this cycle. Older cycles keep the short "
+            "summary only. Nothing was fabricated."
+        ),
+    )
+
+
+def _persist_cycle_diagnostic(
+    audit: SqlitePaperScanRepository,
+    report: CollectionReport,
+    record: Any,
+) -> None:
+    """One compact diagnostic row. Failure must not drop the cycle summary."""
+
+    try:
+        audit.append_cycle_diagnostic(
+            cycle_id=record.cycle_id,
+            scan_lane=record.scan_lane,
+            completed_at=record.completed_at,
+            report=stored_cycle_diagnostic(report),
+        )
+    except Exception:
+        LOGGER.exception("cycle diagnostic persist failed cycle_id=%s", record.cycle_id)
 
 
 @router.get("/treasury", response_model=PaperTreasurySnapshot)
@@ -1494,9 +1548,9 @@ def _persist_collection_report(
     watchlist: WatchlistService,
     scan_lane: ScanLane | str | None = None,
 ) -> None:
-    audit.append_cycle(
-        build_paper_scan_cycle_record(report, scan_lane=scan_lane or report.scan_lane)
-    )
+    record = build_paper_scan_cycle_record(report, scan_lane=scan_lane or report.scan_lane)
+    audit.append_cycle(record)
+    _persist_cycle_diagnostic(audit, report, record)
     operations = get_paper_operations_service(watchlist, get_priority_alert_service())
     already_captured = bool(
         (report.scan_diagnostics or {}).get(PRICE_ENGINE_ITEM_COMPLETION_CAPTURE)
@@ -1599,10 +1653,13 @@ async def persist_background_price_cycle_history(
     position management, or call venues/discovery.
     """
 
-    await asyncio.to_thread(
-        audit.append_cycle,
-        build_paper_scan_cycle_record(report, scan_lane=BACKGROUND_CYCLE_LANE),
-    )
+    record = build_paper_scan_cycle_record(report, scan_lane=BACKGROUND_CYCLE_LANE)
+
+    def _write() -> None:
+        audit.append_cycle(record)
+        _persist_cycle_diagnostic(audit, report, record)
+
+    await asyncio.to_thread(_write)
 
 
 async def persist_scheduled_collection_report(
@@ -1786,6 +1843,11 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 scan_diagnostics={
                     "price_engine": True,
                     "priority": PriceEnginePriority.HOT.value,
+                    **(
+                        {"cycle_diagnostic": dict(result.diagnostic)}
+                        if isinstance(getattr(result, "diagnostic", None), dict)
+                        else {}
+                    ),
                     "evaluated": list(result.evaluated),
                     "deferred": list(result.deferred),
                     "not_started": list(result.not_started),
