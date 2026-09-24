@@ -126,9 +126,11 @@ async def test_collector_selected_nations_league_queries_series_11446() -> None:
     finally:
         repository.close()
 
-    assert [request.url.params.get("series_id") for request in seen] == [NATIONS_LEAGUE_SERIES]
+    discovery = [request for request in seen if request.url.path == "/events"]
+    assert [request.url.params.get("series_id") for request in discovery] == [NATIONS_LEAGUE_SERIES]
     _assert_series_ids_not_forwarded(seen)
     assert report.raw_polymarket_events == 1
+    assert any(request.url.path == "/events/pm-andorra-malta" for request in seen)
     assert "10188" not in {request.url.params.get("series_id") for request in seen}
 
 
