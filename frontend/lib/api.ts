@@ -1170,6 +1170,7 @@ export type ScanCycleDiagnosticReport = {
   distinct_exact_ids?: number;
   call_shape?: {
     sequential_within_item?: boolean;
+    pricing_call_shape?: string;
     worker_limit?: number;
     explicit_slice_wall?: boolean;
     slice_wall_seconds?: number | null;
