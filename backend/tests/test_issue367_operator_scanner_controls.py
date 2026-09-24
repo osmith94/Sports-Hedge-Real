@@ -63,8 +63,11 @@ def test_absent_override_uses_environment_defaults(tmp_path: Path) -> None:
     assert resolved.min_net_edge == Decimal("0.02")
     assert resolved.max_execution_risk == 40
     assert resolved.hot_cadence_seconds == 45
-    assert resolved.background_cadence_seconds == 90
-    assert resolved.universe_cadence_seconds == 1800
+    assert resolved.hot_reprice_after_seconds == 45
+    assert resolved.hot_scan_interval_seconds == 10
+    assert resolved.background_reprice_after_seconds == 600
+    assert resolved.background_scan_interval_seconds == 10
+    assert resolved.universe_discovery_refresh_seconds == 3600
     assert resolved.max_allocated_per_trade_gbp == Decimal("1000")
     assert resolved.scanner_stopped is False
     assert resolved.source == "env_default"
@@ -85,8 +88,9 @@ def test_saved_settings_used_by_scheduled_kwargs_and_survive_restart(tmp_path: P
         scheduled = paper_api.scheduled_collection_kwargs()
         assert Decimal(str(scheduled["minimum_net_edge"])) == Decimal("0.0125")
         assert scheduled["maximum_execution_risk"] == 33
-        assert coordinator.status.interval_seconds == 15
-        assert coordinator.status.hot.cadence_seconds == 15
+        assert coordinator.status.interval_seconds == 10
+        assert coordinator.status.hot.scan_interval_seconds == 10
+        assert coordinator.status.hot.reprice_after_seconds == 15
         store.close()
         restarted = SqliteOperatorScannerSettingsStore(tmp_path / "operator-scanner.sqlite")
         loaded = resolve_operator_scanner_settings(restarted)
@@ -130,9 +134,11 @@ def test_update_http_is_backend_authoritative_and_does_not_scan(tmp_path: Path) 
         assert settings["hot_cadence_seconds"] == 20
         assert settings["background_cadence_seconds"] == 90
         assert settings["source"] == "operator"
-        assert body["interval_seconds"] == 20
-        assert body["hot"]["cadence_seconds"] == 20
-        assert body["background"]["cadence_seconds"] == 90
+        assert body["interval_seconds"] == 10
+        assert body["hot"]["scan_interval_seconds"] == 10
+        assert body["hot"]["reprice_after_seconds"] == 20
+        assert body["background"]["scan_interval_seconds"] == 10
+        assert body["background"]["reprice_after_seconds"] == 90
         again = client.get("/paper/live-refresh").json()
         assert Decimal(str(again["operator_settings"]["min_net_edge"])) == Decimal("0.0075")
         assert ticks == []
@@ -161,9 +167,10 @@ def test_update_shifts_hot_due_without_running_a_cycle(tmp_path: Path) -> None:
         hot_cadence_seconds=15,
         background_cadence_seconds=90,
     )
-    assert coordinator._next_hot_due == NOW + timedelta(seconds=15)
+    assert coordinator._next_hot_due == NOW + timedelta(seconds=10)
+    assert coordinator.status.hot.reprice_after_seconds == 15
     assert coordinator.plan_hot_tick(now=NOW).reason == "waiting"
-    due = coordinator.plan_hot_tick(now=NOW + timedelta(seconds=15))
+    due = coordinator.plan_hot_tick(now=NOW + timedelta(seconds=10))
     assert due.reason in {"hot_due", "hot_scope_empty"}
     bind_runtime_operator_scanner_settings_store(None)
     store.close()
@@ -263,11 +270,16 @@ def test_frontend_renders_backend_settings_not_a_second_authority() -> None:
     assert "forceSettings" in text
     assert "saveOperatorScannerSettings" in text
     assert "Auto refresh view" in text
-    assert "HOT cadence s" in text
-    assert "BACKGROUND cadence s" in text
-    assert "UNIVERSE cadence s" in text
-    assert "background_cadence_seconds" in text
-    assert "universe_cadence_seconds" in text
+    assert "HOT scan interval s" in text
+    assert "HOT reprice after s" in text
+    assert "BACKGROUND scan interval s" in text
+    assert "BACKGROUND reprice after s" in text
+    assert "UNIVERSE discovery refresh s" in text
+    assert "background_reprice_after_seconds" in text
+    assert "universe_discovery_refresh_seconds" in text
+    assert "HOT cadence s" not in text
+    assert "BACKGROUND cadence s" not in text
+    assert "UNIVERSE cadence s" not in text
     assert "disabled={loading || scannerStopped}" in text
     assert "if (liveRefresh?.scanner_stopped) return;" in text
     assert text.count("disabled={loading || scannerStopped}") >= 2

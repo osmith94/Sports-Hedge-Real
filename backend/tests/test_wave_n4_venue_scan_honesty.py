@@ -104,7 +104,7 @@ def test_hot_operator_summary_uses_stamped_clocks_not_zero_seconds_ago() -> None
         active_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI],
     )
     assert "completed at 2026-09-16T12:00:00Z" in summary
-    assert "next due 2026-09-16T12:00:30Z" in summary
+    assert "next scan 2026-09-16T12:00:30Z" in summary
     assert "0s ago" not in summary
     assert "last scan PM·K" in summary
     assert "MB unavailable" in summary

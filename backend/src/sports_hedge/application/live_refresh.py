@@ -238,6 +238,9 @@ UNIVERSE_OPERATOR_CLEAR_COMPLETENESS = "operator_clear"
 
 class LaneRefreshStatus(BaseModel):
     cadence_seconds: int
+    scan_interval_seconds: int | None = None
+    reprice_after_seconds: int | None = None
+    discovery_refresh_seconds: int | None = None
     cycle_timeout_seconds: float | None = None
     generation_budget_seconds: float | None = None
     generation_work_used_s: float = 0
@@ -320,7 +323,7 @@ class LiveRefreshStatus(BaseModel):
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
     operator_settings: OperatorScannerSettings | None = None
-    interval_seconds: int = Field(ge=15, le=300)
+    interval_seconds: int = Field(default=10, ge=5, le=300)
     cycle_in_progress: bool = False
     last_started_at: datetime | None = None
     last_completed_at: datetime | None = None
@@ -338,13 +341,16 @@ class LiveRefreshStatus(BaseModel):
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
     hot: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=30,
+            cadence_seconds=10,
+            scan_interval_seconds=10,
+            reprice_after_seconds=30,
             cycle_timeout_seconds=25,
         )
     )
     universe: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
             cadence_seconds=DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS,
+            discovery_refresh_seconds=DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS,
             # Per-chunk watchdog, not a generation lifetime. UNIVERSE generations
             # remain resumable/unbounded (Tenet 19 / Issue #328).
             cycle_timeout_seconds=150,
@@ -353,7 +359,9 @@ class LiveRefreshStatus(BaseModel):
     )
     background: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
-            cadence_seconds=90,
+            cadence_seconds=10,
+            scan_interval_seconds=10,
+            reprice_after_seconds=600,
             cycle_timeout_seconds=None,
         )
     )
@@ -615,9 +623,11 @@ class LiveRefreshCoordinator:
             self._resolved_operator_store(resolved),
             resolved,
         )
-        hot_cadence = operator.hot_cadence_seconds
-        background_cadence = operator.background_cadence_seconds
-        universe_cadence = operator.universe_cadence_seconds
+        hot_scan = operator.hot_scan_interval_seconds
+        hot_reprice = operator.hot_reprice_after_seconds
+        background_scan = operator.background_scan_interval_seconds
+        background_reprice = operator.background_reprice_after_seconds
+        universe_refresh = operator.universe_discovery_refresh_seconds
         pending = resolve_lane_venue_participation(
             self._resolved_store(resolved),
             resolved,
@@ -634,10 +644,12 @@ class LiveRefreshCoordinator:
                     "scanner_stopped": operator.scanner_stopped,
                     "universe_scans_paused": operator.universe_scans_paused,
                     "operator_settings": operator,
-                    "interval_seconds": hot_cadence,
+                    "interval_seconds": hot_scan,
                     "hot": self.status.hot.model_copy(
                         update={
-                            "cadence_seconds": hot_cadence,
+                            "cadence_seconds": hot_scan,
+                            "scan_interval_seconds": hot_scan,
+                            "reprice_after_seconds": hot_reprice,
                             "cycle_timeout_seconds": float(
                                 resolved.paper_scan_hot_cycle_timeout_seconds
                             ),
@@ -656,7 +668,8 @@ class LiveRefreshCoordinator:
                     ),
                     "universe": self.status.universe.model_copy(
                         update={
-                            "cadence_seconds": universe_cadence,
+                            "cadence_seconds": universe_refresh,
+                            "discovery_refresh_seconds": universe_refresh,
                             "cycle_timeout_seconds": self._universe_chunk_collector_timeout(
                                 now=self.now(), settings=resolved
                             ),
@@ -679,7 +692,9 @@ class LiveRefreshCoordinator:
                     ),
                     "background": self.status.background.model_copy(
                         update={
-                            "cadence_seconds": background_cadence,
+                            "cadence_seconds": background_scan,
+                            "scan_interval_seconds": background_scan,
+                            "reprice_after_seconds": background_reprice,
                         }
                     ),
                     "active_trade": self.status.active_trade.model_copy(
@@ -703,7 +718,9 @@ class LiveRefreshCoordinator:
             self._sync_venue_status_unlocked()
             self._ensure_due_times_unlocked(self.now(), resolved)
             self._arm_paused_startup_oneshot_unlocked()
-            self._sync_price_engine_background_interval_unlocked(background_cadence)
+            self._sync_price_engine_reprice_intervals_unlocked(
+                hot_reprice, background_reprice
+            )
         self._restore_universe_checkpoint()
         with self._state_lock:
             self._arm_paused_startup_oneshot_unlocked()
@@ -1131,9 +1148,14 @@ class LiveRefreshCoordinator:
         *,
         min_net_edge: Decimal,
         max_execution_risk: int,
-        hot_cadence_seconds: int,
-        background_cadence_seconds: int,
+        hot_cadence_seconds: int | None = None,
+        hot_scan_interval_seconds: int | None = None,
+        hot_reprice_after_seconds: int | None = None,
+        background_cadence_seconds: int | None = None,
+        background_scan_interval_seconds: int | None = None,
+        background_reprice_after_seconds: int | None = None,
         universe_cadence_seconds: int | None = None,
+        universe_discovery_refresh_seconds: int | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
         outright_min_net_edge: Any = _UNSET,
     ) -> OperatorScannerSettings:
@@ -1142,35 +1164,55 @@ class LiveRefreshCoordinator:
             min_net_edge=min_net_edge,
             max_execution_risk=max_execution_risk,
             hot_cadence_seconds=hot_cadence_seconds,
+            hot_scan_interval_seconds=hot_scan_interval_seconds,
+            hot_reprice_after_seconds=hot_reprice_after_seconds,
             background_cadence_seconds=background_cadence_seconds,
+            background_scan_interval_seconds=background_scan_interval_seconds,
+            background_reprice_after_seconds=background_reprice_after_seconds,
             universe_cadence_seconds=universe_cadence_seconds,
+            universe_discovery_refresh_seconds=universe_discovery_refresh_seconds,
             max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
             outright_min_net_edge=outright_min_net_edge,
         )
         with self._state_lock:
-            previous_hot = (
-                self.status.operator_settings.hot_cadence_seconds
-                if self.status.operator_settings is not None
+            previous = self.status.operator_settings
+            previous_hot_scan = (
+                previous.hot_scan_interval_seconds
+                if previous is not None
                 else self.status.interval_seconds
             )
-            previous_background = (
-                self.status.operator_settings.background_cadence_seconds
-                if self.status.operator_settings is not None
-                else self.status.background.cadence_seconds
+            previous_hot_reprice = (
+                previous.hot_reprice_after_seconds
+                if previous is not None
+                else self.status.hot.reprice_after_seconds
+            )
+            previous_background_scan = (
+                previous.background_scan_interval_seconds
+                if previous is not None
+                else self.status.background.scan_interval_seconds
+            )
+            previous_background_reprice = (
+                previous.background_reprice_after_seconds
+                if previous is not None
+                else self.status.background.reprice_after_seconds
             )
             previous_universe = (
-                self.status.operator_settings.universe_cadence_seconds
-                if self.status.operator_settings is not None
-                else self.status.universe.cadence_seconds
+                previous.universe_discovery_refresh_seconds
+                if previous is not None
+                else self.status.universe.discovery_refresh_seconds
             )
             self._apply_operator_settings_unlocked(
                 saved,
-                hot_cadence_changed=previous_hot != saved.hot_cadence_seconds,
+                hot_cadence_changed=(
+                    previous_hot_scan != saved.hot_scan_interval_seconds
+                    or previous_hot_reprice != saved.hot_reprice_after_seconds
+                ),
                 background_cadence_changed=(
-                    previous_background != saved.background_cadence_seconds
+                    previous_background_scan != saved.background_scan_interval_seconds
+                    or previous_background_reprice != saved.background_reprice_after_seconds
                 ),
                 universe_cadence_changed=(
-                    previous_universe != saved.universe_cadence_seconds
+                    previous_universe != saved.universe_discovery_refresh_seconds
                 ),
             )
         self._pulse_control()
@@ -1257,23 +1299,31 @@ class LiveRefreshCoordinator:
         self._operator_scanner_stopped = operator.scanner_stopped
         self._universe_scans_paused = operator.universe_scans_paused
         hot_changed = cadence_changed if hot_cadence_changed is None else hot_cadence_changed
-        hot_update: dict[str, Any] = {"cadence_seconds": operator.hot_cadence_seconds}
+        hot_scan = operator.hot_scan_interval_seconds
+        hot_update: dict[str, Any] = {
+            "cadence_seconds": hot_scan,
+            "scan_interval_seconds": hot_scan,
+            "reprice_after_seconds": operator.hot_reprice_after_seconds,
+        }
         if hot_changed and not self._hot_in_progress:
-            # Shift the next HOT due to the new cadence. Do not make HOT due
-            # immediately: Update must not itself trigger a scan.
-            self._next_hot_due = self.now() + timedelta(seconds=operator.hot_cadence_seconds)
+            # Shift the next HOT scan. Do not make HOT due immediately:
+            # Update must not itself trigger a provider call.
+            self._next_hot_due = self.now() + timedelta(seconds=hot_scan)
             hot_update["next_due_at"] = self._next_hot_due
+        background_scan = operator.background_scan_interval_seconds
         background_update: dict[str, Any] = {
-            "cadence_seconds": operator.background_cadence_seconds,
+            "cadence_seconds": background_scan,
+            "scan_interval_seconds": background_scan,
+            "reprice_after_seconds": operator.background_reprice_after_seconds,
         }
         if background_cadence_changed and not self._background_in_progress:
-            # Same Update contract as HOT: reschedule, do not fire a slice now.
-            self._next_background_due = self.now() + timedelta(
-                seconds=operator.background_cadence_seconds
-            )
+            # Same Update contract as HOT: reschedule the next scan, do not fire a slice now.
+            self._next_background_due = self.now() + timedelta(seconds=background_scan)
             background_update["next_due_at"] = self._next_background_due
+        universe_refresh = operator.universe_discovery_refresh_seconds
         universe_update: dict[str, Any] = {
-            "cadence_seconds": operator.universe_cadence_seconds,
+            "cadence_seconds": universe_refresh,
+            "discovery_refresh_seconds": universe_refresh,
         }
         if (
             universe_cadence_changed
@@ -1283,9 +1333,7 @@ class LiveRefreshCoordinator:
         ):
             # Fresh-generation wait only. Do not rewrite intra-generation yield
             # or trigger UNIVERSE immediately.
-            self._next_universe_due = self.now() + timedelta(
-                seconds=operator.universe_cadence_seconds
-            )
+            self._next_universe_due = self.now() + timedelta(seconds=universe_refresh)
             universe_update["next_due_at"] = self._next_universe_due
         if operator.scanner_stopped:
             hot_update["last_plan_reason"] = "operator_stopped"
@@ -1339,7 +1387,7 @@ class LiveRefreshCoordinator:
                 "scanner_stopped": operator.scanner_stopped,
                 "universe_scans_paused": operator.universe_scans_paused,
                 "operator_settings": operator,
-                "interval_seconds": operator.hot_cadence_seconds,
+                "interval_seconds": operator.hot_scan_interval_seconds,
                 "hot": self.status.hot.model_copy(update=hot_update),
                 "universe": self.status.universe.model_copy(update=universe_update),
                 "background": self.status.background.model_copy(update=background_update),
@@ -1348,11 +1396,45 @@ class LiveRefreshCoordinator:
                 else self.status.active_trade,
             }
         )
-        self._sync_price_engine_background_interval_unlocked(
-            operator.background_cadence_seconds
+        self._sync_price_engine_reprice_intervals_unlocked(
+            operator.hot_reprice_after_seconds,
+            operator.background_reprice_after_seconds,
         )
 
-    def _effective_background_cadence_seconds(
+    def _effective_hot_scan_interval_seconds(
+        self,
+        settings: Settings | None = None,
+        operator: OperatorScannerSettings | None = None,
+    ) -> int:
+        resolved_operator = operator if operator is not None else self.status.operator_settings
+        if resolved_operator is not None:
+            return int(resolved_operator.hot_scan_interval_seconds)
+        resolved = settings or get_settings()
+        return int(resolved.paper_hot_scan_interval_seconds)
+
+    def _effective_hot_reprice_after_seconds(
+        self,
+        settings: Settings | None = None,
+        operator: OperatorScannerSettings | None = None,
+    ) -> int:
+        resolved_operator = operator if operator is not None else self.status.operator_settings
+        if resolved_operator is not None:
+            return int(resolved_operator.hot_reprice_after_seconds)
+        resolved = settings or get_settings()
+        return int(resolved.paper_live_refresh_hot_interval_seconds)
+
+    def _effective_background_scan_interval_seconds(
+        self,
+        settings: Settings | None = None,
+        operator: OperatorScannerSettings | None = None,
+    ) -> int:
+        resolved_operator = operator if operator is not None else self.status.operator_settings
+        if resolved_operator is not None:
+            return int(resolved_operator.background_scan_interval_seconds)
+        resolved = settings or get_settings()
+        return int(resolved.paper_background_scan_interval_seconds)
+
+    def _effective_background_reprice_after_seconds(
         self,
         settings: Settings | None = None,
         operator: OperatorScannerSettings | None = None,
@@ -1360,12 +1442,21 @@ class LiveRefreshCoordinator:
         resolved_operator = operator if operator is not None else self.status.operator_settings
         if resolved_operator is not None:
             return clamp_background_cadence_seconds(
-                resolved_operator.background_cadence_seconds
+                resolved_operator.background_reprice_after_seconds
             )
         resolved = settings or get_settings()
         return clamp_background_cadence_seconds(
             resolved.paper_background_price_interval_seconds
         )
+
+    def _effective_background_cadence_seconds(
+        self,
+        settings: Settings | None = None,
+        operator: OperatorScannerSettings | None = None,
+    ) -> int:
+        """Worker wake interval. Row eligibility uses reprice-after, not this value."""
+
+        return self._effective_background_scan_interval_seconds(settings, operator)
 
     def _effective_universe_cadence_seconds(
         self,
@@ -1375,16 +1466,31 @@ class LiveRefreshCoordinator:
         resolved_operator = operator if operator is not None else self.status.operator_settings
         if resolved_operator is not None:
             return clamp_universe_cadence_seconds(
-                resolved_operator.universe_cadence_seconds
+                resolved_operator.universe_discovery_refresh_seconds
             )
         resolved = settings or get_settings()
         return clamp_universe_cadence_seconds(
             resolved.paper_universe_discovery_interval_seconds
         )
 
+    def _sync_price_engine_reprice_intervals_unlocked(
+        self, hot_reprice: int, background_reprice: int
+    ) -> None:
+        engine = self._price_engine
+        if engine is None:
+            return
+        hot_setter = getattr(engine, "set_hot_reprice_after_seconds", None)
+        if hot_setter is not None:
+            hot_setter(hot_reprice)
+        background_setter = getattr(engine, "set_background_interval_seconds", None)
+        if background_setter is not None:
+            background_setter(background_reprice)
+
     def _sync_price_engine_background_interval_unlocked(self, cadence: int) -> None:
-        if self._price_engine is not None:
-            self._price_engine.set_background_interval_seconds(cadence)
+        self._sync_price_engine_reprice_intervals_unlocked(
+            self._effective_hot_reprice_after_seconds(),
+            cadence,
+        )
 
     def _pulse_control(self) -> None:
         """Wake parked HOT/UNIVERSE/BACKGROUND/ACTIVE TRADE loops after Update/Stop/Resume."""
@@ -1664,13 +1770,22 @@ class LiveRefreshCoordinator:
                 "hot": self.status.hot.model_copy(
                     update={
                         "next_due_at": self._next_hot_due,
-                        "cadence_seconds": int(self.status.interval_seconds),
+                        "cadence_seconds": self._effective_hot_scan_interval_seconds(resolved),
+                        "scan_interval_seconds": self._effective_hot_scan_interval_seconds(
+                            resolved
+                        ),
+                        "reprice_after_seconds": self._effective_hot_reprice_after_seconds(
+                            resolved
+                        ),
                     }
                 ),
                 "universe": self.status.universe.model_copy(
                     update={
                         "next_due_at": self._status_universe_next_due_unlocked(evaluated=now),
                         "cadence_seconds": self._effective_universe_cadence_seconds(
+                            resolved
+                        ),
+                        "discovery_refresh_seconds": self._effective_universe_cadence_seconds(
                             resolved
                         ),
                         "resume_cursor": self._status_universe_cursor(),
@@ -1680,7 +1795,13 @@ class LiveRefreshCoordinator:
                 "background": self.status.background.model_copy(
                     update={
                         "next_due_at": self._next_background_due,
-                        "cadence_seconds": self._effective_background_cadence_seconds(
+                        "cadence_seconds": self._effective_background_scan_interval_seconds(
+                            resolved
+                        ),
+                        "scan_interval_seconds": self._effective_background_scan_interval_seconds(
+                            resolved
+                        ),
+                        "reprice_after_seconds": self._effective_background_reprice_after_seconds(
                             resolved
                         ),
                     }
@@ -1829,9 +1950,14 @@ class LiveRefreshCoordinator:
                 fixture_state=self._fixture_state,
                 clock=self.now,
                 observability=self._observability,
-                background_interval_seconds=self._effective_background_cadence_seconds(),
+                hot_interval_seconds=self._effective_hot_reprice_after_seconds(),
+                background_interval_seconds=self._effective_background_reprice_after_seconds(),
             )
         else:
+            self._sync_price_engine_reprice_intervals_unlocked(
+                self._effective_hot_reprice_after_seconds(),
+                self._effective_background_reprice_after_seconds(),
+            )
             self._price_engine.observability = self._observability
             if self._price_engine.fixture_state is None:
                 self._price_engine.fixture_state = self._fixture_state
@@ -1931,9 +2057,19 @@ class LiveRefreshCoordinator:
             )
             else WORKER_IDLE,
             "cadence_seconds": (
-                int(self.status.interval_seconds)
+                self._effective_hot_scan_interval_seconds()
                 if priority is PriceEnginePriority.HOT
-                else self._effective_background_cadence_seconds()
+                else self._effective_background_scan_interval_seconds()
+            ),
+            "scan_interval_seconds": (
+                self._effective_hot_scan_interval_seconds()
+                if priority is PriceEnginePriority.HOT
+                else self._effective_background_scan_interval_seconds()
+            ),
+            "reprice_after_seconds": (
+                self._effective_hot_reprice_after_seconds()
+                if priority is PriceEnginePriority.HOT
+                else self._effective_background_reprice_after_seconds()
             ),
         }
         if priority is PriceEnginePriority.BACKGROUND:
@@ -4274,7 +4410,7 @@ class LiveRefreshCoordinator:
         self._mark_universe_checkpoint_dirty_unlocked()
 
     def _advance_hot_due(self, now: datetime) -> None:
-        cadence = int(self.status.interval_seconds) or 30
+        cadence = self._effective_hot_scan_interval_seconds() or int(self.status.interval_seconds) or 10
         interval = timedelta(seconds=cadence)
         due = self._hot_due_started or self._next_hot_due or now
         nxt = due + interval
@@ -4728,7 +4864,9 @@ class LiveRefreshCoordinator:
             background_update = {
                 "cycle_in_progress": self._background_in_progress,
                 "next_due_at": self._next_background_due,
-                "cadence_seconds": self._effective_background_cadence_seconds(),
+                "cadence_seconds": self._effective_background_scan_interval_seconds(),
+                "scan_interval_seconds": self._effective_background_scan_interval_seconds(),
+                "reprice_after_seconds": self._effective_background_reprice_after_seconds(),
                 "evaluated_count": engine_status.background.evaluated,
                 "not_evaluated_count": (
                     engine_status.background.not_started_this_cadence
@@ -4768,6 +4906,7 @@ class LiveRefreshCoordinator:
                         update={
                             "fixture_count": universe_count,
                             "cadence_seconds": self._effective_universe_cadence_seconds(),
+                            "discovery_refresh_seconds": self._effective_universe_cadence_seconds(),
                             "next_due_at": self._status_universe_next_due_unlocked(
                                 evaluated=now
                             ),
@@ -5816,7 +5955,7 @@ def _hot_operator_summary(
     venue_clause = last_scan_venue_clause(venue_health, configured=active_venues)
     summary = (
         f"{OPERATOR_HOT_PRICING_LABEL} · completed at {_iso_stamp(completed_at)} · ran {duration_s}s · "
-        f"next due {_iso_stamp(next_due)} · {fixture_count} hot · {venue_clause}"
+        f"next scan {_iso_stamp(next_due)} · {fixture_count} hot · {venue_clause}"
     )
     if leftover_n:
         summary += f" · partial ({leftover_n} not evaluated)"
@@ -5874,7 +6013,7 @@ def _background_operator_summary(
             f"{working_set} ACTIVE · {evaluated} evaluated"
         )
     return (
-        f"{OPERATOR_BACKGROUND_PRICING_LABEL} · next due {_iso_stamp(next_due)} · "
+        f"{OPERATOR_BACKGROUND_PRICING_LABEL} · next scan {_iso_stamp(next_due)} · "
         f"{working_set} ACTIVE · {evaluated} evaluated · {leftover} not started"
     )
 
@@ -5893,7 +6032,7 @@ def _combined_operator_summary(
             f"{active_trade.fixture_count} open"
         )
     fast = hot.operator_summary or (
-        f"{OPERATOR_HOT_PRICING_LABEL} · never · ran — · next due — · {hot.fixture_count} hot"
+        f"{OPERATOR_HOT_PRICING_LABEL} · never · ran — · next scan — · {hot.fixture_count} hot"
     )
     bg = background.operator_summary if background and background.operator_summary else (
         f"{OPERATOR_BACKGROUND_PRICING_LABEL} · never"

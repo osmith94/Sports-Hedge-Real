@@ -293,17 +293,24 @@ class Settings(BaseSettings):
     paper_live_refresh_enabled: bool = False
     paper_live_refresh_interval_seconds: int = Field(default=30, ge=15, le=300)
     paper_live_refresh_hot_interval_seconds: int = Field(default=30, ge=15, le=60)
-    # Fixture radar / membership TTL only. Not BACKGROUND pricing cadence and
-    # not the UNIVERSE discovery restart gap.
+    # How often the HOT worker checks for due or newly promoted rows.
+    # Independent of hot reprice-after (paper_live_refresh_hot_interval_seconds).
+    paper_hot_scan_interval_seconds: int = Field(default=10, ge=5, le=60)
+    # Fixture radar / membership TTL only. Not BACKGROUND pricing and
+    # not the UNIVERSE discovery refresh.
     paper_live_refresh_universe_interval_seconds: int = Field(default=180, ge=60, le=300)
-    # Independent BACKGROUND price-engine cadence. Reprices known ACTIVE
-    # catalogue rows. Operator override is background_cadence_seconds (60–600).
-    paper_background_price_interval_seconds: int = Field(default=90, ge=30, le=300)
+    # How often the BACKGROUND worker checks for due rows. Independent of
+    # the per-row reprice age below.
+    paper_background_scan_interval_seconds: int = Field(default=10, ge=5, le=60)
+    # BACKGROUND per-row reprice age. A row priced at T is due again at
+    # T + this value. Operator override is background_reprice_after_seconds
+    # (60–600). Legacy background_cadence_seconds migrates here.
+    paper_background_price_interval_seconds: int = Field(default=600, ge=60, le=600)
     # After a terminal-complete UNIVERSE generation, wait this long before the
     # next fresh discovery generation. Incomplete chunks/retries do not use this.
-    # Operator override is universe_cadence_seconds (60–3600). Not radar TTL,
-    # not intra-generation worker cooldown, and not generation budget.
-    paper_universe_discovery_interval_seconds: int = Field(default=1800, ge=60, le=3600)
+    # Operator override is universe_discovery_refresh_seconds (60–3600).
+    # Not radar TTL, not intra-generation worker cooldown, and not generation budget.
+    paper_universe_discovery_interval_seconds: int = Field(default=3600, ge=60, le=3600)
     # Config-authoritative ACTIVE TRADE exact-ID cadence. Not an operator field
     # in this first pass. Do not discover/rematch on this lane.
     paper_active_trade_interval_seconds: int = Field(default=5, ge=1, le=15)
@@ -500,9 +507,10 @@ class Settings(BaseSettings):
             raise ValueError("Phase 1 supports paper mode only")
         if self.sports_hedge_execution_enabled:
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
-        # PAPER_LIVE_REFRESH_INTERVAL_SECONDS remains the HOT cadence alias.
-        hot_cadence = min(60, max(15, self.paper_live_refresh_interval_seconds))
-        self.paper_live_refresh_hot_interval_seconds = hot_cadence
+        # PAPER_LIVE_REFRESH_INTERVAL_SECONDS remains the HOT reprice-after alias.
+        # It does not set the HOT scan interval.
+        hot_reprice = min(60, max(15, self.paper_live_refresh_interval_seconds))
+        self.paper_live_refresh_hot_interval_seconds = hot_reprice
         for warning in self.polymarket_series_config_warnings():
             LOGGER.warning("%s", warning)
         leftover_concurrent = environ.get(_RETIRED_ALLOCATION_MAX_CONCURRENT_OPEN_ENV)

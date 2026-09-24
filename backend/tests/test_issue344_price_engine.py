@@ -377,7 +377,7 @@ def test_timeouts_caps_and_paper_boundary_unchanged() -> None:
     assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.MATCHBOOK] == 4
     assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.KALSHI] == 4
     assert DEFAULT_STARVATION_HOT_GRANTS == 8
-    assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 90
+    assert DEFAULT_BACKGROUND_CADENCE_SECONDS == 600
     assert PRICE_ENGINE_RETRY_BACKOFF_SECONDS == (2.0, 5.0, 10.0)
     for client in (MatchbookClient, KalshiClient, PolymarketClient):
         for method in FORBIDDEN_WRITE_METHODS:

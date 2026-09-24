@@ -61,12 +61,12 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(lines.join(" "), /Fast scan|Full sweep|Fast Scan|Full Sweep/);
     assert.doesNotMatch(lines.join(" "), /^Last scan /);
     assert.match(fastScanCopy(status(), now).detail, /completed 12s ago/);
-    assert.match(fastScanCopy(status(), now).detail, /next due in 6s/);
+    assert.match(fastScanCopy(status(), now).detail, /next scan in 6s/);
     assert.match(fastScanCopy(status(), now).detail, /ran 4.1s/);
     assert.match(fastScanCopy(status(), now).detail, /partial \(2 not evaluated\)/);
     assert.doesNotMatch(fastScanCopy(status(), now).detail, /scan_cycle_timeout/);
     assert.match(fullSweepCopy(status(), now).detail, /104 universe/);
-    assert.match(fullSweepCopy(status(), now).detail, /cadence 600s/);
+    assert.match(fullSweepCopy(status(), now).detail, /discovery refresh 600s/);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /chunk/i);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /HOT next due/);
     assert.doesNotMatch(fullSweepCopy(status(), now).detail, /until HOT/i);
@@ -92,8 +92,8 @@ describe("dual cadence operator copy", () => {
     assert.match(backgroundLines[2], /BACKGROUND pricing/);
     assert.match(backgroundLines[2], /12 ACTIVE/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
-    assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /cadence 90s/);
-    assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /next due in 90s/);
+    assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /scan interval 90s/);
+    assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /next scan in 90s/);
     assert.equal(fastScanCopy(status(), now).label, HOT_PRICING_LABEL);
     assert.equal(fullSweepCopy(status(), now).label, UNIVERSE_DISCOVERY_LABEL);
     assert.equal(backgroundPriceCopy(status(), now).label, BACKGROUND_PRICING_LABEL);
@@ -104,8 +104,8 @@ describe("dual cadence operator copy", () => {
         next_due_at: "2026-09-14T12:10:12Z",
       },
     });
-    assert.match(fullSweepCopy(completedUniverse, now).detail, /next due in 600s/);
-    assert.match(fullSweepCopy(completedUniverse, now).detail, /cadence 600s/);
+    assert.match(fullSweepCopy(completedUniverse, now).detail, /next discovery in 600s/);
+    assert.match(fullSweepCopy(completedUniverse, now).detail, /discovery refresh 600s/);
     const persistFailed = status({
       last_error: null,
       hot: {
@@ -347,14 +347,14 @@ describe("dual cadence operator copy", () => {
       },
     });
     assert.match(fullSweepCopy(paused, now).detail, /^Paused/);
-    assert.match(fullSweepCopy(paused, now).detail, /cadence 1800s/);
-    assert.doesNotMatch(fullSweepCopy(paused, now).detail, /next due in/);
+    assert.match(fullSweepCopy(paused, now).detail, /discovery refresh 1800s/);
+    assert.doesNotMatch(fullSweepCopy(paused, now).detail, /next discovery in/);
     const lines = dualScanStatusLines(paused, now);
     assert.match(lines[1], /HOT pricing/);
     assert.doesNotMatch(lines[1], /Paused/);
-    assert.match(lines[1], /next due in/);
+    assert.match(lines[1], /next scan in/);
     assert.match(lines[2], /BACKGROUND pricing/);
-    assert.match(lines[2], /next due in/);
+    assert.match(lines[2], /next scan in/);
     assert.match(lines[3], /UNIVERSE discovery · Paused/);
   });
 
@@ -385,13 +385,15 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /collect\("diagnostic"\)/);
     assert.match(scan, /does not\s+rediscover the catalogue/);
     assert.match(scan, /is not UNIVERSE discovery/);
-    assert.match(scan, /HOT cadence s/);
-    assert.match(scan, /BACKGROUND cadence s/);
-    assert.match(scan, /UNIVERSE cadence s/);
-    assert.match(scan, /background_cadence_seconds/);
-    assert.match(scan, /universe_cadence_seconds/);
-    assert.match(scan, /clampBackgroundCadenceSeconds/);
-    assert.match(scan, /clampUniverseCadenceSeconds/);
+    assert.match(scan, /HOT scan interval s/);
+    assert.match(scan, /HOT reprice after s/);
+    assert.match(scan, /BACKGROUND scan interval s/);
+    assert.match(scan, /BACKGROUND reprice after s/);
+    assert.match(scan, /UNIVERSE discovery refresh s/);
+    assert.match(scan, /background_reprice_after_seconds/);
+    assert.match(scan, /universe_discovery_refresh_seconds/);
+    assert.match(scan, /clampBackgroundRepriceAfterSeconds/);
+    assert.match(scan, /clampUniverseDiscoveryRefreshSeconds/);
     assert.match(scan, /Min net arb %/);
     assert.match(scan, /Outright Min net arb %/);
     assert.match(scan, /placeholder="not set"/);
@@ -399,14 +401,16 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /scan-field-outright/);
     assert.doesNotMatch(scan, /DEFAULT_OUTRIGHT/);
     assert.match(scan, /const \[outrightMinNetArbPercent, setOutrightMinNetArbPercent\] = useState\(""\)/);
-    assert.match(scan, /HOT cadence, BACKGROUND cadence and UNIVERSE cadence/);
-    assert.match(scan, /DEFAULT_UNIVERSE_CADENCE_SECONDS = 1800/);
+    assert.match(scan, /HOT scan interval, HOT reprice after, BACKGROUND scan interval, BACKGROUND reprice after and UNIVERSE discovery refresh/);
+    assert.match(scan, /DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS = 3600/);
     assert.match(scan, /Update/);
     assert.match(scan, /Stop scanner/);
     assert.match(scan, /Resume scanner/);
     assert.match(scan, /DEFAULT_MIN_NET_ARB_PERCENT = "1.00"/);
     assert.match(scan, /DEFAULT_MAX_RISK = "60"/);
-    assert.match(scan, /DEFAULT_HOT_CADENCE_SECONDS = 30/);
+    assert.match(scan, /DEFAULT_HOT_REPRICE_AFTER_SECONDS = 30/);
+    assert.match(scan, /DEFAULT_SCAN_INTERVAL_SECONDS = 10/);
+    assert.match(scan, /DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS = 600/);
     assert.match(scan, /DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = "1000"/);
     assert.match(scan, /useState\(DEFAULT_MIN_NET_ARB_PERCENT\)/);
     assert.match(scan, /useState\(DEFAULT_MAX_RISK\)/);

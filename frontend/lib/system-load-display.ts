@@ -99,13 +99,13 @@ export function systemLoadDetailLines(
     },
     {
       key: "BACKGROUND pricing",
-      detail: `${asCount(background.working_set)} items · ${asCount(background.due)} due · cadence ${formatCadence(background.cadence_seconds)}`,
+      detail: `${asCount(background.working_set)} items · ${asCount(background.due)} due · scan interval ${formatCadence(background.cadence_seconds)}`,
     },
     {
       key: "UNIVERSE discovery",
       detail: [
         uniProgress,
-        `cadence ${formatCadence(universe.cadence_seconds)}`,
+        `discovery refresh ${formatCadence(universe.cadence_seconds)}`,
         uniBudget,
         ...scopeBits,
       ]
