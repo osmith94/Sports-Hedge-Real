@@ -127,6 +127,13 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
         return CANONICAL_TENNIS_MATCH_WINNER
     if is_tennis_kalshi_ticker(ticker):
         return None
+    from sports_hedge.mlb.constants import (
+        CANONICAL_MLB_GAME_WINNER,
+        CANONICAL_MLB_TOTAL_RUNS,
+        MLB_KALSHI_GAME_SERIES,
+        MLB_KALSHI_TOTAL_SERIES,
+    )
+    from sports_hedge.mlb.detect import approved_kalshi_mlb_series, rejected_kalshi_mlb_series
     from sports_hedge.nba.constants import (
         CANONICAL_NBA_GAME_WINNER,
         CANONICAL_NBA_POINT_SPREAD,
@@ -156,13 +163,6 @@ def family_key_from_kalshi_series(series_ticker: str | None) -> str | None:
         NFL_KALSHI_SPREAD_SERIES,
         NFL_KALSHI_TOTAL_SERIES,
     )
-    from sports_hedge.mlb.constants import (
-        CANONICAL_MLB_GAME_WINNER,
-        CANONICAL_MLB_TOTAL_RUNS,
-        MLB_KALSHI_GAME_SERIES,
-        MLB_KALSHI_TOTAL_SERIES,
-    )
-    from sports_hedge.mlb.detect import approved_kalshi_mlb_series, rejected_kalshi_mlb_series
     from sports_hedge.nfl.detect import approved_kalshi_nfl_series
 
     if rejected_kalshi_mlb_series(ticker):

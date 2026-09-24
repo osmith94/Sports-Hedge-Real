@@ -18,7 +18,11 @@ from sports_hedge.application.collector import (
     DEFAULT_PROVIDER_CONCURRENCY,
     matchbook_scope_discovery_params,
 )
-from sports_hedge.application.fixture_clusters import VenueEvent, _compatible_index_pair, _index_record
+from sports_hedge.application.fixture_clusters import (
+    VenueEvent,
+    _compatible_index_pair,
+    _index_record,
+)
 from sports_hedge.application.hot_identity import same_hot_scheduling_unit, scheduling_team_key
 from sports_hedge.application.price_engine import CataloguePriceEngine
 from sports_hedge.application.target_competitions import (

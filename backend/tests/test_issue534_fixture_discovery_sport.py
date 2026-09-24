@@ -10,7 +10,7 @@ from sports_hedge.application.fixture_clusters import FixtureCluster, VenueEvent
 from sports_hedge.application.fixture_sport import resolve_discovered_fixture_sport
 from sports_hedge.application.price_engine import _discovered_fixture_sport
 from sports_hedge.domain.models import VenueName
-from sports_hedge.normalization.venues import MatchbookNormalizer
+from sports_hedge.normalization.venues import MatchbookNormalizer, VenueNormalizationError
 
 SEEN_AT = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
@@ -61,10 +61,14 @@ def test_discovered_fixtures_expose_football_nfl_and_baseball_sports() -> None:
     baseball = _matchbook_fixture(
         {
             "id": "mb-mlb",
-            "name": "New York Yankees vs Boston Red Sox",
+            "name": "Boston Red Sox at New York Yankees",
             "start": "2026-09-21T23:00:00Z",
             "competition-name": "MLB",
             "sport-name": "Baseball",
+            "meta-tags": [
+                {"type": "SPORT", "name": "Baseball"},
+                {"id": "1494669213760003", "type": "COMPETITION", "name": "MLB"},
+            ],
         }
     )
 
@@ -76,8 +80,22 @@ def test_discovered_fixtures_expose_football_nfl_and_baseball_sports() -> None:
     assert baseball.sport == "baseball"
     assert baseball.target_competition_code == "mlb"
     assert len({football.sport, nfl.sport, baseball.sport}) == 3
-    assert baseball.home_team == "New York Yankees"
-    assert baseball.away_team == "Boston Red Sox"
+    assert baseball.home_team == "new york yankees"
+    assert baseball.away_team == "boston red sox"
+    try:
+        _matchbook_fixture(
+            {
+                "id": "mb-other-baseball",
+                "name": "Alpha at Beta",
+                "start": "2026-09-21T23:00:00Z",
+                "sport-name": "Baseball",
+                "competition-name": "KBO",
+            }
+        )
+    except VenueNormalizationError as exc:
+        assert "non-MLB baseball is out of scope" in str(exc)
+    else:
+        raise AssertionError("non-MLB baseball must fail closed")
 
 
 def test_unrecognized_competition_labels_stay_unknown() -> None:

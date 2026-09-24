@@ -72,7 +72,7 @@ def paper_event_matcher(
     *,
     learned_applicator: LearnedMappingApplicator | None = None,
     kickoff_tolerance: timedelta = timedelta(minutes=5),
-) -> "EventMatcher":
+) -> EventMatcher:
     """PAPER collector/scanner EventMatcher using the configurable experiment threshold."""
 
     if settings is None:
@@ -81,7 +81,7 @@ def paper_event_matcher(
         settings = get_settings()
     return EventMatcher(
         kickoff_tolerance=kickoff_tolerance,
-        threshold=float(getattr(settings, "paper_event_match_threshold")),
+        threshold=float(settings.paper_event_match_threshold),
         learned_applicator=learned_applicator,
     )
 

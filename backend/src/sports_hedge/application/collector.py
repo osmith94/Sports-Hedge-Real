@@ -12,6 +12,19 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application.adaptive_scheduler import work_from_lane
+from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
+from sports_hedge.application.catalogue_maintenance import (
+    FamilyDiscoveryCompleteness,
+    family_key_from_kalshi_series,
+    pair_identity_from_markets,
+    persist_universe_catalogue_pass_offloop,
+)
+from sports_hedge.application.equivalence_diagnostics import (
+    zero_equivalent_reason_counts,
+    zero_equivalent_reason_from_inventory,
+)
+from sports_hedge.application.event_loop_activity import mark_loop_phase, yield_event_loop
 from sports_hedge.application.executable_liquidity import (
     NO_EXECUTABLE_ARB,
     HeadlineBand,
@@ -19,7 +32,6 @@ from sports_hedge.application.executable_liquidity import (
     headline_band_for,
     select_fixture_headline,
 )
-from sports_hedge.application.event_loop_activity import mark_loop_phase, yield_event_loop
 from sports_hedge.application.fixture_clusters import (
     COOP_MAX_SLICE_SECONDS,
     FixtureCluster,
@@ -28,27 +40,6 @@ from sports_hedge.application.fixture_clusters import (
     cluster_member_events,
     to_venue_event,
     universe_cluster_sort_key,
-)
-from sports_hedge.application.universe_matching_report import (
-    MAX_STORED_NORMALIZATION_REJECTIONS,
-    MAX_STORED_SCOPE_REJECTIONS,
-    attach_universe_matching_evidence,
-    new_matching_review_slot,
-    raw_display_fields,
-)
-from sports_hedge.application.universe_identity_cache import (
-    CrossGenerationIdentityCache,
-    GenerationIdentityCache,
-    bind_universe_identity_cache,
-    get_cross_generation_identity_cache,
-)
-from sports_hedge.application.universe_identity_shards import (
-    cluster_events_sharded,
-    count_raw_events_by_competition,
-)
-from sports_hedge.application.equivalence_diagnostics import (
-    zero_equivalent_reason_counts,
-    zero_equivalent_reason_from_inventory,
 )
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
@@ -62,10 +53,15 @@ from sports_hedge.application.fixture_inventory import (
     raw_runner_labels,
     scan_eligible_pair,
 )
+from sports_hedge.application.fixture_sport import (
+    provider_sport_label,
+    resolve_discovered_fixture_sport,
+)
+from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.hot_market_relationships import (
     HOT_RELATIONSHIP_MISSING_REASON,
-    HOT_REVALIDATION_NEEDED_REASON,
     HOT_RELATIONSHIP_UNAVAILABLE_REASON,
+    HOT_REVALIDATION_NEEDED_REASON,
     HotMarketRelationship,
     HotVenueLeg,
     canonical_market_from_leg,
@@ -76,11 +72,6 @@ from sports_hedge.application.hot_market_relationships import (
     kalshi_tickers_for_leg,
     matchbook_payload_is_terminal,
 )
-from sports_hedge.application.fixture_sport import (
-    provider_sport_label,
-    resolve_discovered_fixture_sport,
-)
-from sports_hedge.application.fixture_state import matchbook_fixture_state
 from sports_hedge.application.lane_venues import (
     INSUFFICIENT_VENUES_REASON,
     OPERATOR_SCAN_VENUES,
@@ -96,8 +87,14 @@ from sports_hedge.application.market_observation import (
     PolymarketObservationBuilder,
     VenueMarketObservation,
 )
+from sports_hedge.application.opportunity_viability import (
+    CROSS_VENUE_UNAVAILABLE,
+    NO_CROSS_VENUE_CANDIDATE,
+    UPPER_BOUND_BELOW_MIN_NET,
+    assess_cluster_viability,
+    get_opportunity_viability_cache,
+)
 from sports_hedge.application.paper_scan import PaperScanService
-from sports_hedge.application.adaptive_scheduler import work_from_lane
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -115,34 +112,7 @@ from sports_hedge.application.quote_freshness import (
     polymarket_books_quote_age,
     retrieval_quote_age,
 )
-from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
-from sports_hedge.application.catalogue_maintenance import (
-    FamilyDiscoveryCompleteness,
-    family_key_from_kalshi_series,
-    pair_identity_from_markets,
-    persist_universe_catalogue_pass_offloop,
-)
 from sports_hedge.application.scan_lanes import ScanLane, hot_sort_key, should_skip_market_work
-from sports_hedge.application.opportunity_viability import (
-    CROSS_VENUE_UNAVAILABLE,
-    NO_CROSS_VENUE_CANDIDATE,
-    UPPER_BOUND_BELOW_MIN_NET,
-    assess_cluster_viability,
-    get_opportunity_viability_cache,
-)
-from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
-from sports_hedge.venues.matchbook import MatchbookMarketGoneError
-from sports_hedge.catalogue.classify import classify_pair
-from sports_hedge.catalogue.coverage_rows import (
-    FixtureCatalogueCoverage,
-    aggregate_coverage_by_archetype,
-    fixture_catalogue_coverage,
-)
-from sports_hedge.catalogue.registry import (
-    family_is_phase1_expensive_work,
-    operational_kalshi_families,
-)
-from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.application.target_competitions import (
     EVENT_IDENTITY_MISMATCH,
     KALSHI_SERIES_TICKERS_BY_CODE,
@@ -159,21 +129,44 @@ from sports_hedge.application.target_competitions import (
     scope_matchbook_event,
     selected_includes_mlb,
     selected_includes_nba,
-    selected_includes_nfl,
     selected_includes_ncaab,
+    selected_includes_nfl,
     selected_includes_soccer,
     selected_includes_tennis,
 )
-from sports_hedge.outrights.universe_scopes import (
-    kalshi_series_tickers_for_season_scopes,
-    observe_selected_season_kalshi_events,
-    partition_kalshi_season_events,
+from sports_hedge.application.universe_identity_cache import (
+    CrossGenerationIdentityCache,
+    GenerationIdentityCache,
+    bind_universe_identity_cache,
+    get_cross_generation_identity_cache,
+)
+from sports_hedge.application.universe_identity_shards import (
+    cluster_events_sharded,
+    count_raw_events_by_competition,
+)
+from sports_hedge.application.universe_matching_report import (
+    MAX_STORED_NORMALIZATION_REJECTIONS,
+    MAX_STORED_SCOPE_REJECTIONS,
+    attach_universe_matching_evidence,
+    new_matching_review_slot,
+    raw_display_fields,
 )
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
     net_edge_from_implied_sum,
     quantized_edge,
 )
+from sports_hedge.catalogue.classify import classify_pair
+from sports_hedge.catalogue.coverage_rows import (
+    FixtureCatalogueCoverage,
+    aggregate_coverage_by_archetype,
+    fixture_catalogue_coverage,
+)
+from sports_hedge.catalogue.registry import (
+    family_is_phase1_expensive_work,
+    operational_kalshi_families,
+)
+from sports_hedge.catalogue.states import CatalogueApprovalState
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -206,8 +199,15 @@ from sports_hedge.normalization.venues import (
     promote_polymarket_complete_match_result,
     safe_kalshi_match_result_rule_layers,
 )
+from sports_hedge.outrights.universe_scopes import (
+    kalshi_series_tickers_for_season_scopes,
+    observe_selected_season_kalshi_events,
+    partition_kalshi_season_events,
+)
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.preparation import PreparablePaperOpportunity
+from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
+from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 
 LOGGER = getLogger(__name__)
 
@@ -1713,8 +1713,7 @@ class ReadOnlyCrossVenueCollector:
         task = asyncio.create_task(coro)
         self._inflight.add(task)
         self._provider_calls += 1
-        if len(self._inflight) > self._peak_inflight:
-            self._peak_inflight = len(self._inflight)
+        self._peak_inflight = max(self._peak_inflight, len(self._inflight))
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if task in done:

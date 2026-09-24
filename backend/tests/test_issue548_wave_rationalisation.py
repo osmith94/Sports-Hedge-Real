@@ -12,10 +12,8 @@ from datetime import UTC, datetime
 import test_tennis_stage1 as tennis_fixtures
 
 from sports_hedge.application.collector import (
-    universe_catalogue_pairs,
-)
-from sports_hedge.application.collector import (
     matchbook_scope_discovery_params,
+    universe_catalogue_pairs,
 )
 from sports_hedge.application.complete_set import scan_eligible_pair
 from sports_hedge.application.fixture_sport import resolve_discovered_fixture_sport
@@ -23,11 +21,14 @@ from sports_hedge.application.target_competitions import (
     OPERATOR_COMPETITION_REGISTRY_VERSION,
     PRINCIPAL_OPERATOR_COMPETITION_COUNT,
     TARGET_COMPETITIONS,
+    _scope_diagnostic_sport,
+    competition_by_code,
     kalshi_series_tickers_for_codes,
     operator_competition_catalog,
     polymarket_series_ids_for_codes,
     selected_includes_soccer,
 )
+from sports_hedge.application.universe_matching_report import identity_rule_for_sport
 from sports_hedge.catalogue.admission import catalogue_allows_solver
 from sports_hedge.domain.football import (
     CanonicalEvent,
@@ -37,7 +38,7 @@ from sports_hedge.domain.football import (
     SettlementFingerprint,
 )
 from sports_hedge.domain.models import VenueName
-from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
+from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult
 from sports_hedge.matching.paper_assumed import paper_assumed_solver_model
 from sports_hedge.mlb.constants import MATCHBOOK_MLB_COMPETITION_TAG_ID
 from sports_hedge.nba.constants import MATCHBOOK_NBA_COMPETITION_TAG_ID
@@ -123,6 +124,21 @@ def test_combined_scope_keeps_every_provider_family_without_a_dropping_tag() -> 
         assert ticker in tickers
     assert "KXMLBSPREAD" not in tickers
     assert "KXATPGAME" not in tickers
+
+
+def test_scope_and_matching_report_name_each_sport_rule() -> None:
+    assert _scope_diagnostic_sport(competition_by_code("premier_league")) == "football"
+    assert _scope_diagnostic_sport(competition_by_code("nfl")) == "american_football"
+    assert _scope_diagnostic_sport(competition_by_code("nba")) == "basketball"
+    assert _scope_diagnostic_sport(competition_by_code("ncaab")) == "basketball"
+    assert _scope_diagnostic_sport(competition_by_code("mlb")) == "baseball"
+    assert _scope_diagnostic_sport(competition_by_code("atp")) == "tennis"
+    assert _scope_diagnostic_sport(competition_by_code("wta")) == "tennis"
+    assert identity_rule_for_sport("football") == "football_participants_kickoff_5m"
+    assert identity_rule_for_sport("american_football") == "nfl_curated_clubs_kickoff_5m"
+    assert identity_rule_for_sport("basketball") == "basketball_curated_clubs_kickoff_5m"
+    assert identity_rule_for_sport("baseball") == "mlb_curated_clubs_minute_game_key"
+    assert identity_rule_for_sport("tennis") == "tennis_player_pair_tour_tournament_round_14d"
 
 
 def test_fixture_sport_read_model_names_all_five_sports() -> None:

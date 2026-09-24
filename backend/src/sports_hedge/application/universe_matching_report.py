@@ -53,6 +53,16 @@ _HOW_TO_READ = (
         "evidence=not_applicable means the stage never ran; "
         "evidence=not_scored_by_production means the pair was not an EventMatcher input."
     ),
+    (
+        "normalized_identity.identity_rule names the sport's match rule. "
+        "Football uses participant identity plus the 5-minute kickoff tolerance. "
+        "NFL and basketball use curated clubs plus that tolerance. "
+        "MLB uses curated clubs plus a minute scheduled-game key; the 5-minute "
+        "tolerance does not replace a missing or unequal key. "
+        "Tennis uses an unordered player pair, tour, admitted tournament and round, "
+        "with a 14-day supporting window. ATP/WTA coverage is Hangzhou, Chengdu, "
+        "Singapore and Seoul only."
+    ),
     "provider_discovery_not_returned: no retained source event on that venue was linked, and raw discovery count is zero.",
     "competition_scope_rejected: a returned event was kept out of normalization by the competition/scope filter.",
     "normalization_rejected: a returned in-scope event failed normalization before clustering.",
@@ -208,6 +218,11 @@ async def capture_identity_review_evidence(
                     "home_team": str(getattr(canonical, "home_team", "") or "") or None,
                     "away_team": str(getattr(canonical, "away_team", "") or "") or None,
                     "kickoff_utc": _iso(getattr(canonical, "kickoff_utc", None)),
+                    "tournament": str(getattr(canonical, "tournament", "") or "") or None,
+                    "round_label": str(getattr(canonical, "round_label", "") or "") or None,
+                    "event_type": str(getattr(canonical, "event_type", "") or "") or None,
+                    "scheduled_game_key": str(getattr(canonical, "scheduled_game_key", "") or "")
+                    or None,
                     "normalization_evidence": EVIDENCE_RETAINED,
                 }
             )
@@ -879,25 +894,49 @@ def _top_rejected_for_member(
     return top, max(0, len(pool) - TOP_NEARBY_CANDIDATES)
 
 
+def identity_rule_for_sport(sport: str | None) -> str:
+    """Name the identity rule the matcher actually used for this sport."""
+
+    if sport == "tennis":
+        return "tennis_player_pair_tour_tournament_round_14d"
+    if sport == "baseball":
+        return "mlb_curated_clubs_minute_game_key"
+    if sport == "american_football":
+        return "nfl_curated_clubs_kickoff_5m"
+    if sport == "basketball":
+        return "basketball_curated_clubs_kickoff_5m"
+    if sport == "football":
+        return "football_participants_kickoff_5m"
+    return "unspecified"
+
+
+def _identity_fields(node: dict[str, Any] | None) -> dict[str, Any]:
+    sport = None if not node else node.get("sport")
+    return {
+        "sport": sport,
+        "identity_rule": identity_rule_for_sport(sport if isinstance(sport, str) else None),
+        "competition": None if not node else node.get("competition"),
+        "home_team": None if not node else node.get("home_team"),
+        "away_team": None if not node else node.get("away_team"),
+        "kickoff_utc": None if not node else node.get("kickoff_utc"),
+        "tournament": None if not node else node.get("tournament"),
+        "round_label": None if not node else node.get("round_label"),
+        "event_type": None if not node else node.get("event_type"),
+        "scheduled_game_key": None if not node else node.get("scheduled_game_key"),
+    }
+
+
 def _normalized_identity(node: dict[str, Any] | None) -> dict[str, Any]:
     if not node:
         return {
             "evidence": EVIDENCE_UNAVAILABLE,
             "reason": "production_did_not_retain_normalized_identity",
-            "sport": None,
-            "competition": None,
-            "home_team": None,
-            "away_team": None,
-            "kickoff_utc": None,
+            **_identity_fields(None),
         }
     return {
         "evidence": node.get("normalization_evidence", EVIDENCE_RETAINED),
         "reason": None,
-        "sport": node.get("sport"),
-        "competition": node.get("competition"),
-        "home_team": node.get("home_team"),
-        "away_team": node.get("away_team"),
-        "kickoff_utc": node.get("kickoff_utc"),
+        **_identity_fields(node),
     }
 
 
@@ -1051,10 +1090,17 @@ def _scope_row(item: dict[str, Any]) -> dict[str, Any]:
                 "evidence": EVIDENCE_UNAVAILABLE,
                 "reason": "not_normalized",
                 "sport": item.get("sport"),
+                "identity_rule": identity_rule_for_sport(
+                    item.get("sport") if isinstance(item.get("sport"), str) else None
+                ),
                 "competition": item.get("competition_label"),
                 "home_team": None,
                 "away_team": None,
                 "kickoff_utc": None,
+                "tournament": None,
+                "round_label": None,
+                "event_type": None,
+                "scheduled_game_key": None,
             },
             "candidate_pairs": _stage(
                 "not_generated",
@@ -1104,11 +1150,7 @@ def _normalization_row(item: dict[str, Any]) -> dict[str, Any]:
             "normalized_identity": {
                 "evidence": EVIDENCE_UNAVAILABLE,
                 "reason": "normalization_failed",
-                "sport": None,
-                "competition": None,
-                "home_team": None,
-                "away_team": None,
-                "kickoff_utc": None,
+                **_identity_fields(None),
             },
             "candidate_pairs": _stage(
                 "not_generated",

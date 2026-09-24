@@ -1202,15 +1202,23 @@ class ScopeFilterResult(BaseModel):
 
 
 def _scope_diagnostic_sport(competition: TargetCompetition | None) -> str:
-    if competition is not None and competition.code in {
-        TargetCompetitionCode.ATP,
-        TargetCompetitionCode.WTA,
-    }:
-        return "tennis"
-    if competition is not None and competition.code is TargetCompetitionCode.NBA:
+    """Sport token for scope diagnostics. Unknown competitions stay football.
+
+    NFL, basketball, baseball and tennis must not be labelled football once
+    the competition is resolved.
+    """
+
+    if competition is None:
+        return "football"
+    code = competition.code
+    if code is TargetCompetitionCode.NFL:
+        return "american_football"
+    if code in {TargetCompetitionCode.NBA, TargetCompetitionCode.NCAAB}:
         return "basketball"
-    if competition is not None and competition.code is TargetCompetitionCode.MLB:
+    if code is TargetCompetitionCode.MLB:
         return "baseball"
+    if code in {TargetCompetitionCode.ATP, TargetCompetitionCode.WTA}:
+        return "tennis"
     return "football"
 
 
@@ -1733,14 +1741,7 @@ def scope_matchbook_event(
                 label=matchbook_competition_label(payload) or (mlb.display_name if mlb else None),
                 sport=sport,
             )
-        elif sport_norm in _NON_FOOTBALL_SPORTS:
-            return ScopeDecision(
-                allowed=False,
-                reason=NON_FOOTBALL_SPORT,
-                label=matchbook_competition_label(payload),
-                sport=sport,
-            )
-        elif sport_norm not in _FOOTBALL_SPORTS:
+        elif sport_norm in _NON_FOOTBALL_SPORTS or sport_norm not in _FOOTBALL_SPORTS:
             return ScopeDecision(
                 allowed=False,
                 reason=NON_FOOTBALL_SPORT,
