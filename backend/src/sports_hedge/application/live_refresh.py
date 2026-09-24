@@ -330,6 +330,7 @@ class LiveRefreshStatus(BaseModel):
     paper_auto_unwind_enabled: bool = False
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
+    background_pricing_paused: bool = False
     operator_settings: OperatorScannerSettings | None = None
     interval_seconds: int = Field(default=10, ge=5, le=300)
     cycle_in_progress: bool = False
@@ -518,6 +519,7 @@ class LiveRefreshCoordinator:
         self._control = asyncio.Event()
         self._operator_scanner_stopped = False
         self._universe_scans_paused = False
+        self._background_pricing_paused = False
         self._universe_oneshot_pending = True
         self._startup_barrier_armed = False
         self._startup_pricing_ready = False
@@ -698,7 +700,8 @@ class LiveRefreshCoordinator:
 
         While HOT/BACKGROUND are gated, Matchbook and Kalshi reserve one slot
         for ACTIVE and UNIVERSE may use the other three. After pricing is
-        released, BACKGROUND + UNIVERSE stay at or below 2 of 4.
+        released, lower-priority occupancy follows HOT demand: 3 of 4 when
+        HOT has no runnable provider work, 1 of 4 when it does.
         """
 
         from sports_hedge.application.provider_access import get_shared_provider_access
@@ -897,6 +900,7 @@ class LiveRefreshCoordinator:
             self._pending_participation = pending
             self._operator_scanner_stopped = operator.scanner_stopped
             self._universe_scans_paused = operator.universe_scans_paused
+            self._background_pricing_paused = operator.background_pricing_paused
             self.status = self.status.model_copy(
                 update={
                     "server_loop_enabled": resolved.paper_live_refresh_enabled,
@@ -904,6 +908,7 @@ class LiveRefreshCoordinator:
                     "paper_auto_unwind_enabled": resolved.paper_auto_unwind_enabled,
                     "scanner_stopped": operator.scanner_stopped,
                     "universe_scans_paused": operator.universe_scans_paused,
+                    "background_pricing_paused": operator.background_pricing_paused,
                     "startup_pricing_ready": self._startup_pricing_ready,
                     "startup_phase": (
                         STARTUP_PHASE_RUNNING
@@ -1524,6 +1529,86 @@ class LiveRefreshCoordinator:
         self._pulse_control()
         return saved
 
+    def apply_background_pricing_paused(self, paused: bool) -> OperatorScannerSettings:
+        """Pause or resume new BACKGROUND pricing slices.
+
+        Does not cancel in-flight provider calls, reset the coverage cursor,
+        clear retry state, or touch HOT, ACTIVE, or UNIVERSE.
+        """
+
+        store = self._resolved_operator_store()
+        saved = store.save_background_pricing_paused(paused)
+        with self._state_lock:
+            self._apply_operator_settings_unlocked(saved, cadence_changed=False)
+            if saved.background_pricing_paused:
+                background = self.status.background.model_copy(
+                    update={
+                        "last_plan_reason": "background_paused",
+                        "worker_state": WORKER_WAITING
+                        if not self._background_in_progress
+                        else self.status.background.worker_state,
+                        "operator_summary": (
+                            f"{OPERATOR_BACKGROUND_PRICING_LABEL} · paused by operator · "
+                            "cursor preserved · no new pricing slice"
+                        ),
+                    }
+                )
+                self.status = self.status.model_copy(
+                    update={
+                        "background_pricing_paused": True,
+                        "background": background,
+                    }
+                )
+        self._pulse_control()
+        return saved
+
+    def note_hot_scheduler_idle(self, disposition: str) -> None:
+        """Advance HOT health for a no-work wake without a pricing-history row."""
+
+        now = self.now()
+        reason = str(disposition or "no_runnable_hot_work")
+        summaries = {
+            "pass_waiting_target": (
+                f"{OPERATOR_HOT_PRICING_LABEL} · waiting for target refresh · no pricing cycle"
+            ),
+            "retry_waiting": (
+                f"{OPERATOR_HOT_PRICING_LABEL} · rows retry-waiting · no pricing cycle"
+            ),
+            "no_hot_roster": (
+                f"{OPERATOR_HOT_PRICING_LABEL} · no runnable HOT work · no pricing cycle"
+            ),
+            "no_runnable_hot_work": (
+                f"{OPERATOR_HOT_PRICING_LABEL} · no runnable HOT work · no pricing cycle"
+            ),
+        }
+        with self._state_lock:
+            engine = self._price_engine
+            if engine is not None:
+                self._next_hot_due = engine.next_runnable_at(PriceEnginePriority.HOT, now=now)
+            elif reason == "pass_waiting_target":
+                self._next_hot_due = now + timedelta(
+                    seconds=self._effective_hot_target_refresh_seconds()
+                )
+            else:
+                self._next_hot_due = now + timedelta(milliseconds=250)
+            self.status = self.status.model_copy(
+                update={
+                    "hot": self.status.hot.model_copy(
+                        update={
+                            "last_heartbeat_at": now,
+                            "last_plan_reason": reason,
+                            "worker_state": WORKER_WAITING,
+                            "cycle_in_progress": False,
+                            "next_due_at": self._next_hot_due,
+                            "operator_summary": summaries.get(
+                                reason,
+                                f"{OPERATOR_HOT_PRICING_LABEL} · {reason} · no pricing cycle",
+                            ),
+                        }
+                    )
+                }
+            )
+
     def effective_scanner_settings(
         self, settings: Settings | None = None
     ) -> OperatorScannerSettings:
@@ -1538,6 +1623,10 @@ class LiveRefreshCoordinator:
     @property
     def universe_scans_paused(self) -> bool:
         return self._universe_scans_paused
+
+    @property
+    def background_pricing_paused(self) -> bool:
+        return self._background_pricing_paused
 
     def _universe_oneshot_allowed_unlocked(self) -> bool:
         return bool(
@@ -1577,6 +1666,7 @@ class LiveRefreshCoordinator:
     ) -> None:
         self._operator_scanner_stopped = operator.scanner_stopped
         self._universe_scans_paused = operator.universe_scans_paused
+        self._background_pricing_paused = operator.background_pricing_paused
         hot_changed = cadence_changed if hot_cadence_changed is None else hot_cadence_changed
         hot_target = int(operator.hot_target_refresh_seconds)
         hot_update: dict[str, Any] = {
@@ -1663,6 +1753,7 @@ class LiveRefreshCoordinator:
             update={
                 "scanner_stopped": operator.scanner_stopped,
                 "universe_scans_paused": operator.universe_scans_paused,
+                "background_pricing_paused": operator.background_pricing_paused,
                 "operator_settings": operator,
                 "interval_seconds": hot_target,
                 "hot": self.status.hot.model_copy(update=hot_update),
@@ -2183,6 +2274,8 @@ class LiveRefreshCoordinator:
                 self._pulse_control()
             if self._startup_pricing_gated_unlocked():
                 return self._gated_pricing_plan()
+            if self._background_pricing_paused:
+                return DualCadencePlan(lane="idle", reason="background_paused")
             if self._background_in_progress:
                 return DualCadencePlan(lane="idle", reason="background_in_progress")
             next_due = self._next_background_due
@@ -2813,6 +2906,8 @@ class LiveRefreshCoordinator:
 
         if self._operator_scanner_stopped:
             raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
+        if self._background_pricing_paused:
+            raise ExplicitCollectBusy("BACKGROUND pricing paused")
         if self._startup_pricing_gated_unlocked():
             raise ExplicitCollectBusy("startup universe pending")
         if self._manual_background_in_progress or self._background_in_progress:
@@ -4416,6 +4511,7 @@ class LiveRefreshCoordinator:
             "paper_autofill_enabled": status.paper_autofill_enabled,
             "scanner_stopped": status.scanner_stopped,
             "universe_scans_paused": status.universe_scans_paused,
+            "background_pricing_paused": status.background_pricing_paused,
             "interval_seconds": status.interval_seconds,
             "hot_in_progress": self._hot_in_progress,
             "background_in_progress": self._background_in_progress,
@@ -5330,6 +5426,7 @@ class LiveRefreshCoordinator:
                     or self._manual_background_in_progress,
                     "scanner_stopped": self._operator_scanner_stopped,
                     "universe_scans_paused": self._universe_scans_paused,
+                    "background_pricing_paused": self._background_pricing_paused,
                     "startup_pricing_ready": self._startup_pricing_ready,
                     "startup_phase": (
                         STARTUP_PHASE_RUNNING
@@ -5671,6 +5768,13 @@ class LiveRefreshCoordinator:
                             background_update["cycle_in_progress"] = False
                             background_update["operator_summary"] = (
                                 f"{OPERATOR_BACKGROUND_PRICING_LABEL} · stopped by operator · no provider call"
+                            )
+                        elif plan.reason == "background_paused":
+                            background_update["worker_state"] = WORKER_WAITING
+                            background_update["cycle_in_progress"] = False
+                            background_update["operator_summary"] = (
+                                f"{OPERATOR_BACKGROUND_PRICING_LABEL} · paused by operator · "
+                                "cursor preserved · no new pricing slice"
                             )
                         self.status = self.status.model_copy(
                             update={

@@ -35,6 +35,8 @@ class CoverageCursor:
     last_full_pass_seconds: float | None = None
     hold_until: datetime | None = None
     last_claimed: list[str] = field(default_factory=list)
+    # Last membership order. Recovery uses this sequence, not row-id sort.
+    order_snapshot: list[str] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, object]:
         position = self.completed_this_pass
@@ -63,8 +65,11 @@ class CoverageCursor:
             for row_id in self.pending_inserts
             if row_id in member_set and row_id not in self.visited
         ]
+        previous = list(self.order_snapshot)
         if self.cursor_after_id not in member_set:
-            self.cursor_after_id = _predecessor(ordered, self.cursor_after_id)
+            self.cursor_after_id = _anchor_after_removal(
+                previous, ordered, self.cursor_after_id
+            )
         start = _start_index(ordered, self.cursor_after_id)
         passed = set(ordered[:start])
         known = set(self.pending_inserts) | self.visited
@@ -76,6 +81,7 @@ class CoverageCursor:
                 known.add(row_id)
         self.catalogue_count = len(ordered)
         self.completed_this_pass = len(self.visited)
+        self.order_snapshot = ordered
         return ordered
 
     def claim(
@@ -238,6 +244,7 @@ class CoverageCursor:
             "catalogue_count": self.catalogue_count,
             "pass_started_at": self.pass_started_at.isoformat() if self.pass_started_at else None,
             "last_full_pass_seconds": self.last_full_pass_seconds,
+            "order_snapshot": list(self.order_snapshot),
         }
 
     @classmethod
@@ -261,7 +268,39 @@ class CoverageCursor:
             cursor.pass_started_at = datetime.fromisoformat(started)
         last = payload.get("last_full_pass_seconds")
         cursor.last_full_pass_seconds = float(last) if last is not None else None
+        snapshot = payload.get("order_snapshot") or []
+        if isinstance(snapshot, list):
+            cursor.order_snapshot = [str(item) for item in snapshot]
         return cursor
+
+
+def _anchor_after_removal(
+    previous: list[str],
+    ordered: list[str],
+    missing: str | None,
+) -> str | None:
+    """Point the cursor at the predecessor of the next surviving row.
+
+    ``previous`` is the last membership order, which for HOT is
+    fixture-interleaved and is not sorted by catalogue row id. Walking that
+    sequence finds the next remaining row. Lexical comparison is only the
+    fallback when no order was stored (older BACKGROUND resume payloads).
+    """
+
+    if not missing:
+        return None
+    if previous and missing in previous:
+        member_set = set(ordered)
+        index = previous.index(missing)
+        for row_id in previous[index + 1 :]:
+            if row_id not in member_set:
+                continue
+            new_index = ordered.index(row_id)
+            if new_index == 0:
+                return None
+            return ordered[new_index - 1]
+        return ordered[-1] if ordered else None
+    return _predecessor(ordered, missing)
 
 
 def _predecessor(ordered: list[str], missing: str | None) -> str | None:
@@ -278,12 +317,13 @@ def _predecessor(ordered: list[str], missing: str | None) -> str | None:
 def _start_index(ordered: list[str], cursor_after_id: str | None) -> int:
     if cursor_after_id is None:
         return 0
-    if cursor_after_id in ordered:
+    try:
         return ordered.index(cursor_after_id) + 1
-    for index, row_id in enumerate(ordered):
-        if row_id > cursor_after_id:
-            return index
-    return len(ordered)
+    except ValueError:
+        for index, row_id in enumerate(ordered):
+            if row_id > cursor_after_id:
+                return index
+        return len(ordered)
 
 
 def _seconds(value: float):

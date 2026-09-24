@@ -418,7 +418,7 @@ async def test_hot_consumer_is_granted_ahead_of_a_queued_background_read() -> No
 
     async def _pressure() -> None:
         await matchbook.two.wait()
-        assert layer.lower_in_use[VenueName.MATCHBOOK] == 2
+        assert 2 <= layer.lower_in_use[VenueName.MATCHBOOK] <= 3
         engine.reconstruct()
         hot_due = engine.due_items(PriceEnginePriority.HOT, now=NOW)
         assert [item.identity.catalogue_row_id for item in hot_due] == [hot_row.catalogue_row_id]
@@ -433,7 +433,7 @@ async def test_hot_consumer_is_granted_ahead_of_a_queued_background_read() -> No
         )
         background_task = asyncio.create_task(_queued_background())
         await matchbook.hot_entered.wait()
-        assert layer.lower_in_use[VenueName.MATCHBOOK] <= 2
+        assert layer.lower_in_use[VenueName.MATCHBOOK] <= 3
         assert not background_entered.is_set()
         matchbook.hot_release.set()
         matchbook.release_held.set()

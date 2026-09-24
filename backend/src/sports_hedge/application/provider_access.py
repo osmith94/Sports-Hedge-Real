@@ -6,15 +6,21 @@ UNIVERSE is waiting, the next slot goes to UNIVERSE so a busy HOT roster
 cannot starve discovery.
 
 Matchbook and Kalshi keep their physical caps (4). After startup pricing is
-released, new BACKGROUND and UNIVERSE leases together may occupy at most 2 of
-those 4 slots. The other two stay available for ACTIVE and HOT even when no
-high-priority request is queued. Already-running lower-priority HTTP calls are
-not cancelled. Anti-starvation may still grant a lower-priority waiter into a
+released, lower-priority occupancy follows HOT demand:
+
+- no runnable HOT work: BACKGROUND and UNIVERSE may use 3 of 4, leaving one
+  slot for ACTIVE even when ACTIVE is not queued;
+- runnable HOT work: new lower-priority leases stop at 1 of 4 so ACTIVE and
+  HOT can use the rest. HOT is not capped. ACTIVE still outranks HOT.
+
+Already-running lower-priority HTTP calls are not cancelled when demand
+changes. Anti-starvation may still grant a lower-priority waiter into a
 non-protected slot; it must not spend the protected headroom.
 
 During the startup UNIVERSE barrier, HOT and BACKGROUND are already gated.
-The reservation shrinks to one slot so ACTIVE cannot be locked out, and
-UNIVERSE may use the other three. That is the whole startup exception.
+The reservation is one slot so ACTIVE cannot be locked out, and UNIVERSE may
+use the other three. That is the whole startup exception. Once pricing opens,
+the dynamic policy above applies.
 
 Issue #473 adds deadline/value-aware ranking and queue metrics on top of
 those slot caps. Limits are never raised here.
@@ -60,8 +66,10 @@ DEFAULT_STARVATION_HOT_GRANTS = 8
 PRICE_ENGINE_BACKGROUND_LANE = "background"
 PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
 PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
-# Post-startup Matchbook/Kalshi: lower-priority occupancy stays at or below this.
-LOWER_PRIORITY_OCCUPANCY_CEILING = 2
+# No runnable HOT work: leave one physical slot for ACTIVE (3 of 4 for lower).
+IDLE_ACTIVE_RESERVED_SLOTS = 1
+# Runnable HOT work: new lower-priority leases stop at one slot.
+HOT_DEMAND_LOWER_OCCUPANCY_CEILING = 1
 # Startup UNIVERSE barrier: leave one slot for ACTIVE. HOT/BACKGROUND are gated.
 STARTUP_ACTIVE_RESERVED_SLOTS = 1
 
@@ -215,6 +223,7 @@ class ProviderAccessLayer:
         self._lower_in_use = {venue: 0 for venue in self._limits}
         self._peak_lower_in_use = {venue: 0 for venue in self._limits}
         self._startup_active_headroom = False
+        self._hot_provider_demand = False
         self._waiters: dict[VenueName, list[_Waiter]] = {venue: [] for venue in self._limits}
         self._hot_grants_since_universe = {venue: 0 for venue in self._limits}
         self._active_grants_since_hot = {venue: 0 for venue in self._limits}
@@ -250,12 +259,42 @@ class ProviderAccessLayer:
         """Reserve one Matchbook/Kalshi slot for ACTIVE during startup UNIVERSE.
 
         HOT and BACKGROUND are gated while the startup barrier is closed, so
-        the post-startup 2-of-4 ceiling would only slow discovery. One reserved
-        slot is enough for ACTIVE. Pass False when startup pricing is released;
-        BACKGROUND + UNIVERSE then stay at or below 2 of 4.
+        the runnable-HOT ceiling would only slow discovery. One reserved slot
+        is enough for ACTIVE. Pass False when startup pricing is released;
+        lower-priority occupancy then follows HOT demand.
         """
 
         self._startup_active_headroom = bool(enabled)
+
+    def set_hot_provider_demand(self, active: bool) -> None:
+        """Record that HOT has due provider work or is waiting on a slot.
+
+        The price engine sets this from in-memory scheduler truth. Admission
+        only reads the flag. It does not query the catalogue.
+        """
+
+        self._hot_provider_demand = bool(active)
+
+    @property
+    def hot_provider_demand(self) -> bool:
+        return self._hot_provider_demand
+
+    def _hot_demand_active(self) -> bool:
+        """True when HOT can use a slot or is already using one.
+
+        Queued and granted HOT leases count even if the engine flag has not
+        been refreshed yet. That keeps a HOT request from waiting behind a
+        lower-priority grant that would fill the last protected slot.
+        """
+
+        if self._hot_provider_demand:
+            return True
+        for waiters in self._waiters.values():
+            for item in waiters:
+                if item.cancelled or item.priority is not ProviderPriority.HOT:
+                    continue
+                return True
+        return False
 
     def lower_priority_occupancy_ceiling(self, venue: VenueName) -> int | None:
         """Max simultaneous BACKGROUND+UNIVERSE leases, or None when uncapped."""
@@ -271,11 +310,13 @@ class ProviderAccessLayer:
         if venue not in self._limits:
             return 0
         limit = self._limits[venue]
+        if limit < 4:
+            return 0
         if self._startup_active_headroom:
-            return STARTUP_ACTIVE_RESERVED_SLOTS if limit >= 2 else 0
-        if limit >= 4:
-            return limit - LOWER_PRIORITY_OCCUPANCY_CEILING
-        return 0
+            return STARTUP_ACTIVE_RESERVED_SLOTS
+        if self._hot_demand_active():
+            return limit - HOT_DEMAND_LOWER_OCCUPANCY_CEILING
+        return IDLE_ACTIVE_RESERVED_SLOTS
 
     @staticmethod
     def _is_lower_priority(priority: ProviderPriority) -> bool:

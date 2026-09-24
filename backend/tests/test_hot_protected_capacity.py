@@ -15,7 +15,7 @@ from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.price_engine import PriceEnginePriority
 from sports_hedge.application.provider_access import (
     DEFAULT_PROVIDER_CONCURRENCY,
-    LOWER_PRIORITY_OCCUPANCY_CEILING,
+    HOT_DEMAND_LOWER_OCCUPANCY_CEILING,
     ProviderAccessLayer,
     get_shared_provider_access,
     reset_shared_provider_access,
@@ -74,8 +74,9 @@ async def test_lower_priority_cannot_consume_protected_matchbook_or_kalshi_slots
     assert layer.limits[VenueName.MATCHBOOK] == 4
     assert layer.limits[VenueName.KALSHI] == 4
     assert layer.limits[VenueName.POLYMARKET] == 8
-    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == LOWER_PRIORITY_OCCUPANCY_CEILING
-    assert layer.lower_priority_occupancy_ceiling(VenueName.KALSHI) == 2
+    assert layer.hot_provider_demand is False
+    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == 3
+    assert layer.lower_priority_occupancy_ceiling(VenueName.KALSHI) == 3
     assert layer.lower_priority_occupancy_ceiling(VenueName.POLYMARKET) is None
     assert Settings.model_fields["paper_scan_provider_timeout_seconds"].default == 8
 
@@ -88,41 +89,37 @@ async def test_lower_priority_cannot_consume_protected_matchbook_or_kalshi_slots
     background = [
         asyncio.create_task(_hold(venue, "background"))
         for venue in (VenueName.MATCHBOOK, VenueName.KALSHI)
-        for _ in range(2)
-    ]
-    universe = [
-        asyncio.create_task(_hold(venue, "universe"))
-        for venue in (VenueName.MATCHBOOK, VenueName.KALSHI)
+        for _ in range(3)
     ]
     for _ in range(20):
         if (
-            layer.lower_in_use[VenueName.MATCHBOOK] == 2
-            and layer.lower_in_use[VenueName.KALSHI] == 2
+            layer.lower_in_use[VenueName.MATCHBOOK] == 3
+            and layer.lower_in_use[VenueName.KALSHI] == 3
         ):
             break
         await asyncio.sleep(0)
     else:
-        raise AssertionError("lower-priority leases did not reach the ceiling")
-    assert all(not task.done() for task in universe)
+        raise AssertionError("idle lower-priority leases did not reach 3 of 4")
+    assert layer.snapshot().inflight[VenueName.MATCHBOOK.value] == 3
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 4
 
-    hot_entered = asyncio.Event()
+    active_entered = asyncio.Event()
 
-    async def _hot(venue: VenueName) -> None:
-        async with layer.acquire(venue, lane="hot"):
-            hot_entered.set()
+    async def _active(venue: VenueName) -> None:
+        async with layer.acquire(venue, lane="active_trade"):
+            active_entered.set()
             await release.wait()
 
-    hot = asyncio.create_task(_hot(VenueName.MATCHBOOK))
-    await hot_entered.wait()
-    assert layer.lower_in_use[VenueName.MATCHBOOK] == 2
-    assert layer.snapshot().inflight[VenueName.MATCHBOOK.value] == 3
-    assert layer.peak_lower_in_use[VenueName.MATCHBOOK] <= 2
-    assert layer.peak_lower_in_use[VenueName.KALSHI] <= 2
-
+    active = asyncio.create_task(_active(VenueName.MATCHBOOK))
+    await active_entered.wait()
+    assert layer.snapshot().inflight[VenueName.MATCHBOOK.value] == 4
+    assert layer.lower_in_use[VenueName.MATCHBOOK] == 3
     release.set()
-    await asyncio.wait_for(asyncio.gather(*background, *universe, hot), timeout=1)
-    assert layer.peak_lower_in_use[VenueName.MATCHBOOK] <= 2
-    assert layer.peak_lower_in_use[VenueName.KALSHI] <= 2
+    await asyncio.wait_for(asyncio.gather(*background, active), timeout=1)
+    assert layer.peak_lower_in_use[VenueName.MATCHBOOK] <= 3
+    assert layer.peak_lower_in_use[VenueName.KALSHI] <= 3
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 4
+    assert layer._peak_inflight[VenueName.KALSHI] <= 4
 
 
 @pytest.mark.asyncio
@@ -198,8 +195,9 @@ async def test_startup_reserves_one_slot_then_restores_the_two_of_four_ceiling()
     await asyncio.wait_for(asyncio.gather(*held, active), timeout=1)
 
     coordinator.mark_startup_pricing_ready()
-    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == 2
     assert layer._startup_active_headroom is False
+    assert layer.hot_provider_demand is False
+    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == 3
     reset_shared_provider_access()
 
 
@@ -221,33 +219,12 @@ async def test_hot_pass_covers_every_fixture_and_unstarted_rows_stay_pending() -
     assert len({row.canonical_event_id for row in rows if row.catalogue_row_id in due_ids[:8]}) == 8
     # The claim above is test-only ordering. Release it so the slice can claim honestly.
     engine.coverage_cursor(PriceEnginePriority.HOT).release_unstarted(due_ids)
-
-    background_rows = _fixture_rows(fixtures=4, markets=1, near=False)
-    background, _bmb, _bks, _blayer = _engine(
-        background_rows, access=layer, timeout=8, background_interval=0
+    engine.note_hot_provider_demand(NOW)
+    assert layer.hot_provider_demand is True
+    assert (
+        layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK)
+        == HOT_DEMAND_LOWER_OCCUPANCY_CEILING
     )
-    background_result = await background.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
-    assert background_result.evaluated
-    assert layer.peak_lower_in_use[VenueName.MATCHBOOK] <= 2
-    assert layer.peak_lower_in_use[VenueName.KALSHI] <= 2
-
-    release = asyncio.Event()
-    universe_entered: list[int] = []
-
-    async def _universe(index: int) -> None:
-        async with layer.acquire(VenueName.MATCHBOOK, lane="universe"):
-            universe_entered.append(index)
-            if len(universe_entered) < 3:
-                await release.wait()
-
-    universe = [asyncio.create_task(_universe(index)) for index in range(3)]
-    for _ in range(20):
-        if len(universe_entered) == 2:
-            break
-        await asyncio.sleep(0)
-    else:
-        raise AssertionError("UNIVERSE did not make forward progress inside the ceiling")
-    assert layer.lower_in_use[VenueName.MATCHBOOK] == 2
 
     hot = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
     fixtures_evaluated = {
@@ -263,15 +240,9 @@ async def test_hot_pass_covers_every_fixture_and_unstarted_rows_stay_pending() -
     assert coverage["fixtures_evaluated"] == 8
     assert coverage["evaluated_rows"] == 32
     assert "8 HOT fixtures · 32 rows" in str(coverage["summary"])
-    assert layer.peak_lower_in_use[VenueName.MATCHBOOK] <= 2
     assert layer._peak_inflight[VenueName.MATCHBOOK] <= 4
     assert layer._peak_inflight[VenueName.KALSHI] <= 4
     assert layer._peak_inflight[VenueName.POLYMARKET] <= 8
-
-    release.set()
-    await asyncio.wait_for(asyncio.gather(*universe), timeout=1)
-    assert len(universe_entered) == 3
-    assert layer.peak_lower_in_use[VenueName.MATCHBOOK] <= 2
 
     wide = _fixture_rows(fixtures=10, markets=8, near=True)
     wide_engine, _wmb, _wks, wide_layer = _engine([], timeout=8, hot_interval=0)
@@ -318,3 +289,135 @@ async def test_hot_pass_covers_every_fixture_and_unstarted_rows_stay_pending() -
     assert missed_coverage["started_rows"] == 0
     assert missed_coverage["fixtures_touched"] == 0
     assert "0 fixtures touched · 0 evaluated" in str(missed_coverage["summary"])
+    assert missed_coverage["scheduler_disposition"] == "provider_capacity"
+
+
+@pytest.mark.asyncio
+async def test_hot_demand_tightens_then_releases_lower_priority_ceiling() -> None:
+    layer = ProviderAccessLayer(
+        {VenueName.MATCHBOOK: 4, VenueName.KALSHI: 4, VenueName.POLYMARKET: 8}
+    )
+    stops = [asyncio.Event() for _ in range(3)]
+
+    async def _hold(stop: asyncio.Event) -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="background"):
+            await stop.wait()
+
+    held = [asyncio.create_task(_hold(stop)) for stop in stops]
+    for _ in range(20):
+        if layer.lower_in_use[VenueName.MATCHBOOK] == 3:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("expected three idle lower-priority slots")
+    layer.set_hot_provider_demand(True)
+    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == 1
+    assert layer.lower_in_use[VenueName.MATCHBOOK] == 3
+
+    extra_entered = asyncio.Event()
+
+    async def _extra() -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="background"):
+            extra_entered.set()
+            await stops[0].wait()
+
+    extra = asyncio.create_task(_extra())
+    await asyncio.sleep(0)
+    assert not extra_entered.is_set()
+    grants: list[str] = []
+
+    async def _take(lane: str) -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane=lane):
+            grants.append(lane)
+
+    active = asyncio.create_task(_take("active_trade"))
+    hot = asyncio.create_task(_take("hot"))
+    stops[0].set()
+    await asyncio.wait({active, hot}, timeout=1)
+    assert grants[0] == "active_trade"
+    assert grants[1] == "hot"
+    assert not extra_entered.is_set()
+    stops[1].set()
+    stops[2].set()
+    await asyncio.wait_for(asyncio.gather(*held), timeout=1)
+    for _ in range(20):
+        if layer.lower_in_use[VenueName.MATCHBOOK] <= 1:
+            break
+        await asyncio.sleep(0)
+    assert layer.lower_in_use[VenueName.MATCHBOOK] <= 1
+    layer.set_hot_provider_demand(False)
+    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == 3
+    await asyncio.wait_for(extra, timeout=1)
+    assert extra_entered.is_set()
+    refill = [asyncio.create_task(_hold(asyncio.Event())) for _ in range(3)]
+    for _ in range(20):
+        if layer.lower_in_use[VenueName.MATCHBOOK] == 3:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("lower-priority work did not reuse idle capacity")
+    for task in refill:
+        task.cancel()
+    await asyncio.gather(*refill, return_exceptions=True)
+
+
+def test_background_pause_keeps_the_coverage_cursor(tmp_path) -> None:
+    from sports_hedge.persistence.operator_scanner_settings import (
+        SqliteOperatorScannerSettingsStore,
+    )
+
+    rows = _fixture_rows(fixtures=30, markets=1, near=False)
+    engine, _mb, _ks, _layer = _engine(rows, timeout=8, background_interval=0)
+    first = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW)
+    cursor = engine.coverage_cursor(PriceEnginePriority.BACKGROUND)
+    anchor = cursor.cursor_after_id
+    visited = set(cursor.visited)
+    assert len(first) == 24
+    assert anchor == first[-1].identity.catalogue_row_id
+    store = SqliteOperatorScannerSettingsStore(tmp_path / "ops.sqlite")
+    coordinator = LiveRefreshCoordinator(
+        clock=lambda: NOW,
+        operator_settings_store=store,
+    )
+    coordinator.configure_from_settings()
+    coordinator.bind_price_engine(engine)
+    coordinator._next_background_due = NOW
+    saved = coordinator.apply_background_pricing_paused(True)
+    assert saved.background_pricing_paused is True
+    assert coordinator.plan_background_tick(now=NOW).reason == "background_paused"
+    assert coordinator.plan_hot_tick(now=NOW).reason != "background_paused"
+    assert cursor.cursor_after_id == anchor
+    assert cursor.visited == visited
+    assert cursor.pass_number == 1
+    reloaded = LiveRefreshCoordinator(
+        clock=lambda: NOW,
+        operator_settings_store=store,
+    )
+    reloaded.configure_from_settings()
+    assert reloaded.background_pricing_paused is True
+    coordinator.apply_background_pricing_paused(False)
+    resumed = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW)
+    assert resumed
+    assert resumed[0].identity.catalogue_row_id != first[0].identity.catalogue_row_id
+    assert cursor.pass_number == 1
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_waiting_hot_wake_is_not_a_pricing_cycle() -> None:
+    from sports_hedge.application.price_engine import HOT_IDLE_SCHEDULER_DISPOSITIONS
+
+    rows = _fixture_rows(fixtures=8, markets=2, near=True)
+    engine, _mb, _ks, layer = _engine([], timeout=8, hot_interval=0)
+    _bind_rows(engine, rows)
+    for runtime in engine.items():
+        if runtime.priority is PriceEnginePriority.HOT:
+            runtime.next_retry_at = NOW + timedelta(seconds=30)
+    assert engine.peek_hot_idle_reason(NOW) == "retry_waiting"
+    assert layer.hot_provider_demand is False
+    result = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
+    coverage = result.hot_coverage or {}
+    assert coverage["claimed_rows"] == 0
+    assert coverage["scheduler_disposition"] in HOT_IDLE_SCHEDULER_DISPOSITIONS
+    assert coverage["deferred_rows"] == 0
+    assert coverage["not_started_this_cadence"] == 0

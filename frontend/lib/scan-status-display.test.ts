@@ -93,6 +93,14 @@ describe("dual cadence operator copy", () => {
     assert.match(backgroundLines[2], /12 ACTIVE/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /4 evaluated/);
     assert.match(backgroundPriceCopy(withBackground, now)?.detail || "", /continuous/);
+    const backgroundPaused = status({
+      background_pricing_paused: true,
+      background: { cadence_seconds: 10, last_plan_reason: "background_paused" },
+    });
+    assert.match(
+      backgroundPriceCopy(backgroundPaused, now).detail,
+      /paused by operator · cursor preserved/,
+    );
     assert.equal(fastScanCopy(status(), now).label, HOT_PRICING_LABEL);
     assert.equal(fullSweepCopy(status(), now).label, UNIVERSE_DISCOVERY_LABEL);
     assert.equal(backgroundPriceCopy(status(), now).label, BACKGROUND_PRICING_LABEL);

@@ -126,6 +126,99 @@ def test_unstarted_claims_stay_in_the_current_pass() -> None:
     assert cursor.hold_until is not None
 
 
+def _interleaved(fixtures: int, markets: int) -> list[str]:
+    grouped = {
+        f"f{fixture:02d}": [f"f{fixture:02d}-m{market:02d}" for market in range(markets)]
+        for fixture in range(fixtures)
+    }
+    ordered: list[str] = []
+    depth = 0
+    while True:
+        added = False
+        for fixture_id in sorted(grouped):
+            rows = grouped[fixture_id]
+            if depth < len(rows):
+                ordered.append(rows[depth])
+                added = True
+        if not added:
+            return ordered
+        depth += 1
+
+
+def test_interleaved_hot_membership_changes_do_not_skip_or_restart() -> None:
+    """Fixture order is not catalogue-row order. Dropping the cursor row must resume."""
+
+    cursor = CoverageCursor(lane="hot")
+    membership = _interleaved(8, 4)
+    first = cursor.claim(membership, blocked=set(), limit=16, now=T0)
+    assert first == membership[:16]
+    assert first[0] == "f00-m00"
+    assert cursor.cursor_after_id == "f07-m01"
+    assert cursor.pass_number == 1
+
+    remaining = [
+        row_id
+        for row_id in membership
+        if not row_id.startswith("f07-") and not row_id.startswith("f00-")
+    ]
+    added = [f"f08-m{market:02d}" for market in range(4)]
+    changed = remaining + added
+    # Rebuild the interleaved order the engine would publish.
+    by_fixture: dict[str, list[str]] = {}
+    for row_id in changed:
+        by_fixture.setdefault(row_id[:3], []).append(row_id)
+    for rows in by_fixture.values():
+        rows.sort()
+    rebuilt: list[str] = []
+    depth = 0
+    while True:
+        added_row = False
+        for fixture_id in sorted(by_fixture):
+            rows = by_fixture[fixture_id]
+            if depth < len(rows):
+                rebuilt.append(rows[depth])
+                added_row = True
+        if not added_row:
+            break
+        depth += 1
+
+    continued: list[str] = []
+    now = T0
+    while cursor.hold_until is None and cursor.pass_number == 1:
+        claimed = cursor.claim(rebuilt, blocked=set(), limit=8, now=now)
+        if not claimed:
+            break
+        continued.extend(claimed)
+        now += timedelta(seconds=1)
+        assert claimed[0] != rebuilt[0] or claimed[0] not in set(first)
+    assert continued
+    assert continued[0] == "f01-m02"
+    assert "f00-m00" not in continued
+    assert "f07-m00" not in continued
+    touched = {row_id[:3] for row_id in continued}
+    assert touched == {f"f{index:02d}" for index in (1, 2, 3, 4, 5, 6, 8)}
+    assert cursor.hold_until is not None
+    assert cursor.pass_number == 1
+    cursor.hold_for_target(target_seconds=0, now=now)
+    wrapped = cursor.claim(rebuilt, blocked=set(), limit=1, now=now)
+    assert cursor.pass_number == 2
+    assert wrapped == [rebuilt[0]]
+
+
+def test_unstarted_release_survives_interleaved_reorder() -> None:
+    cursor = CoverageCursor(lane="hot")
+    membership = _interleaved(4, 3)
+    claimed = cursor.claim(membership, blocked=set(), limit=len(membership), now=T0)
+    assert cursor.hold_until is not None
+    cursor.release_unstarted(claimed[4:])
+    assert cursor.hold_until is None
+    assert cursor.pass_number == 1
+    nxt = cursor.claim(membership, blocked=set(), limit=len(membership), now=T0)
+    assert set(nxt) == set(claimed[4:])
+    assert nxt[0] != membership[0]
+    assert cursor.hold_until is not None
+
+
 def test_new_rows_do_not_reset_the_cursor() -> None:
     cursor = CoverageCursor(lane="background")
     cursor.claim(["b", "c", "d"], blocked=set(), limit=2, now=T0)

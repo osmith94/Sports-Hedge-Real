@@ -242,17 +242,17 @@ async def test_open_universe_retains_relationship_while_hot_heartbeats_and_provi
             for index in range(8)
         ]
         await asyncio.sleep(0.12)
-        assert live["n"] == 2
-        assert live["peak"] == 2
-        assert access.snapshot().inflight["matchbook"] == 2
-        assert access.lower_in_use[VenueName.MATCHBOOK] == 2
+        assert live["n"] == 3
+        assert live["peak"] == 3
+        assert access.snapshot().inflight["matchbook"] == 3
+        assert access.lower_in_use[VenueName.MATCHBOOK] == 3
         assert access.limits[VenueName.MATCHBOOK] == 4
         assert coordinator._universe_in_progress is True
         assert coordinator.status.hot.last_plan_reason is not None
 
         release.set()
         await asyncio.gather(*first_wave)
-        assert live["peak"] == 2
+        assert live["peak"] == 3
         assert live["n"] == 0
         assert collector._provider_peak_inflight[VenueName.MATCHBOOK] <= 4
 

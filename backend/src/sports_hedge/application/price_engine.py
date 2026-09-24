@@ -179,6 +179,16 @@ SCAN_BUDGET_EXHAUSTED_REASON = "scan_budget_exhausted"
 PRICE_ENGINE_PERSIST_STAGE = "persist_capture"
 
 LOGGER = getLogger(__name__)
+
+# Scheduler wakes that must not be stored as a normal HOT pricing cycle.
+HOT_IDLE_SCHEDULER_DISPOSITIONS = frozenset(
+    {
+        "pass_waiting_target",
+        "retry_waiting",
+        "no_hot_roster",
+        "no_runnable_hot_work",
+    }
+)
 _SLICE_DIAGNOSTICS: ContextVar[CycleDiagnosticAccumulator | None] = ContextVar(
     "price_engine_slice_diagnostics",
     default=None,
@@ -458,6 +468,7 @@ class CataloguePriceEngine:
             PriceEnginePriority.HOT.value: 64,
             PriceEnginePriority.BACKGROUND.value: 24,
         }
+        self._membership_observed = False
 
     def now(self) -> datetime:
         return self._clock()
@@ -532,6 +543,7 @@ class CataloguePriceEngine:
         self._refresh_promoted_hot_ids()
         for runtime in rebuilt:
             runtime.priority = self.classify_priority(runtime.identity)
+        self._membership_observed = True
         return rebuilt
 
     def restart(self) -> list[PriceEngineRuntimeItem]:
@@ -603,6 +615,8 @@ class CataloguePriceEngine:
                 continue
             runtime.status = PriceEngineItemStatus.DUE
             due.append(runtime)
+        if priority is PriceEnginePriority.HOT:
+            self.note_hot_provider_demand(evaluated)
         return due
 
     def next_runnable_at(
@@ -646,6 +660,83 @@ class CataloguePriceEngine:
         if cursor.hold_until is not None:
             return cursor.hold_until
         return evaluated
+
+    def note_hot_provider_demand(self, now: datetime | None = None) -> bool:
+        """Publish whether HOT can request a provider slot.
+
+        A HOT roster row is not demand by itself. Retry-wait, in-flight-only
+        blockers, and viability skips that will not call a provider leave the
+        idle ACTIVE reserve in place. In-flight HOT work and a row that can
+        request a provider call count. This walks process memory only.
+        """
+
+        active = self._hot_has_provider_demand(now or self.now())
+        access = self.provider_access
+        if access is not None:
+            access.set_hot_provider_demand(active)
+        return active
+
+    def _hot_has_provider_demand(self, evaluated: datetime) -> bool:
+        if not self._items:
+            return False
+        membership, blocked = self._lane_membership(
+            PriceEnginePriority.HOT, evaluated, refresh=False
+        )
+        cursor = self.coverage_cursor(PriceEnginePriority.HOT)
+        holding = cursor.hold_until is not None and evaluated < cursor.hold_until
+        for runtime in membership:
+            if runtime.in_flight:
+                return True
+            if holding:
+                continue
+            row_id = runtime.identity.catalogue_row_id
+            if row_id in blocked or runtime.skip_expensive_work:
+                continue
+            if row_id in cursor.visited and row_id not in cursor.pending_inserts:
+                continue
+            return True
+        return False
+
+    def peek_hot_idle_reason(self, now: datetime | None = None) -> str | None:
+        """Why a HOT wake should not be recorded as a pricing cycle.
+
+        ``None`` means the slice should run. Idle reasons are scheduler
+        heartbeats: target wait, retry/block, or an empty roster. Provider
+        deferrals are not idle; those slices still run and are recorded.
+        """
+
+        evaluated = now or self.now()
+        self.note_hot_provider_demand(evaluated)
+        if not self._membership_observed:
+            return None
+        cursor = self.coverage_cursor(PriceEnginePriority.HOT)
+        if cursor.hold_until is not None and evaluated < cursor.hold_until:
+            return "pass_waiting_target"
+        membership, blocked = self._lane_membership(
+            PriceEnginePriority.HOT, evaluated, refresh=False
+        )
+        if not membership:
+            return "no_hot_roster"
+        claimable = False
+        blocked_unvisited = False
+        for runtime in membership:
+            row_id = runtime.identity.catalogue_row_id
+            if row_id in cursor.visited:
+                continue
+            if row_id in blocked:
+                blocked_unvisited = True
+                continue
+            claimable = True
+            break
+        if claimable:
+            return None
+        if blocked_unvisited:
+            return "retry_waiting"
+        if cursor.hold_until is not None and evaluated >= cursor.hold_until:
+            return None
+        if cursor.pass_started_at is not None and cursor.hold_until is None:
+            return None
+        return "no_runnable_hot_work"
 
     def _lane_membership(
         self,
@@ -847,6 +938,8 @@ class CataloguePriceEngine:
     ) -> PriceEngineSliceResult:
         evaluated = now or self.now()
         self.reconstruct()
+        if priority is PriceEnginePriority.HOT:
+            self.note_hot_provider_demand(evaluated)
         hot_roster_rows = 0
         hot_roster_fixtures = 0
         if priority is PriceEnginePriority.HOT:
@@ -1009,6 +1102,7 @@ class CataloguePriceEngine:
                 started_mono=started_mono,
             )
             self._release_unstarted_claims(priority, claimed_ids, result)
+            self.note_hot_provider_demand(evaluated)
             if priority is PriceEnginePriority.HOT:
                 result.hot_coverage = self._hot_coverage_snapshot(
                     claimed_ids=claimed_ids,
@@ -1044,6 +1138,42 @@ class CataloguePriceEngine:
         honest.update(result.revalidation)
         unstarted = [row_id for row_id in claimed_ids if row_id not in honest]
         self._coverage[priority.value].release_unstarted(unstarted)
+
+    def _hot_scheduler_disposition(
+        self,
+        *,
+        claimed_ids: list[str],
+        result: PriceEngineSliceResult,
+        roster_rows: int,
+    ) -> str:
+        """Classify a finished HOT slice for cycle history.
+
+        Provider-capacity misses stay visible. A wake that claimed nothing
+        and started nothing is a scheduler heartbeat, not a pricing cycle.
+        """
+
+        if result.deferred or result.not_started:
+            return "provider_capacity"
+        if (
+            claimed_ids
+            or result.evaluated
+            or result.failed
+            or result.skipped
+            or result.revalidation
+        ):
+            return "hot_pricing"
+        now = self.now()
+        cursor = self.coverage_cursor(PriceEnginePriority.HOT)
+        if cursor.hold_until is not None and now < cursor.hold_until:
+            return "pass_waiting_target"
+        if roster_rows <= 0:
+            return "no_hot_roster"
+        _membership, blocked = self._lane_membership(
+            PriceEnginePriority.HOT, now, refresh=False
+        )
+        if blocked:
+            return "retry_waiting"
+        return "no_runnable_hot_work"
 
     def _hot_coverage_snapshot(
         self,
@@ -1099,6 +1229,11 @@ class CataloguePriceEngine:
             "cursor_position": cursor.get("position"),
             "cursor_total": cursor.get("catalogue_rows"),
             "hot_slot_wait_ms": int(slot_wait_ms),
+            "scheduler_disposition": self._hot_scheduler_disposition(
+                claimed_ids=claimed_ids,
+                result=result,
+                roster_rows=roster_rows,
+            ),
         }
         missed_rows = coverage["not_started_this_cadence"] + coverage["deferred_rows"]
         coverage["summary"] = (

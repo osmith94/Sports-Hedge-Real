@@ -840,14 +840,15 @@ async def test_matchbook_list_markets_peak_live_stays_within_concurrency() -> No
         retry_task = asyncio.create_task(retry_wave())
         await retry_started.wait()
         await asyncio.sleep(0.12)
-        assert live["n"] == 2
-        assert live["peak"] == 2
-        assert access.snapshot().inflight["matchbook"] == 2
-        assert access.peak_lower_in_use[VenueName.MATCHBOOK] <= 2
+        assert live["n"] == 3
+        assert live["peak"] == 3
+        assert access.snapshot().inflight["matchbook"] == 3
+        assert access.peak_lower_in_use[VenueName.MATCHBOOK] <= 3
+        assert access.limits[VenueName.MATCHBOOK] == 4
         assert not retry_task.done()
         release.set()
         await asyncio.wait_for(retry_task, timeout=1.0)
-        assert live["peak"] == 2
+        assert live["peak"] == 3
         assert live["n"] == 0
         assert access.snapshot().inflight["matchbook"] == 0
         assert collector._provider_peak_inflight[VenueName.MATCHBOOK] <= 4
