@@ -66,6 +66,8 @@ DEFAULT_STARVATION_HOT_GRANTS = 8
 PRICE_ENGINE_BACKGROUND_LANE = "background"
 PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
 PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
+# Ungranted BACKGROUND waiters refused because the operator paused the lane.
+BACKGROUND_ADMISSION_PAUSED = "background_admission_paused"
 # No runnable HOT work: leave one physical slot for ACTIVE (3 of 4 for lower).
 IDLE_ACTIVE_RESERVED_SLOTS = 1
 # Runnable HOT work: new lower-priority leases stop at one slot.
@@ -99,6 +101,7 @@ class _Waiter:
     seq: int
     lane: str
     stage: str
+    requested_lane: str = ""
     event: asyncio.Event = field(default_factory=asyncio.Event)
     granted: bool = False
     cancelled: bool = False
@@ -224,6 +227,8 @@ class ProviderAccessLayer:
         self._peak_lower_in_use = {venue: 0 for venue in self._limits}
         self._startup_active_headroom = False
         self._hot_provider_demand = False
+        self._background_admission_paused = False
+        self._bound_loop: asyncio.AbstractEventLoop | None = None
         self._waiters: dict[VenueName, list[_Waiter]] = {venue: [] for venue in self._limits}
         self._hot_grants_since_universe = {venue: 0 for venue in self._limits}
         self._active_grants_since_hot = {venue: 0 for venue in self._limits}
@@ -270,14 +275,105 @@ class ProviderAccessLayer:
         """Record that HOT has due provider work or is waiting on a slot.
 
         The price engine sets this from in-memory scheduler truth. Admission
-        only reads the flag. It does not query the catalogue.
+        only reads the flag. It does not query the catalogue. A change in
+        either direction reconsiders queued waiters immediately so a cleared
+        HOT demand flag can fill the expanded lower-priority ceiling without
+        waiting for another enqueue or release.
         """
 
-        self._hot_provider_demand = bool(active)
+        active = bool(active)
+        if self._hot_provider_demand == active:
+            return
+        self._hot_provider_demand = active
+        self._reconsider_admission()
 
     @property
     def hot_provider_demand(self) -> bool:
         return self._hot_provider_demand
+
+    def set_background_admission_paused(self, paused: bool) -> None:
+        """Refuse new BACKGROUND leases while the operator pause is on.
+
+        Already granted leases are left to finish. Queued, not-yet-granted
+        BACKGROUND waiters are woken immediately and are not granted later.
+        HOT, ACTIVE, UNIVERSE, and settlement keep their own admission rules.
+        """
+
+        paused = bool(paused)
+        if self._background_admission_paused == paused:
+            return
+        self._background_admission_paused = paused
+        self._reconsider_admission()
+
+    @property
+    def background_admission_paused(self) -> bool:
+        return self._background_admission_paused
+
+    def _bind_loop(self) -> None:
+        if self._bound_loop is None:
+            self._bound_loop = asyncio.get_running_loop()
+
+    def _reconsider_admission(self) -> None:
+        """Grant legal waiters or refuse paused BACKGROUND waiters now.
+
+        Safe on the event loop when the condition is free, and safe from a
+        worker thread by scheduling onto the loop that owns the waiters.
+        Does not block the event loop and does not require the setter to be
+        async.
+        """
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and not self._cond.locked():
+            self._reconsider_unlocked()
+            return
+        loop = self._bound_loop or running
+        if loop is None or loop.is_closed():
+            return
+
+        def _later() -> None:
+            if self._cond.locked():
+                loop.call_soon(self._reconsider_when_free)
+                return
+            self._reconsider_unlocked()
+
+        if running is loop:
+            loop.call_soon(_later)
+        else:
+            loop.call_soon_threadsafe(_later)
+
+    def _reconsider_when_free(self) -> None:
+        loop = self._bound_loop
+        if self._cond.locked():
+            if loop is not None and not loop.is_closed():
+                loop.call_soon(self._reconsider_when_free)
+            return
+        self._reconsider_unlocked()
+
+    def _reconsider_unlocked(self) -> None:
+        if self._background_admission_paused:
+            for waiters in self._waiters.values():
+                for waiter in waiters:
+                    if waiter.granted or not self._background_admission_blocked(waiter):
+                        continue
+                    self._refuse_ungranted_background(waiter)
+        for venue in self._limits:
+            self._pump(venue)
+
+    def _background_admission_blocked(self, waiter: _Waiter) -> bool:
+        return (
+            self._background_admission_paused
+            and waiter.requested_lane == PRICE_ENGINE_BACKGROUND_LANE
+        )
+
+    def _refuse_ungranted_background(self, waiter: _Waiter) -> None:
+        if waiter.granted or waiter.cancelled:
+            return
+        waiter.cancelled = True
+        waiter.reason = BACKGROUND_ADMISSION_PAUSED
+        waiter.event.set()
 
     def _hot_demand_active(self) -> bool:
         """True when HOT can use a slot or is already using one.
@@ -464,9 +560,13 @@ class ProviderAccessLayer:
         work: Any = None,
     ) -> _Waiter:
         async with self._cond:
+            self._bind_loop()
             waiter = self._make_waiter(venue, lane=lane, stage=stage, work=work)
             self._waiters[venue].append(waiter)
-            self._pump(venue)
+            if self._background_admission_blocked(waiter):
+                self._refuse_ungranted_background(waiter)
+            else:
+                self._pump(venue)
             return waiter
 
     def _make_waiter(
@@ -479,6 +579,7 @@ class ProviderAccessLayer:
     ) -> _Waiter:
         self._seq += 1
         priority = priority_for_lane(lane)
+        requested_lane = str(lane or "").strip().casefold()
         reason = HEALTH_WAITING
         if (
             priority not in {ProviderPriority.HOT, ProviderPriority.ACTIVE_TRADE}
@@ -504,6 +605,7 @@ class ProviderAccessLayer:
             seq=self._seq,
             lane=waiter_lane,
             stage=stage,
+            requested_lane=requested_lane,
             reason=reason,
             work=resolved_work,
             enqueued_mono=self._clock(),
@@ -551,6 +653,9 @@ class ProviderAccessLayer:
                 yield None
                 return
             if waiter.cancelled:
+                if waiter.reason == BACKGROUND_ADMISSION_PAUSED:
+                    yield None
+                    return
                 raise asyncio.CancelledError
             yield lease
         finally:
@@ -577,6 +682,7 @@ class ProviderAccessLayer:
             return
         lease: ProviderLease | None = None
         async with self._cond:
+            self._bind_loop()
             waiter = self._make_waiter(venue, lane=lane, stage=stage, work=work)
             self._waiters[venue].append(waiter)
             picked = self._pick(venue)
@@ -666,7 +772,12 @@ class ProviderAccessLayer:
         pending = [
             item
             for item in self._waiters[venue]
-            if not item.granted and not item.cancelled and self._lower_grant_allowed(venue, item)
+            if (
+                not item.granted
+                and not item.cancelled
+                and not self._background_admission_blocked(item)
+                and self._lower_grant_allowed(venue, item)
+            )
         ]
         if not pending:
             return None

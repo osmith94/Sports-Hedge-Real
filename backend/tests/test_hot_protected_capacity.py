@@ -421,3 +421,186 @@ async def test_retry_waiting_hot_wake_is_not_a_pricing_cycle() -> None:
     assert coverage["scheduler_disposition"] in HOT_IDLE_SCHEDULER_DISPOSITIONS
     assert coverage["deferred_rows"] == 0
     assert coverage["not_started_this_cadence"] == 0
+
+
+@pytest.mark.asyncio
+async def test_clearing_hot_demand_admits_queued_lower_priority_immediately() -> None:
+    layer = ProviderAccessLayer(
+        {VenueName.MATCHBOOK: 4, VenueName.KALSHI: 4, VenueName.POLYMARKET: 8}
+    )
+    layer.set_hot_provider_demand(True)
+    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == HOT_DEMAND_LOWER_OCCUPANCY_CEILING
+    release = asyncio.Event()
+    entered: list[str] = []
+
+    async def _hold(name: str) -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="background"):
+            entered.append(name)
+            await release.wait()
+
+    holder = asyncio.create_task(_hold("held"))
+    for _ in range(20):
+        if layer.lower_in_use[VenueName.MATCHBOOK] == 1:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("lower-priority lease was not granted")
+    queued = [asyncio.create_task(_hold(name)) for name in ("q1", "q2")]
+    for _ in range(20):
+        waiting = layer.snapshot().waiting_by_lane["background"][VenueName.MATCHBOOK.value]
+        if waiting == 2:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("queued lower-priority waiters were not sitting")
+    assert entered == ["held"]
+    assert layer.snapshot().inflight[VenueName.MATCHBOOK.value] == 1
+    layer.set_hot_provider_demand(False)
+    assert layer.hot_provider_demand is False
+    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == 3
+    assert layer.lower_in_use[VenueName.MATCHBOOK] == 3
+    assert layer.snapshot().inflight[VenueName.MATCHBOOK.value] == 3
+    assert layer.snapshot().waiting_by_lane["background"][VenueName.MATCHBOOK.value] == 0
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 4
+    release.set()
+    await asyncio.wait_for(asyncio.gather(holder, *queued), timeout=1)
+    assert set(entered) == {"held", "q1", "q2"}
+
+
+@pytest.mark.asyncio
+async def test_background_pause_stops_ungranted_provider_work(tmp_path) -> None:
+    from test_issue344_price_engine import FakeKalshi, FakeMatchbook, _mb_btts
+
+    from sports_hedge.persistence.operator_scanner_settings import (
+        SqliteOperatorScannerSettingsStore,
+    )
+
+    class _GatedMatchbook(FakeMatchbook):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+            self.entered = asyncio.Event()
+
+        async def get_market(self, event_id, market_id, **filters):  # type: ignore[no-untyped-def]
+            del filters
+            self.get_market_calls.append((str(event_id), str(market_id)))
+            self.entered.set()
+            await self.release.wait()
+            return _mb_btts(int(market_id))
+
+    rows = _fixture_rows(fixtures=30, markets=1, near=False)
+    matchbook = _GatedMatchbook()
+    kalshi = FakeKalshi()
+    engine, _mb, _ks, layer = _engine(
+        [],
+        timeout=8,
+        background_interval=0,
+        matchbook=matchbook,
+        kalshi=kalshi,
+    )
+    _bind_rows(engine, rows)
+    layer.set_hot_provider_demand(True)
+    store = SqliteOperatorScannerSettingsStore(tmp_path / "ops.sqlite")
+    coordinator = LiveRefreshCoordinator(
+        clock=lambda: NOW,
+        operator_settings_store=store,
+    )
+    coordinator.configure_from_settings()
+    coordinator.bind_price_engine(engine)
+    slice_task = asyncio.create_task(
+        engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+    )
+    await asyncio.wait_for(matchbook.entered.wait(), timeout=2)
+    for _ in range(40):
+        waiting = layer.snapshot().waiting_by_lane["background"][VenueName.MATCHBOOK.value]
+        if waiting >= 2 and len(matchbook.get_market_calls) >= 1:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError(
+            f"expected granted and queued BACKGROUND work, calls={matchbook.get_market_calls} "
+            f"waiting={layer.snapshot().waiting_by_lane['background']}"
+        )
+    calls_while_open = list(matchbook.get_market_calls)
+    assert layer.lower_in_use[VenueName.MATCHBOOK] >= 1
+    assert layer.snapshot().inflight[VenueName.MATCHBOOK.value] <= 4
+    coordinator.apply_background_pricing_paused(True)
+    for _ in range(20):
+        if layer.snapshot().waiting_by_lane["background"][VenueName.MATCHBOOK.value] == 0:
+            break
+        await asyncio.sleep(0)
+    assert layer.background_admission_paused is True
+    assert layer.snapshot().waiting_by_lane["background"][VenueName.MATCHBOOK.value] == 0
+    assert matchbook.get_market_calls == calls_while_open
+    async with layer.acquire_wait(
+        VenueName.KALSHI, lane="background", timeout=0.5
+    ) as refused:
+        assert refused is None
+    async with layer.acquire_wait(VenueName.KALSHI, lane="universe", timeout=0.5) as universe:
+        assert universe is not None
+    async with layer.acquire_wait(
+        VenueName.KALSHI, lane="settlement", timeout=0.5
+    ) as settlement:
+        assert settlement is not None
+    assert matchbook.get_market_calls == calls_while_open
+    assert kalshi.book_calls == []
+    matchbook.release.set()
+    result = await asyncio.wait_for(slice_task, timeout=3)
+    assert matchbook.get_market_calls == calls_while_open
+    assert kalshi.book_calls == []
+    assert result.evaluated == []
+    assert result.not_started
+    cursor = engine.coverage_cursor(PriceEnginePriority.BACKGROUND)
+    assert cursor.pass_number == 1
+    anchor = cursor.cursor_after_id
+    first_claimed = cursor.last_claimed[0]
+    assert first_claimed not in cursor.visited
+    for row_id in result.not_started:
+        assert row_id not in cursor.visited
+    coordinator.apply_background_pricing_paused(False)
+    assert layer.background_admission_paused is False
+    assert cursor.cursor_after_id == anchor
+    assert cursor.pass_number == 1
+    resumed = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW)
+    assert resumed
+    assert resumed[0].identity.catalogue_row_id != first_claimed
+    assert cursor.pass_number == 1
+    store.close()
+
+
+def test_background_resume_clears_paused_status_before_the_next_heartbeat(tmp_path) -> None:
+    from sports_hedge.persistence.operator_scanner_settings import (
+        SqliteOperatorScannerSettingsStore,
+    )
+
+    rows = _fixture_rows(fixtures=12, markets=1, near=False)
+    engine, _mb, _ks, _layer = _engine(rows, timeout=8, background_interval=0)
+    first = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW)
+    cursor = engine.coverage_cursor(PriceEnginePriority.BACKGROUND)
+    anchor = cursor.cursor_after_id
+    visited = set(cursor.visited)
+    pass_number = cursor.pass_number
+    assert first
+    store = SqliteOperatorScannerSettingsStore(tmp_path / "ops.sqlite")
+    coordinator = LiveRefreshCoordinator(
+        clock=lambda: NOW,
+        operator_settings_store=store,
+    )
+    coordinator.configure_from_settings()
+    coordinator.bind_price_engine(engine)
+    coordinator.apply_background_pricing_paused(True)
+    paused = coordinator.public_status()
+    assert paused.background_pricing_paused is True
+    assert paused.background.last_plan_reason == "background_paused"
+    assert "paused" in (paused.background.operator_summary or "")
+    coordinator.apply_background_pricing_paused(False)
+    resumed = coordinator.public_status()
+    assert resumed.background_pricing_paused is False
+    assert resumed.background.last_plan_reason == "waiting"
+    assert "paused" not in (resumed.background.operator_summary or "").casefold()
+    assert "paused" not in (resumed.operator_summary or "").casefold()
+    assert resumed.background.worker_state == "waiting"
+    assert cursor.cursor_after_id == anchor
+    assert cursor.visited == visited
+    assert cursor.pass_number == pass_number
+    store.close()

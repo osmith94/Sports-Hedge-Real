@@ -1559,8 +1559,49 @@ class LiveRefreshCoordinator:
                         "background": background,
                     }
                 )
+            else:
+                in_progress = (
+                    self._background_in_progress or self._manual_background_in_progress
+                )
+                background = self.status.background.model_copy(
+                    update={
+                        "last_plan_reason": "waiting",
+                        "worker_state": WORKER_RUNNING if in_progress else WORKER_WAITING,
+                        "operator_summary": (
+                            f"{OPERATOR_BACKGROUND_PRICING_LABEL} · resumed · "
+                            f"{'in progress' if in_progress else 'waiting'} · "
+                            "cursor preserved"
+                        ),
+                    }
+                )
+                self.status = self.status.model_copy(
+                    update={
+                        "background_pricing_paused": False,
+                        "background": background,
+                    }
+                )
+        self._sync_background_provider_admission(saved.background_pricing_paused)
         self._pulse_control()
         return saved
+
+    def _sync_background_provider_admission(self, paused: bool) -> None:
+        """Tell admission to refuse ungranted BACKGROUND leases while paused.
+
+        The engine may hold a private layer in tests. Production uses the
+        shared layer. Update both when they differ. Granted calls are not
+        cancelled.
+        """
+
+        layers = []
+        engine = self._price_engine
+        engine_layer = None if engine is None else engine.provider_access
+        if engine_layer is not None:
+            layers.append(engine_layer)
+        shared = get_shared_provider_access()
+        if shared not in layers:
+            layers.append(shared)
+        for layer in layers:
+            layer.set_background_admission_paused(paused)
 
     def note_hot_scheduler_idle(self, disposition: str) -> None:
         """Advance HOT health for a no-work wake without a pricing-history row."""

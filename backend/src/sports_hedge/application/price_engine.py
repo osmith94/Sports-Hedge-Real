@@ -2580,6 +2580,11 @@ class CataloguePriceEngine:
                 )
         if slot_wait <= 0:
             await _close_unused()
+            if self._background_admission_refused(access, lane):
+                self._note_provider_call(
+                    venue, stage, "not_started", 0, source_id, row_id, slot_wait_s=0
+                )
+                return None, PriceEngineItemStatus.NOT_STARTED
             if access.venue_saturated(venue):
                 self._record_lane_operation(lane, venue, stage, PROVIDER_CAPACITY_SATURATED)
                 self._note_provider_call(
@@ -2597,6 +2602,17 @@ class CataloguePriceEngine:
             slot_wait_s = monotonic() - slot_started
             if lease is None:
                 await _close_unused()
+                if self._background_admission_refused(access, lane):
+                    self._note_provider_call(
+                        venue,
+                        stage,
+                        "not_started",
+                        0,
+                        source_id,
+                        row_id,
+                        slot_wait_s=slot_wait_s,
+                    )
+                    return None, PriceEngineItemStatus.NOT_STARTED
                 if access.venue_saturated(venue):
                     self._record_lane_operation(lane, venue, stage, PROVIDER_CAPACITY_SATURATED)
                     self._note_provider_call(
@@ -2675,6 +2691,18 @@ class CataloguePriceEngine:
                 venue, stage, "timeout", io_s, source_id, row_id, slot_wait_s=slot_wait_s
             )
             return None, PriceEngineItemStatus.RETRY_WAIT
+
+    def _background_admission_refused(self, access: Any, lane: str) -> bool:
+        """Operator pause blocks new BACKGROUND calls, including saturated venues.
+
+        A refused row is not started, so coverage can release the claim.
+        Deferred would mark it visited and hide it until the next pass.
+        """
+
+        return (
+            str(lane or "").strip().casefold() == PRICE_ENGINE_BACKGROUND_LANE
+            and bool(getattr(access, "background_admission_paused", False))
+        )
 
     def _note_provider_call(
         self,
