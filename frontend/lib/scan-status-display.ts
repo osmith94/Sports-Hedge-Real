@@ -25,7 +25,7 @@ function completedClock(iso: string | null | undefined, now?: number | null): st
 function nextClock(
   iso: string | null | undefined,
   now: number | null | undefined,
-  label: "next due" | "next scan" | "next discovery",
+  label: "next due" | "next scan" | "next discovery" | "next pass",
 ): string {
   if (!iso) return `${label} —`;
   if (now == null || !Number.isFinite(now)) return `${label} ${iso}`;
@@ -64,9 +64,16 @@ export function hotPricingCopy(
   if (!hot.last_completed_at && !hot.last_started_at && !hot.last_heartbeat_at) {
     return { label: HOT_PRICING_LABEL, detail: "never" };
   }
+  const coverage = hot.last_diagnostics?.coverage as
+    | { pass_number?: number; position?: number; catalogue_rows?: number }
+    | undefined;
+  const pass = coverage
+    ? `pass ${coverage.pass_number ?? 1} · ${coverage.position ?? 0} / ${coverage.catalogue_rows ?? hot.fixture_count} catalogue rows · `
+    : "";
+  const target = hot.target_refresh_seconds ? `target refresh ${hot.target_refresh_seconds}s · ` : "";
   return {
     label: HOT_PRICING_LABEL,
-    detail: `${completedClock(hot.last_completed_at, now)} · ran ${durationLabel(hot.last_duration_ms)} · ${nextClock(hot.next_due_at, now, "next scan")} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
+    detail: `${pass}${target}${completedClock(hot.last_completed_at, now)} · ran ${durationLabel(hot.last_duration_ms)} · ${nextClock(hot.next_due_at, now, "next pass")} · ${hot.fixture_count} hot${venueSuffix}${leftover}${persist}`,
   };
 }
 
@@ -182,13 +189,15 @@ export function backgroundPriceCopy(
   const working = engine?.working_set ?? 0;
   const inFlight = engine?.in_flight ?? 0;
   const suffix = lane?.cycle_in_progress ? " · in progress" : "";
-  const scanSeconds = lane?.scan_interval_seconds ?? lane?.cadence_seconds;
-  const repriceSeconds = lane?.reprice_after_seconds;
-  const cadence = scanSeconds ? ` · scan interval ${scanSeconds}s` : "";
-  const reprice = repriceSeconds ? ` · reprice after ${repriceSeconds}s` : "";
-  const due = nextClock(lane?.next_due_at, now, "next scan");
+  const coverage = lane?.last_diagnostics?.coverage as
+    | { pass_number?: number; position?: number; catalogue_rows?: number; percent?: number }
+    | undefined;
+  const pass =
+    coverage && coverage.catalogue_rows
+      ? `pass ${coverage.pass_number ?? 1} · ${coverage.position ?? 0} / ${coverage.catalogue_rows} catalogue rows · ${coverage.percent ?? 0}% · `
+      : "";
   return {
     label: BACKGROUND_PRICING_LABEL,
-    detail: `${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started${cadence}${reprice} · ${due}${suffix}`,
+    detail: `${pass}${working} ACTIVE · ${evaluated} evaluated · ${inFlight} in flight · ${retry} retry · ${deferred} deferred · ${notStarted} not started · continuous${suffix}`,
   };
 }

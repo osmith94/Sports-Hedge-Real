@@ -83,7 +83,7 @@ def test_background_tick_has_no_slice_wall_and_no_discovery() -> None:
     assert "list_events" not in background
     assert "list_markets" not in background
     hot = source.split("PriceEnginePriority.HOT", 1)[1]
-    assert "slice_wall_seconds=hot_wall" in hot
+    assert "slice_wall_seconds=None" in hot
 
 
 @pytest.mark.asyncio

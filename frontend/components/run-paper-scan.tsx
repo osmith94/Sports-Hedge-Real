@@ -79,19 +79,9 @@ function reportSummary(report: PaperCollectionReport): string {
   return `${report.matched_event_pairs} event pair${report.matched_event_pairs === 1 ? "" : "s"} · ${report.matched_market_pairs} market pair${report.matched_market_pairs === 1 ? "" : "s"} · ${eligible} paper-eligible · ${report.issues.length} genuine issue${report.issues.length === 1 ? "" : "s"}`;
 }
 
-function clampScanIntervalSeconds(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_SCAN_INTERVAL_SECONDS;
+function clampHotTargetRefreshSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_HOT_TARGET_REFRESH_SECONDS;
   return Math.min(60, Math.max(5, Math.round(value)));
-}
-
-function clampHotRepriceAfterSeconds(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_HOT_REPRICE_AFTER_SECONDS;
-  return Math.min(60, Math.max(15, Math.round(value)));
-}
-
-function clampBackgroundRepriceAfterSeconds(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS;
-  return Math.min(600, Math.max(60, Math.round(value)));
 }
 
 function clampUniverseDiscoveryRefreshSeconds(value: number): number {
@@ -101,9 +91,7 @@ function clampUniverseDiscoveryRefreshSeconds(value: number): number {
 
 const DEFAULT_MIN_NET_ARB_PERCENT = "1.00";
 const DEFAULT_MAX_RISK = "60";
-const DEFAULT_SCAN_INTERVAL_SECONDS = 10;
-const DEFAULT_HOT_REPRICE_AFTER_SECONDS = 30;
-const DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS = 600;
+const DEFAULT_HOT_TARGET_REFRESH_SECONDS = 10;
 const DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS = 3600;
 const DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP = "1000";
 
@@ -245,12 +233,7 @@ export function RunPaperScan() {
   const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [hotScanDraft, setHotScanDraft] = useState(String(DEFAULT_SCAN_INTERVAL_SECONDS));
-  const [hotRepriceDraft, setHotRepriceDraft] = useState(String(DEFAULT_HOT_REPRICE_AFTER_SECONDS));
-  const [backgroundScanDraft, setBackgroundScanDraft] = useState(String(DEFAULT_SCAN_INTERVAL_SECONDS));
-  const [backgroundRepriceDraft, setBackgroundRepriceDraft] = useState(
-    String(DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS),
-  );
+  const [hotTargetDraft, setHotTargetDraft] = useState(String(DEFAULT_HOT_TARGET_REFRESH_SECONDS));
   const [universeRefreshDraft, setUniverseRefreshDraft] = useState(
     String(DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS),
   );
@@ -314,35 +297,12 @@ export function RunPaperScan() {
   const applyLiveRefresh = useCallback(
     (status: LiveRefreshStatus, options?: { forceSettings?: boolean }) => {
       const saved = status.operator_settings;
-      const hotScan =
-        saved?.hot_scan_interval_seconds ??
-        status.hot?.scan_interval_seconds ??
-        status.interval_seconds;
-      if (hotScan && (!settingsDirty || options?.forceSettings)) {
-        setHotScanDraft(String(clampScanIntervalSeconds(hotScan)));
-      }
-      const hotReprice =
-        saved?.hot_reprice_after_seconds ??
-        saved?.hot_cadence_seconds ??
-        status.hot?.reprice_after_seconds ??
-        DEFAULT_HOT_REPRICE_AFTER_SECONDS;
-      if (hotReprice && (!settingsDirty || options?.forceSettings)) {
-        setHotRepriceDraft(String(clampHotRepriceAfterSeconds(hotReprice)));
-      }
-      const backgroundScan =
-        saved?.background_scan_interval_seconds ??
-        status.background?.scan_interval_seconds ??
-        DEFAULT_SCAN_INTERVAL_SECONDS;
-      if (backgroundScan && (!settingsDirty || options?.forceSettings)) {
-        setBackgroundScanDraft(String(clampScanIntervalSeconds(backgroundScan)));
-      }
-      const backgroundReprice =
-        saved?.background_reprice_after_seconds ??
-        saved?.background_cadence_seconds ??
-        status.background?.reprice_after_seconds ??
-        DEFAULT_BACKGROUND_REPRICE_AFTER_SECONDS;
-      if (backgroundReprice && (!settingsDirty || options?.forceSettings)) {
-        setBackgroundRepriceDraft(String(clampBackgroundRepriceAfterSeconds(backgroundReprice)));
+      const hotTarget =
+        saved?.hot_target_refresh_seconds ??
+        status.hot?.target_refresh_seconds ??
+        DEFAULT_HOT_TARGET_REFRESH_SECONDS;
+      if (hotTarget && (!settingsDirty || options?.forceSettings)) {
+        setHotTargetDraft(String(clampHotTargetRefreshSeconds(hotTarget)));
       }
       const universeRefresh =
         saved?.universe_discovery_refresh_seconds ??
@@ -534,10 +494,7 @@ export function RunPaperScan() {
       if (!Number.isInteger(risk) || risk < 0 || risk > 100) {
         throw new Error("Maximum execution risk must be a whole number from 0 to 100.");
       }
-      const hotScan = clampScanIntervalSeconds(Number(hotScanDraft));
-      const hotReprice = clampHotRepriceAfterSeconds(Number(hotRepriceDraft));
-      const backgroundScan = clampScanIntervalSeconds(Number(backgroundScanDraft));
-      const backgroundReprice = clampBackgroundRepriceAfterSeconds(Number(backgroundRepriceDraft));
+      const hotTarget = clampHotTargetRefreshSeconds(Number(hotTargetDraft));
       const universeRefresh = clampUniverseDiscoveryRefreshSeconds(Number(universeRefreshDraft));
       const allocated = optionalPositive(maxAllocatedPerTrade, "Max allocated per trade");
       if (!allocated) {
@@ -547,10 +504,7 @@ export function RunPaperScan() {
         min_net_edge: minNet,
         outright_min_net_edge: outrightMinNet ?? null,
         max_execution_risk: risk,
-        hot_scan_interval_seconds: hotScan,
-        hot_reprice_after_seconds: hotReprice,
-        background_scan_interval_seconds: backgroundScan,
-        background_reprice_after_seconds: backgroundReprice,
+        hot_target_refresh_seconds: hotTarget,
         universe_discovery_refresh_seconds: universeRefresh,
         max_allocated_per_trade_gbp: allocated,
       });
@@ -841,65 +795,19 @@ export function RunPaperScan() {
             />
           </label>
           <label className="scan-field scan-field-compact">
-            <span>HOT scan interval s</span>
+            <span>HOT target refresh s</span>
             <input
               inputMode="numeric"
-              value={hotScanDraft}
+              value={hotTargetDraft}
               onChange={(event) => {
-                setHotScanDraft(event.target.value);
-                setSettingsDirty(true);
-              }}
-              onBlur={() => setHotScanDraft(String(clampScanIntervalSeconds(Number(hotScanDraft))))}
-              aria-label="HOT scan interval seconds"
-              title="How often the HOT worker checks for due or newly promoted rows. Safe range 5–60 seconds. Default 10. Not the view refresh and not the reprice age."
-            />
-          </label>
-          <label className="scan-field scan-field-compact">
-            <span>HOT reprice after s</span>
-            <input
-              inputMode="numeric"
-              value={hotRepriceDraft}
-              onChange={(event) => {
-                setHotRepriceDraft(event.target.value);
-                setSettingsDirty(true);
-              }}
-              onBlur={() => setHotRepriceDraft(String(clampHotRepriceAfterSeconds(Number(hotRepriceDraft))))}
-              aria-label="HOT reprice after seconds"
-              title="How old a successfully priced HOT row must be before it is due again. Safe range 15–60 seconds. Default 30. Never-priced rows do not wait this age."
-            />
-          </label>
-          <label className="scan-field scan-field-compact">
-            <span>BACKGROUND scan interval s</span>
-            <input
-              inputMode="numeric"
-              value={backgroundScanDraft}
-              onChange={(event) => {
-                setBackgroundScanDraft(event.target.value);
+                setHotTargetDraft(event.target.value);
                 setSettingsDirty(true);
               }}
               onBlur={() =>
-                setBackgroundScanDraft(String(clampScanIntervalSeconds(Number(backgroundScanDraft))))
+                setHotTargetDraft(String(clampHotTargetRefreshSeconds(Number(hotTargetDraft))))
               }
-              aria-label="BACKGROUND scan interval seconds"
-              title="How often the BACKGROUND worker checks for due rows. Safe range 5–60 seconds. Default 10. Not the reprice age and not UNIVERSE discovery."
-            />
-          </label>
-          <label className="scan-field scan-field-compact">
-            <span>BACKGROUND reprice after s</span>
-            <input
-              inputMode="numeric"
-              value={backgroundRepriceDraft}
-              onChange={(event) => {
-                setBackgroundRepriceDraft(event.target.value);
-                setSettingsDirty(true);
-              }}
-              onBlur={() =>
-                setBackgroundRepriceDraft(
-                  String(clampBackgroundRepriceAfterSeconds(Number(backgroundRepriceDraft))),
-                )
-              }
-              aria-label="BACKGROUND reprice after seconds"
-              title="How old a successfully priced BACKGROUND row must be before it is due again. Safe range 60–600 seconds. Default 600. Not UNIVERSE discovery."
+              aria-label="HOT target refresh interval seconds"
+              title="Desired time between HOT passes. A pass that finishes early waits out the remainder. A pass that runs long finishes and starts the next one immediately. Safe range 5–60 seconds. Default 10."
             />
           </label>
           <label className="scan-field scan-field-compact">
@@ -1117,14 +1025,14 @@ export function RunPaperScan() {
             Clear universe clears live UNIVERSE current-state, active generation and checkpoint only.
             Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
             Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge discovery refresh, and the stored discovery refresh stays editable for resume.
-            Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT scan interval, HOT reprice after, BACKGROUND scan interval, BACKGROUND reprice after and UNIVERSE discovery refresh
+            Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT target refresh and UNIVERSE discovery refresh
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
             Football competitions Apply changes the current session scope, including season
             markets, and does not itself call providers.
             A material competition-scope change while UNIVERSE is paused coalesces one fresh generation, then remains paused.
             Save this selection as my default is required to persist startup scope across restart.
-            HOT scan interval is how often the HOT worker checks for due rows (default 10s). HOT reprice after is how old a priced HOT row must be before it is due again (default 30s).
-            BACKGROUND scan interval is how often BACKGROUND checks for due rows (default 10s). BACKGROUND reprice after is the per-row age gate (default 600s).
+            HOT target refresh is the desired time between HOT passes (default 10s). An early pass waits out the remainder. A late pass finishes and starts again immediately.
+            BACKGROUND runs continuously through the catalogue and has no scan interval or reprice-after control.
             UNIVERSE discovery refresh is how often a fresh discovery generation starts after a terminal-complete generation (default 3600s).
             An incomplete generation resumes on the existing cooldown, not the discovery refresh.
             ACTIVE TRADE reprices open paper

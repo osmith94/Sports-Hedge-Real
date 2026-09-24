@@ -555,10 +555,9 @@ async def test_successful_background_rows_stay_out_until_their_reprice_age() -> 
     )
     first = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=clock.now)
     assert first.evaluated == [row.catalogue_row_id]
+    cursor = engine.coverage_cursor(PriceEnginePriority.BACKGROUND)
+    assert cursor.hold_until is not None
+    cursor.hold_for_target(target_seconds=0, now=clock.now)
     second = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=clock.now)
-    assert second.evaluated == []
-    assert len(matchbook.get_market_calls) == 1
-    clock.advance(600)
-    third = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=clock.now)
-    assert third.evaluated == [row.catalogue_row_id]
+    assert second.evaluated == [row.catalogue_row_id]
     assert len(matchbook.get_market_calls) == 2

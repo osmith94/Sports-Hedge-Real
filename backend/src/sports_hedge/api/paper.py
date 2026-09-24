@@ -1068,13 +1068,18 @@ def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
 ) -> LiveRefreshStatus:
-    """Persist scanner thresholds and HOT/BACKGROUND/UNIVERSE timing. Does not scan or call providers."""
+    """Persist scanner thresholds, the HOT target, and UNIVERSE discovery refresh.
+
+    Legacy HOT/BACKGROUND timing fields are optional. Omitting them keeps the
+    stored compatibility values. This endpoint does not scan or call providers.
+    """
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scan_settings(
         min_net_edge=update.min_net_edge,
         max_execution_risk=update.max_execution_risk,
         hot_cadence_seconds=update.hot_cadence_seconds,
+        hot_target_refresh_seconds=update.hot_target_refresh_seconds,
         hot_scan_interval_seconds=update.hot_scan_interval_seconds,
         hot_reprice_after_seconds=update.hot_reprice_after_seconds,
         background_cadence_seconds=update.background_cadence_seconds,
@@ -1830,7 +1835,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
             started = coordinator.now()
             result = await coordinator.run_price_engine_slice(
                 PriceEnginePriority.HOT,
-                slice_wall_seconds=hot_wall,
+                slice_wall_seconds=None,
                 matchbook=runtime.matchbook,
                 kalshi=runtime.kalshi,
                 polymarket=runtime.polymarket,

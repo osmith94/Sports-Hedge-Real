@@ -443,10 +443,9 @@ def test_frontend_exposes_universe_cadence_beside_hot_and_background() -> None:
     )
     api = (REPO_ROOT / "frontend" / "lib" / "api.ts").read_text(encoding="utf-8")
     assert "UNIVERSE discovery refresh s" in scan
-    assert "HOT scan interval s" in scan
-    assert "BACKGROUND scan interval s" in scan
-    assert scan.index("HOT scan interval s") < scan.index("BACKGROUND scan interval s")
-    assert scan.index("BACKGROUND reprice after s") < scan.index("UNIVERSE discovery refresh s")
+    assert "HOT target refresh s" in scan
+    assert "BACKGROUND scan interval s" not in scan
+    assert scan.index("HOT target refresh s") < scan.index("UNIVERSE discovery refresh s")
     assert "universe_discovery_refresh_seconds: universeRefresh" in scan
     assert "clampUniverseDiscoveryRefreshSeconds" in scan
     assert "Math.min(3600, Math.max(60" in scan

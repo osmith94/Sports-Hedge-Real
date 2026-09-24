@@ -43,7 +43,7 @@ export function systemLoadLines(
       detail: joinBits([
         backgroundCount,
         presentHealth(background.health),
-        formatCadence(background.cadence_seconds),
+        "continuous",
       ]),
     },
     {
@@ -99,7 +99,7 @@ export function systemLoadDetailLines(
     },
     {
       key: "BACKGROUND pricing",
-      detail: `${asCount(background.working_set)} items · ${asCount(background.due)} due · scan interval ${formatCadence(background.cadence_seconds)}`,
+      detail: `${asCount(background.working_set)} items · ${asCount(background.due)} due · continuous catalogue coverage`,
     },
     {
       key: "UNIVERSE discovery",

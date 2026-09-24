@@ -511,6 +511,7 @@ export type LaneRefreshStatus = {
   cadence_seconds: number;
   scan_interval_seconds?: number | null;
   reprice_after_seconds?: number | null;
+  target_refresh_seconds?: number | null;
   discovery_refresh_seconds?: number | null;
   cycle_timeout_seconds?: number | null;
   generation_budget_seconds?: number | null;
@@ -720,6 +721,7 @@ export type OperatorScannerSettings = {
   min_net_edge: string;
   outright_min_net_edge?: string | null;
   max_execution_risk: number;
+  hot_target_refresh_seconds?: number;
   hot_scan_interval_seconds?: number;
   hot_reprice_after_seconds?: number;
   background_scan_interval_seconds?: number;
@@ -740,6 +742,7 @@ export type OperatorScannerSettingsUpdate = {
   min_net_edge: string;
   outright_min_net_edge?: string | null;
   max_execution_risk: number;
+  hot_target_refresh_seconds?: number;
   hot_scan_interval_seconds?: number;
   hot_reprice_after_seconds?: number;
   background_scan_interval_seconds?: number;

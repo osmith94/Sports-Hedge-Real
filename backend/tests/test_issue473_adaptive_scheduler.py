@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -206,9 +205,9 @@ def test_cadence_keeps_not_due_items_out_of_due_set() -> None:
     waiting.near_threshold = True
     waiting.qualifying = True
     due = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW)
-    assert "amc-wait" not in {item.identity.catalogue_row_id for item in due}
-    later = engine.due_items(PriceEnginePriority.BACKGROUND, now=NOW + timedelta(seconds=90))
-    assert "amc-wait" in {item.identity.catalogue_row_id for item in later}
+    ids = [item.identity.catalogue_row_id for item in due]
+    assert ids == ["amc-due", "amc-wait"]
+    assert engine.coverage_cursor(PriceEnginePriority.BACKGROUND).cursor_after_id == "amc-wait"
 
 
 def test_concurrency_caps_unchanged() -> None:
