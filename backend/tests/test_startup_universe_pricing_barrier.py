@@ -15,13 +15,22 @@ import pytest
 
 from sports_hedge.application.collector import CollectionReport
 from sports_hedge.application.event_loop_activity import close_loop_slice, mark_loop_phase
-from sports_hedge.application.live_refresh import ExplicitCollectBusy, LiveRefreshCoordinator
+from sports_hedge.application.active_trade_lane import ACTIVE_TRADE_LANE
+from sports_hedge.application.approved_market_catalogue import (
+    CATALOGUE_SCHEMA_VERSION,
+    CatalogueRowState,
+)
+from sports_hedge.application.live_refresh import DualCadencePlan, ExplicitCollectBusy, LiveRefreshCoordinator
 from sports_hedge.application.scan_lanes import (
     STARTUP_PRICING_GATED_SLEEP_SECONDS,
+    STARTUP_READINESS_COLD_UNREADY,
+    STARTUP_READINESS_FRESH_GENERATION_READY,
+    STARTUP_READINESS_WARM_CATALOGUE_READY,
     STARTUP_UNIVERSE_PENDING,
     ScanLane,
 )
-from sports_hedge.application.universe_checkpoint import SWEEP_RETRY_WAIT
+from sports_hedge.application.universe_checkpoint import SWEEP_RETRY_WAIT, SeriesWorkUnit
+from sports_hedge.paper.trades import PaperActiveTradePhase
 from sports_hedge.config import get_settings
 from sports_hedge.persistence.operator_scanner_settings import (
     SqliteOperatorScannerSettingsStore,
@@ -293,3 +302,180 @@ def test_runtime_hot_during_later_universe_is_unchanged_without_configure() -> N
     assert hot.lane == ScanLane.HOT.value
     universe = coordinator.plan_universe_tick(now=NOW)
     assert universe.lane == ScanLane.UNIVERSE.value
+
+
+class _Catalogue:
+    def __init__(self, rows: list) -> None:
+        self.rows = list(rows)
+
+    def list_active(self) -> list:
+        return [
+            row
+            for row in self.rows
+            if getattr(row, "row_state", None) is CatalogueRowState.ACTIVE
+        ]
+
+
+def _warm_row(*, schema_version: int = CATALOGUE_SCHEMA_VERSION):
+    from test_issue465_universe_clear_and_update import _catalogue_row
+
+    row = _catalogue_row("persisted-epl")
+    return row.model_copy(update={"schema_version": schema_version})
+
+
+def _retry_blocked(coordinator: LiveRefreshCoordinator) -> None:
+    coordinator._universe_generation_id = max(1, int(coordinator._universe_generation_id))
+    coordinator._universe_generation_started_at = NOW
+    coordinator._universe_cursor = "cursor-kept"
+    coordinator._universe_series_work = {
+        "kalshi:KXEPL": SeriesWorkUnit(
+            venue="kalshi",
+            series="KXEPL",
+            state=SWEEP_RETRY_WAIT,
+            retryable=True,
+            attempt_count=35,
+            next_retry_at=NOW + timedelta(seconds=8),
+        )
+    }
+
+
+def test_cold_catalogue_retryable_startup_keeps_pricing_gated() -> None:
+    coordinator = _coordinator()
+    _retry_blocked(coordinator)
+    assert coordinator.plan_hot_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+    assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_COLD_UNREADY
+    assert coordinator._universe_series_work["kalshi:KXEPL"].state == SWEEP_RETRY_WAIT
+    assert coordinator._universe_generation_started_at is not None
+
+
+def test_warm_catalogue_opens_on_success_and_on_retryable_degradation() -> None:
+    clock = FakeClock(NOW)
+    success = _coordinator(clock)
+    success._catalogue_store = _Catalogue([_warm_row()])
+    _commit_startup_universe(success, NOW)
+    assert success.startup_pricing_readiness() == STARTUP_READINESS_FRESH_GENERATION_READY
+    assert success.plan_hot_tick(now=NOW).reason != STARTUP_UNIVERSE_PENDING
+
+    degraded = _coordinator(clock)
+    row = _warm_row()
+    degraded._catalogue_store = _Catalogue([row])
+    _retry_blocked(degraded)
+    cursor = degraded._universe_cursor
+    generation_id = degraded._universe_generation_id
+    hot = degraded.plan_hot_tick(now=NOW)
+    assert hot.reason != STARTUP_UNIVERSE_PENDING
+    assert degraded.startup_pricing_readiness() == STARTUP_READINESS_WARM_CATALOGUE_READY
+    assert degraded._universe_generation_started_at is not None
+    assert degraded._universe_cursor == cursor
+    assert degraded._universe_generation_id == generation_id
+    assert degraded._universe_series_work["kalshi:KXEPL"].state == SWEEP_RETRY_WAIT
+    later = degraded.plan_universe_tick(now=NOW)
+    assert later.lane == "idle"
+    assert later.reason == "universe_retry_wait"
+    assert degraded.startup_pricing_ready() is True
+    degraded._universe_series_work["kalshi:KXEPL"].state = "ok"
+    assert degraded.startup_pricing_ready() is True
+    assert degraded.plan_background_tick(now=NOW).reason != STARTUP_UNIVERSE_PENDING
+
+
+def test_incompatible_persisted_catalogue_stays_gated() -> None:
+    coordinator = _coordinator()
+    coordinator._catalogue_store = _Catalogue([_warm_row(schema_version=99)])
+    _retry_blocked(coordinator)
+    assert coordinator.plan_background_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+    assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_COLD_UNREADY
+
+
+def test_plain_clear_keeps_pricing_clear_and_update_regates() -> None:
+    coordinator = _coordinator()
+    _commit_startup_universe(coordinator, NOW)
+    coordinator.clear_universe_working_set(run_after=False)
+    assert coordinator.startup_pricing_ready() is True
+    assert coordinator.plan_hot_tick(now=NOW).reason != STARTUP_UNIVERSE_PENDING
+    coordinator.clear_universe_working_set(run_after=True)
+    assert coordinator.startup_pricing_ready() is False
+    assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_COLD_UNREADY
+    assert coordinator.plan_universe_tick(now=NOW).lane == ScanLane.UNIVERSE.value
+    coordinator._catalogue_store = _Catalogue([_warm_row()])
+    _retry_blocked(coordinator)
+    assert coordinator.plan_hot_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+
+
+@pytest.mark.asyncio
+async def test_gated_heartbeats_advance_without_provider_calls() -> None:
+    clock = FakeClock(NOW)
+    coordinator = _coordinator(clock)
+    plan = DualCadencePlan(lane="idle", reason=STARTUP_UNIVERSE_PENDING)
+    coordinator._record_hot_heartbeat(plan)
+    first = coordinator.status.hot.last_heartbeat_at
+    clock.advance(2)
+    coordinator._record_hot_heartbeat(plan)
+    second = coordinator.status.hot.last_heartbeat_at
+    assert first is not None and second is not None
+    assert second > first
+    assert coordinator.status.hot.cycle_in_progress is False
+    assert coordinator.status.hot.worker_state == "waiting"
+    assert coordinator.status.hot.last_plan_reason == STARTUP_UNIVERSE_PENDING
+    coordinator._record_hot_heartbeat(plan)
+    background_plan = coordinator.plan_background_tick(now=clock.now)
+    assert background_plan.reason == STARTUP_UNIVERSE_PENDING
+
+    async def boom(plan=None) -> None:
+        raise AssertionError("gated background must not price")
+
+    task = asyncio.create_task(coordinator._background_loop(boom))
+    await asyncio.sleep(0.05)
+    first_bg = coordinator.status.background.last_heartbeat_at
+    clock.advance(2)
+    coordinator._pulse_control()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    later_bg = coordinator.status.background.last_heartbeat_at
+    assert first_bg is not None and later_bg is not None
+    assert later_bg >= first_bg
+    assert coordinator.status.background.cycle_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_active_open_trade_runs_while_pricing_stays_gated() -> None:
+    clock = FakeClock(NOW)
+    coordinator = _coordinator(clock)
+    trade = type(
+        "Trade",
+        (),
+        {
+            "trade_id": "trade-open",
+            "opportunity_id": "opp-open",
+            "state": "open",
+            "active_trade_phase": PaperActiveTradePhase.ACCUMULATING,
+        },
+    )()
+    coordinator._active_trades.promote(trade, now=NOW, cadence_seconds=5)
+    plan = coordinator.plan_active_trade_tick(now=NOW)
+    assert plan.lane == ACTIVE_TRADE_LANE
+    assert plan.reason == "active_trade_due"
+    assert "trade-open" in (plan.identity_scope or [])
+    assert coordinator.plan_hot_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING
+    provider_calls: list[str] = []
+
+    async def price(active_plan) -> None:
+        assert active_plan.reason != STARTUP_UNIVERSE_PENDING
+        provider_calls.append("active-provider")
+        coordinator._stop.set()
+
+    coordinator._maybe_run_paper_settlement = lambda: asyncio.sleep(0)  # type: ignore[method-assign]
+    coordinator._run_active_trade_tick = price  # type: ignore[method-assign]
+    task = asyncio.create_task(coordinator._active_trade_loop(lambda plan=None: None))
+    await asyncio.sleep(0.15)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert provider_calls == ["active-provider"]
+    assert coordinator.status.active_trade.cadence_seconds == 5
+    assert coordinator.plan_background_tick(now=NOW).reason == STARTUP_UNIVERSE_PENDING

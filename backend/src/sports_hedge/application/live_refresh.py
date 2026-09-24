@@ -128,6 +128,9 @@ from sports_hedge.application.scan_lanes import (
     STARTUP_PHASE_RUNNING,
     STARTUP_PHASE_UNIVERSE_INITIALISING,
     STARTUP_PRICING_GATED_SLEEP_SECONDS,
+    STARTUP_READINESS_COLD_UNREADY,
+    STARTUP_READINESS_FRESH_GENERATION_READY,
+    STARTUP_READINESS_WARM_CATALOGUE_READY,
     STARTUP_UNIVERSE_PENDING,
     UNIVERSE_MIN_CHUNK_SECONDS,
     WORKER_COMPLETE,
@@ -518,6 +521,8 @@ class LiveRefreshCoordinator:
         self._universe_oneshot_pending = True
         self._startup_barrier_armed = False
         self._startup_pricing_ready = False
+        self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
+        self._startup_replacement_required = False
         self._last_request: dict[str, Any] = {}
         self._last_report: CollectionReport | None = None
         self._fixture_state = FixtureCurrentStateStore()
@@ -640,7 +645,9 @@ class LiveRefreshCoordinator:
         """
 
         with self._state_lock:
-            self._open_startup_pricing_unlocked()
+            self._open_startup_pricing_unlocked(
+                readiness=STARTUP_READINESS_FRESH_GENERATION_READY
+            )
         self._pulse_control()
 
     def arm_startup_pricing_barrier(self) -> None:
@@ -662,12 +669,18 @@ class LiveRefreshCoordinator:
                     }
                 )
 
-    def _open_startup_pricing_unlocked(self) -> bool:
+    def startup_pricing_readiness(self) -> str:
+        return self._startup_pricing_readiness
+
+    def _open_startup_pricing_unlocked(self, *, readiness: str) -> bool:
         """Return True when this call newly opens the barrier."""
 
         if self._startup_pricing_ready:
             return False
         self._startup_pricing_ready = True
+        self._startup_pricing_readiness = readiness
+        if readiness == STARTUP_READINESS_FRESH_GENERATION_READY:
+            self._startup_replacement_required = False
         self.status = self.status.model_copy(
             update={
                 "startup_pricing_ready": True,
@@ -678,6 +691,7 @@ class LiveRefreshCoordinator:
 
     def _close_startup_pricing_unlocked(self) -> None:
         self._startup_pricing_ready = False
+        self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
         if not self._startup_barrier_armed:
             return
         self.status = self.status.model_copy(
@@ -685,6 +699,87 @@ class LiveRefreshCoordinator:
                 "startup_pricing_ready": False,
                 "startup_phase": STARTUP_PHASE_UNIVERSE_INITIALISING,
             }
+        )
+
+    def _startup_generation_retry_blocked_unlocked(self) -> bool:
+        """True when an open generation cannot progress except by retry backoff.
+
+        Pending or running work is not this state. A bare timeout with no
+        classified work is not this state. Completeness is unchanged.
+        """
+
+        if self._startup_replacement_required:
+            return False
+        if self._universe_generation_started_at is None:
+            return False
+        if self._universe_generation_superseded:
+            return False
+        if self._universe_needs_rehydration:
+            return False
+        if self._universe_sweep_is_complete_unlocked():
+            return False
+        unfinished = [
+            unit
+            for unit in self._universe_work.values()
+            if unit.state not in SWEEP_TERMINAL_STATES
+        ]
+        unfinished_series = [
+            unit
+            for unit in self._universe_series_work.values()
+            if unit.state not in SERIES_TERMINAL_STATES
+        ]
+        if not unfinished and not unfinished_series:
+            return False
+        return all(unit.state == SWEEP_RETRY_WAIT for unit in unfinished) and all(
+            unit.state == SWEEP_RETRY_WAIT for unit in unfinished_series
+        )
+
+    def _persisted_catalogue_pricing_usable(self) -> bool:
+        """Schema-compatible ACTIVE rows that reconstruct into scoped price-engine items.
+
+        Local catalogue only. No provider calls and no fixture-radar TTL.
+        """
+
+        if self._startup_replacement_required or self._universe_generation_superseded:
+            return False
+        store = self._catalogue_store
+        if store is None and self._price_engine is not None:
+            store = self._price_engine.catalogue_store
+        if store is None or not hasattr(store, "list_active"):
+            return False
+        try:
+            rows = list(store.list_active())
+        except Exception:
+            return False
+        from sports_hedge.application.approved_market_catalogue import (
+            CATALOGUE_SCHEMA_VERSION,
+            CatalogueRowState,
+        )
+
+        compatible = [
+            row
+            for row in rows
+            if int(getattr(row, "schema_version", 0) or 0) == CATALOGUE_SCHEMA_VERSION
+            and getattr(row, "row_state", None) is CatalogueRowState.ACTIVE
+        ]
+        if not compatible:
+            return False
+        engine = self.price_engine()
+        selected = self.effective_universe_scope().selected_set()
+        engine.set_operator_scope(selected, exempt_event_ids=self._open_paper_event_ids())
+        return bool(engine.reconstruct(compatible))
+
+    def _consider_warm_catalogue_release_unlocked(self) -> bool:
+        """Open pricing against a known-good catalogue when startup is retry-blocked."""
+
+        if not self._startup_pricing_gated_unlocked():
+            return False
+        if not self._startup_generation_retry_blocked_unlocked():
+            return False
+        if not self._persisted_catalogue_pricing_usable():
+            return False
+        return self._open_startup_pricing_unlocked(
+            readiness=STARTUP_READINESS_WARM_CATALOGUE_READY
         )
 
     def _gated_pricing_plan(self) -> DualCadencePlan:
@@ -1035,7 +1130,10 @@ class LiveRefreshCoordinator:
             prior_cursor = self._status_universe_cursor()
             self._universe_apply_epoch += 1
             self._invalidate_universe_chunk_epoch_unlocked()
-            self._close_startup_pricing_unlocked()
+            if run_after:
+                self._startup_barrier_armed = True
+                self._startup_replacement_required = True
+                self._close_startup_pricing_unlocked()
             self._reset_live_universe_generation_unlocked(now=now, run_after=run_after)
             self._mark_universe_checkpoint_dirty_unlocked()
         inventory = self._fixture_state.inventory(now)
@@ -1740,6 +1838,8 @@ class LiveRefreshCoordinator:
             self._universe_oneshot_pending = True
             self._startup_barrier_armed = False
             self._startup_pricing_ready = False
+            self._startup_pricing_readiness = STARTUP_READINESS_COLD_UNREADY
+            self._startup_replacement_required = False
             self._universe_generation_superseded = False
             self._universe_generation_scope_version = 0
             self._session_selected_codes = None
@@ -1949,6 +2049,8 @@ class LiveRefreshCoordinator:
             return DualCadencePlan(lane="idle", reason="operator_stopped")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
+            if self._consider_warm_catalogue_release_unlocked():
+                self._pulse_control()
             if self._startup_pricing_gated_unlocked():
                 return self._gated_pricing_plan()
             if self._hot_in_progress or self._manual_hot_in_progress:
@@ -1973,6 +2075,8 @@ class LiveRefreshCoordinator:
             return DualCadencePlan(lane="idle", reason="operator_stopped")
         with self._state_lock:
             self._ensure_due_times_unlocked(evaluated, resolved)
+            if self._consider_warm_catalogue_release_unlocked():
+                self._pulse_control()
             if self._startup_pricing_gated_unlocked():
                 return self._gated_pricing_plan()
             if self._background_in_progress:
@@ -4484,7 +4588,9 @@ class LiveRefreshCoordinator:
             to_phase = UniverseGenerationPhase.IDLE
         opened_pricing = False
         if action == "complete":
-            opened_pricing = self._open_startup_pricing_unlocked()
+            opened_pricing = self._open_startup_pricing_unlocked(
+                readiness=STARTUP_READINESS_FRESH_GENERATION_READY
+            )
         self._audit_universe_lifecycle(
             decide_generation_transition(
                 UniverseGenerationPhase.OPEN,
@@ -5308,6 +5414,17 @@ class LiveRefreshCoordinator:
                 and self.status.hot.last_plan_reason == STARTUP_UNIVERSE_PENDING
                 and not self._hot_in_progress
             ):
+                self.status = self.status.model_copy(
+                    update={
+                        "hot": self.status.hot.model_copy(
+                            update={
+                                "last_heartbeat_at": now,
+                                "cycle_in_progress": False,
+                                "worker_state": WORKER_WAITING,
+                            }
+                        )
+                    }
+                )
                 return
             hot_update: dict[str, Any] = {
                 "last_heartbeat_at": now,
@@ -5419,7 +5536,17 @@ class LiveRefreshCoordinator:
                         plan.reason == self.status.background.last_plan_reason
                         and plan.reason == STARTUP_UNIVERSE_PENDING
                     ):
-                        pass
+                        self.status = self.status.model_copy(
+                            update={
+                                "background": self.status.background.model_copy(
+                                    update={
+                                        "last_heartbeat_at": self.now(),
+                                        "cycle_in_progress": False,
+                                        "worker_state": WORKER_WAITING,
+                                    }
+                                )
+                            }
+                        )
                     else:
                         background_update = {
                             "last_heartbeat_at": self.now(),
