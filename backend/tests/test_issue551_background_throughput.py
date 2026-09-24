@@ -135,17 +135,20 @@ async def test_timeout_repeat_and_worker_error_are_split() -> None:
     )
     result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
     report = result.diagnostic or {}
-    assert result.failed
+    assert result.retry_wait
     assert len(result.evaluated) + len(result.failed) + len(result.retry_wait) == 3
     assert result.not_started == []
     assert report["worker_errors"]
     assert report["worker_errors"][0]["type"] == "RuntimeError"
     assert report["terminals"]["failed"] == len(result.failed)
     assert report["terminals"]["retry_wait"] == len(result.retry_wait)
-    assert report["repeated_exact_id_calls"] >= 1
-    assert report["coalesced_provider_calls"] == 0
+    # Shared Matchbook/Kalshi IDs coalesce inside the BACKGROUND planner.
+    assert result.coalesced_provider_calls >= 1
+    assert report["coalesced_provider_calls"] == result.coalesced_provider_calls
+    assert report["repeated_exact_id_calls"] == 0
     assert report["call_shape"]["explicit_slice_wall"] is False
     assert report["call_shape"]["sequential_within_item"] is True
+    assert report["call_shape"]["pricing_call_shape"] == "provider_centric_staged_exact_id"
     stages = {(item["venue"], item["stage"]): item for item in report["stages"]}
     assert stages[("matchbook", "get_market")]["timeout"] >= 1 or stages[("matchbook", "get_market")]["success"] >= 1
     encoded = json.dumps(report)

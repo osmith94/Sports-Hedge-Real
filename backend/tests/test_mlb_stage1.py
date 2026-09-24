@@ -393,8 +393,8 @@ def test_universe_does_not_price_books_and_background_uses_exact_ids(monkeypatch
 
     books = KalshiBooks()
 
-    async def direct(self, venue, *, lane, stage, source_id, coro, runtime=None):
-        del self, venue, lane, stage, source_id, runtime
+    async def direct(self, venue, *, lane, stage, source_id, coro, runtime=None, **_extra):
+        del self, venue, lane, stage, source_id, runtime, _extra
         return await coro, None
 
     monkeypatch.setattr(CataloguePriceEngine, "_provider_call", direct)

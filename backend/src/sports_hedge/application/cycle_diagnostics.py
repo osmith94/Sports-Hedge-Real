@@ -303,6 +303,9 @@ class CycleDiagnosticAccumulator:
         qualifying: int,
         promotions: int,
         provider_limits: Mapping[str, int] | None = None,
+        coalesced_provider_calls: int = 0,
+        issued_provider_calls: int = 0,
+        pricing_call_shape: str = "",
     ) -> dict[str, Any]:
         wall = max(0, int(wall_ms))
         per_second = (evaluated / (wall / 1000.0)) if wall else 0.0
@@ -353,12 +356,14 @@ class CycleDiagnosticAccumulator:
             ),
             "saved_provider_calls": int(self.saved_provider_calls),
             "skipped_provider_calls": int(self.skipped_provider_calls),
-            "coalesced_provider_calls": 0,
+            "coalesced_provider_calls": int(coalesced_provider_calls),
+            "issued_provider_calls": int(issued_provider_calls),
             "repeated_exact_id_calls": int(self.repeated_exact_id_calls),
             "distinct_exact_ids": len(self._seen_exact_ids),
             "exact_id_tracking_truncated": self._exact_ids_truncated,
             "call_shape": {
                 "sequential_within_item": True,
+                "pricing_call_shape": str(pricing_call_shape or ""),
                 "worker_limit": int(self.worker_limit),
                 "explicit_slice_wall": self.explicit_slice_wall,
                 "slice_wall_seconds": self.slice_wall_seconds,
