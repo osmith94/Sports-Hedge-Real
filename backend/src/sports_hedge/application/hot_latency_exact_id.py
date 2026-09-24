@@ -1,8 +1,8 @@
 """Latency-first HOT consumer of the shared exact-ID stage scheduler.
 
-Production ``CataloguePriceEngine.run_slice(HOT)`` does not call this module.
-It still prices each HOT row sequentially. ACTIVE TRADE still calls
-``_price_item`` with the active-trade lane from live refresh.
+Production ``CataloguePriceEngine.run_slice(HOT)`` calls this module.
+ACTIVE TRADE still calls ``_price_item`` with the active-trade lane from
+live refresh. BACKGROUND uses a separate coalescer.
 
 This consumer is the reviewed shape for switching HOT later:
 

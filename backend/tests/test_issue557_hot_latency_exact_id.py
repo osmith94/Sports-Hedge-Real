@@ -3,9 +3,10 @@
 Data class: synthetic/fixture providers and barriers. Not live quotes.
 PAPER / read-only.
 
-Production HOT ``run_slice`` stays sequential. These tests show the shared
-stage scheduler can serve a HOT lane without BACKGROUND exception semantics,
-without ACTIVE TRADE, and without raising MB4/K4/PM8 or the 8s timeout.
+Production HOT ``run_slice`` uses the shared stage scheduler. These tests
+show that path keeps HOT lane priority, slice-local coalescing, isolate-
+without-retry errors, and ACTIVE TRADE on ``_price_item``. Caps and the 8s
+timeout stay put.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ async def _run_hot(engine: CataloguePriceEngine) -> PriceEngineSliceResult:
     return result
 
 
-async def test_production_hot_slice_stays_sequential_and_does_not_coalesce() -> None:
+async def test_production_hot_slice_uses_staged_consumer_and_coalesces() -> None:
     first = _row(
         suffix="prod-a",
         kickoff=NEAR,
@@ -101,13 +102,12 @@ async def test_production_hot_slice_stays_sequential_and_does_not_coalesce() -> 
     engine, matchbook, kalshi, _layer = _engine([first, second], hot_interval=0)
     result = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
     assert set(result.evaluated) == {first.catalogue_row_id, second.catalogue_row_id}
-    assert len(matchbook.get_market_calls) == 2
-    assert len(kalshi.book_calls) == 2
-    assert result.coalesced_provider_calls == 0
-    assert result.pricing_call_shape == ""
+    assert len(matchbook.get_market_calls) == 1
+    assert len(kalshi.book_calls) == 1
+    assert result.coalesced_provider_calls >= 1
+    assert result.pricing_call_shape == HOT_LATENCY_CALL_SHAPE
     price_engine_source = inspect.getsource(CataloguePriceEngine.run_slice)
-    assert "run_hot_latency_exact_id_slice" not in price_engine_source
-    assert "run_hot_latency_exact_id_slice" not in inspect.getsource(CataloguePriceEngine)
+    assert "run_hot_latency_exact_id_slice" in price_engine_source
 
 
 async def test_hot_consumer_keeps_matchbook_moving_while_kalshi_slots_stall() -> None:
@@ -142,7 +142,7 @@ async def test_hot_consumer_keeps_matchbook_moving_while_kalshi_slots_stall() ->
     assert kalshi.list_markets_calls == []
 
 
-async def test_production_hot_slice_still_stops_matchbook_behind_a_kalshi_stall() -> None:
+async def test_production_hot_slice_keeps_matchbook_moving_while_kalshi_slots_stall() -> None:
     rows = _hot_rows(16, suffix="seqstall", id_base=50)
     kalshi = _StallKalshi()
     matchbook = _CountingMatchbook(kalshi)
@@ -170,9 +170,9 @@ async def test_production_hot_slice_still_stops_matchbook_behind_a_kalshi_stall(
         ),
         timeout=4,
     )
-    assert seen <= 4
+    assert seen >= 8
     assert set(result.evaluated) == {row.catalogue_row_id for row in rows}
-    assert result.pricing_call_shape == ""
+    assert result.pricing_call_shape == HOT_LATENCY_CALL_SHAPE
 
 
 async def test_hot_consumer_exception_does_not_retry_or_stop_other_rows() -> None:

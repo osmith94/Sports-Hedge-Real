@@ -6,8 +6,8 @@ for due BACKGROUND rows. It does not discover, rematch, or raise provider caps.
 The stage queues live in ``exact_id_stage_scheduler``. BACKGROUND keeps
 provider lane ``background`` and turns an unexpected row exception into that
 row's own retry. HOT does not call this function. The latency-first consumer
-is ``hot_latency_exact_id.run_hot_latency_exact_id_slice``, and production
-``run_slice`` does not call it yet. ACTIVE TRADE stays on ``_price_item``.
+is ``hot_latency_exact_id.run_hot_latency_exact_id_slice``. Production HOT
+``run_slice`` calls that consumer. ACTIVE TRADE stays on ``_price_item``.
 """
 
 from __future__ import annotations

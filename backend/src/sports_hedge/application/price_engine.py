@@ -19,8 +19,9 @@ PAPER / read-only. Exact persisted Matchbook/Kalshi/Polymarket IDs only — neve
 books use real token IDs from the catalogue; missing or synthetic tokens are
 not executable.
 
-BACKGROUND schedules those exact-ID reads by provider stage and coalesces
-identical requests inside one slice. HOT and ACTIVE TRADE stay sequential.
+BACKGROUND and HOT schedule those exact-ID reads by provider stage and
+coalesce identical requests inside one slice. Each slice binds its own
+coalescer. ACTIVE TRADE stays sequential on ``_price_item``.
 """
 
 from __future__ import annotations
@@ -840,6 +841,21 @@ class CataloguePriceEngine:
                     slice_wall_seconds=slice_wall_seconds,
                     worker_limit=self._slice_worker_limit(),
                 )
+            elif priority is PriceEnginePriority.HOT and expensive:
+                from sports_hedge.application.hot_latency_exact_id import (
+                    run_hot_latency_exact_id_slice,
+                )
+
+                await run_hot_latency_exact_id_slice(
+                    self,
+                    expensive,
+                    result,
+                    remaining=remaining,
+                )
+                diagnostics.note_slice_budget(
+                    slice_wall_seconds=slice_wall_seconds,
+                    worker_limit=self._slice_worker_limit(),
+                )
             else:
                 async def _worker() -> None:
                     while True:
@@ -1175,10 +1191,10 @@ class CataloguePriceEngine:
         *,
         lane: str | None = None,
     ) -> PriceEngineItemStatus:
-        """Sequential exact-ID pricing used by HOT and ACTIVE TRADE.
+        """Sequential exact-ID pricing used by ACTIVE TRADE.
 
-        BACKGROUND uses the staged planner instead. Stage order here stays
-        Matchbook, then Kalshi with upper-bound pruning, then Polymarket.
+        BACKGROUND and HOT use the shared staged planner. Stage order here
+        stays Matchbook, then Kalshi with upper-bound pruning, then Polymarket.
         """
 
         lane = self._mark_price_item_started(runtime, lane=lane)

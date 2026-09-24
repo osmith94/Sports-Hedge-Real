@@ -511,8 +511,10 @@ async def test_hot_acquire_is_granted_before_the_next_background_matchbook() -> 
     assert ProviderPriority.ACTIVE_TRADE < ProviderPriority.HOT < ProviderPriority.BACKGROUND
 
 
-async def test_hot_slice_does_not_coalesce_exact_ids() -> None:
+async def test_hot_slice_coalesces_exact_ids_inside_one_slice_only() -> None:
     from datetime import timedelta
+
+    from sports_hedge.application.hot_latency_exact_id import HOT_LATENCY_CALL_SHAPE
 
     near = NOW + timedelta(minutes=20)
     first = _row(
@@ -532,10 +534,14 @@ async def test_hot_slice_does_not_coalesce_exact_ids() -> None:
     engine, matchbook, kalshi, _layer = _engine([first, second], hot_interval=0)
     result = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
     assert set(result.evaluated) == {first.catalogue_row_id, second.catalogue_row_id}
+    assert len(matchbook.get_market_calls) == 1
+    assert len(kalshi.book_calls) == 1
+    assert result.coalesced_provider_calls >= 1
+    assert result.pricing_call_shape == HOT_LATENCY_CALL_SHAPE
+    second_result = await engine.run_slice(PriceEnginePriority.HOT, now=NOW)
     assert len(matchbook.get_market_calls) == 2
     assert len(kalshi.book_calls) == 2
-    assert result.coalesced_provider_calls == 0
-    assert result.pricing_call_shape == ""
+    assert second_result.coalesced_provider_calls >= 1
 
 
 async def test_successful_background_rows_stay_out_until_their_reprice_age() -> None:
