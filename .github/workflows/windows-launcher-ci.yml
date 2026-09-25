@@ -7,6 +7,7 @@ on:
       - "scripts/windows/**"
       - "backend/src/sports_hedge/api/desktop_*.py"
       - "backend/src/sports_hedge/api/main.py"
+      - "backend/pyproject.toml"
       - "frontend/app/api/desktop/**"
       - "frontend/lib/desktop-*"
       - "frontend/components/exit-sports-hedge*"
@@ -19,6 +20,7 @@ on:
       - "scripts/windows/**"
       - "backend/src/sports_hedge/api/desktop_*.py"
       - "backend/src/sports_hedge/api/main.py"
+      - "backend/pyproject.toml"
       - "frontend/app/api/desktop/**"
       - "frontend/lib/desktop-*"
       - "frontend/components/exit-sports-hedge*"
@@ -103,10 +105,9 @@ jobs:
           python -m venv backend/.venv
           backend/.venv/Scripts/python.exe -m pip install --upgrade pip
           backend/.venv/Scripts/python.exe -m pip install -e "backend[dev]"
-          # Windows CPython ships no IANA tz database; sports_hedge imports
-          # ZoneInfo("Europe/London") at startup. Pre-existing operator venv
-          # requirement (not declared in backend/pyproject.toml).
-          backend/.venv/Scripts/python.exe -m pip install tzdata
+      - name: Time zones resolve from the normal package install alone
+        shell: pwsh
+        run: backend/.venv/Scripts/python.exe -c "import importlib.metadata as m, zoneinfo; zoneinfo.ZoneInfo('Europe/London'); print('tzdata', m.version('tzdata'))"
       - name: Frontend dependencies
         working-directory: frontend
         run: npm ci --no-audit --no-fund
