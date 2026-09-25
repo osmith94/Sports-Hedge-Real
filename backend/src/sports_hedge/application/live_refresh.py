@@ -3909,6 +3909,8 @@ class LiveRefreshCoordinator:
             HEALTH_UNAVAILABLE,
             "rate_limited",
             "timeout",
+            "not_started",
+            "deferred",
         }:
             _schedule_capped_retry(unit, reason=reason or status, scanned=scanned)
         elif status and not retryable_flag:
@@ -4127,6 +4129,15 @@ class LiveRefreshCoordinator:
                 _consume_orphaned_task_result(task)
             else:
                 task.add_done_callback(_consume_orphaned_task_result)
+
+    def universe_series_results_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        """Copy series diagnostics so a resumed chunk cannot forget unfinished series."""
+
+        with self._state_lock:
+            return {
+                str(venue): [dict(row) for row in rows if isinstance(row, dict)]
+                for venue, rows in self._universe_series_results.items()
+            }
 
     def universe_collect_callbacks(
         self,

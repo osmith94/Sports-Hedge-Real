@@ -250,7 +250,15 @@ def map_series_status_to_state(status: str, *, retryable: bool = False) -> str |
         return None
     if key in SERIES_STATUS_TO_STATE:
         return SERIES_STATUS_TO_STATE[key]
-    if retryable or key in {"timeout", "rate_limited", "discovery_timeout", "market_timeout", "unavailable"}:
+    if retryable or key in {
+        "timeout",
+        "rate_limited",
+        "discovery_timeout",
+        "market_timeout",
+        "unavailable",
+        "not_started",
+        "deferred",
+    }:
         return SWEEP_RETRY_WAIT
     return SWEEP_FINAL_FAILED
 

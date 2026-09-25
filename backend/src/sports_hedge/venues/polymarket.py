@@ -38,6 +38,7 @@ class PolymarketClient(ReadOnlyVenue):
         self._owns_client = client is None
         self._cooldown = cooldown
         self.last_series_report: list[dict[str, Any]] = []
+        self.last_pages_attempted: int = 0
         self._client = client or httpx.AsyncClient(
             timeout=market_data_http_timeout(),
             headers={
@@ -93,6 +94,7 @@ class PolymarketClient(ReadOnlyVenue):
         for series_id in series_ids:
             try:
                 page_items = await self._list_series_events(series_id, params)
+                pages_attempted = self.last_pages_attempted
             except Exception as exc:
                 status, retryable = _series_failure_kind(exc)
                 series_results.append(
@@ -101,6 +103,8 @@ class PolymarketClient(ReadOnlyVenue):
                         "status": status,
                         "retryable": retryable,
                         "event_count": 0,
+                        "pages_attempted": self.last_pages_attempted,
+                        "http_attempted": True,
                         "reason": str(exc),
                     }
                 )
@@ -122,6 +126,9 @@ class PolymarketClient(ReadOnlyVenue):
                     "status": "ok",
                     "retryable": False,
                     "event_count": retained,
+                    "pages_attempted": pages_attempted,
+                    "http_attempted": True,
+                    "empty": retained == 0,
                     "reason": None,
                 }
             )
@@ -139,7 +146,9 @@ class PolymarketClient(ReadOnlyVenue):
         events: list[dict[str, Any]] = []
         page_limit = int(base_params.get("limit") or self.settings.polymarket_gamma_page_limit)
         max_pages = self.settings.polymarket_gamma_max_pages_per_series
+        self.last_pages_attempted = 0
         for page in range(max_pages):
+            self.last_pages_attempted = page + 1
             params = {
                 **base_params,
                 "series_id": series_id,

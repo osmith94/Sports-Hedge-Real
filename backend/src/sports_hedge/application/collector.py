@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
+from sports_hedge.application import polymarket_fixture_discovery as polymarket_discovery
 from sports_hedge.application.adaptive_scheduler import work_from_lane
 from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
 from sports_hedge.application.catalogue_maintenance import (
@@ -96,6 +97,12 @@ from sports_hedge.application.opportunity_viability import (
     get_opportunity_viability_cache,
 )
 from sports_hedge.application.paper_scan import PaperScanService
+from sports_hedge.application.polymarket_fixture_discovery import (
+    SERIES_DEFERRED_REASON,
+    SERIES_NOT_STARTED,
+    blank_series_row,
+    retain_polymarket_page,
+)
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -380,6 +387,8 @@ _RETRYABLE_SERIES_STATUSES = frozenset(
         "timeout",
         "retry_wait",
         "pending",
+        "not_started",
+        "deferred",
     }
 )
 DEFAULT_MAX_EVENT_PAIRS = 60
@@ -907,6 +916,8 @@ class ReadOnlyCrossVenueCollector:
         on_fixture_evaluated: Callable[..., Any] | None = None,
         on_canonical_work_set: Callable[..., Any] | None = None,
         retry_series: dict[str, list[str]] | None = None,
+        prior_series_results: dict[str, list[dict[str, Any]]] | None = None,
+        polymarket_discovery_now: datetime | None = None,
         hot_market_relationships: dict[str, list[HotMarketRelationship]] | None = None,
         active_event_ids: list[str] | tuple[str, ...] | frozenset[str] | None = None,
     ) -> CollectionReport:
@@ -952,6 +963,14 @@ class ReadOnlyCrossVenueCollector:
         self._on_fixture_evaluated = on_fixture_evaluated
         self._on_canonical_work_set = on_canonical_work_set
         self._op_series_results = {}
+        self._discovery_partial_events: dict[str, list[dict[str, Any]]] = {}
+        self._discovery_cancelled: dict[str, bool] = {}
+        self._polymarket_discovery_now = polymarket_discovery_now
+        if reuse_discovery and prior_series_results:
+            self._op_series_results = {
+                str(venue): [dict(row) for row in rows if isinstance(row, dict)]
+                for venue, rows in prior_series_results.items()
+            }
         self._op_canonical_work_set_authoritative = False
         self._op_canonical_work_set_partial_reason: str | None = "incomplete_discovery"
         venue_health: dict[str, str] = {
@@ -1104,9 +1123,15 @@ class ReadOnlyCrossVenueCollector:
                             venue_health[venue_name.value] = VENUE_HEALTH_DISABLED
                         elif reuse_snapshot or has_events:
                             # A reused complete snapshot is healthy even when that
-                            # venue's event list is empty; unknown must not leak
-                            # into reconciliation authority.
-                            venue_health[venue_name.value] = HEALTH_OK
+                            # venue's event list is empty. Retryable or not-started
+                            # series evidence keeps the venue degraded so an
+                            # incomplete Polymarket set cannot look authoritative.
+                            if _series_results_incomplete(
+                                self._op_series_results.get(venue_name.value)
+                            ):
+                                venue_health[venue_name.value] = "degraded"
+                            else:
+                                venue_health[venue_name.value] = HEALTH_OK
                     if self.kalshi is None and VenueName.KALSHI in enabled:
                         venue_health[VenueName.KALSHI.value] = "unavailable"
                     if retry_series:
@@ -1179,6 +1204,15 @@ class ReadOnlyCrossVenueCollector:
                         pm_task,
                         k_task,
                         default=(([], {}), ([], {}), ([], {})),
+                    )
+                    (
+                        raw_matchbook_events,
+                        raw_polymarket_events,
+                        raw_kalshi_events,
+                    ) = self._restore_cancelled_discovery_events(
+                        raw_matchbook_events,
+                        raw_polymarket_events,
+                        raw_kalshi_events,
                     )
                     if self.kalshi is None and VenueName.KALSHI in enabled:
                         raw_kalshi_events = []
@@ -2105,6 +2139,11 @@ class ReadOnlyCrossVenueCollector:
                 venue_health[venue.value] = "unavailable"
             return [], {}
         events, extra = _payload_events(payload, venue)
+        if venue is VenueName.POLYMARKET and events:
+            events, _horizon = _retain_polymarket_events(
+                events,
+                now=self._polymarket_discovery_clock(),
+            )
         client_report = list(getattr(client, "last_series_report", None) or [])
         if extra.get("series_results"):
             client_report = list(extra.get("series_results") or [])
@@ -2134,110 +2173,201 @@ class ReadOnlyCrossVenueCollector:
         seen: set[str] = set()
         series_results: list[dict[str, Any]] = []
         extra: dict[str, Any] = {}
-        for series_id in series_ids:
-            series_filters = dict(filters)
-            if venue is VenueName.KALSHI:
-                series_filters["series_ticker"] = series_id
-                series_filters.pop("series_tickers", None)
-            else:
-                series_filters["series_id"] = series_id
-            timeout = self._discovery_timeout_budget(self._op_venue_timeout)
-            started = monotonic()
-            if timeout <= 0:
-                series_results.append(
-                    {
-                        "series": series_id,
-                        "status": HEALTH_DISCOVERY_TIMEOUT,
-                        "retryable": True,
-                        "event_count": 0,
-                        "reason": "discovery_timeout",
-                    }
-                )
-                continue
-            try:
-                async with self._provider_capacity(venue, stage="list_events") as lease:
-                    payload, timed_out = await self._await_bounded_with_capacity(
-                        client.list_events(**series_filters),
-                        timeout,
-                        venue=venue,
-                        lease=lease,
+        recorded: set[str] = set()
+        try:
+            for series_id in series_ids:
+                await yield_event_loop()
+                series_filters = dict(filters)
+                if venue is VenueName.KALSHI:
+                    series_filters["series_ticker"] = series_id
+                    series_filters.pop("series_tickers", None)
+                else:
+                    series_filters["series_id"] = series_id
+                timeout = self._discovery_timeout_budget(self._op_venue_timeout)
+                started = monotonic()
+                if timeout <= 0:
+                    # Budget gone before any HTTP attempt. Unknown stays
+                    # not_started, not a healthy empty or a fake timeout.
+                    series_results.append(
+                        blank_series_row(
+                            series_id,
+                            status=SERIES_NOT_STARTED,
+                            reason=SERIES_DEFERRED_REASON,
+                            http_attempted=False,
+                            retryable=True,
+                        )
                     )
-                self._attribution.add(
-                    venue=venue.value,
-                    stage="list_events",
-                    elapsed_ms=max(0, int((monotonic() - started) * 1000)),
-                    timed_out=timed_out,
-                )
-                if timed_out:
+                    recorded.add(series_id)
+                    continue
+                if hasattr(client, "last_pages_attempted"):
+                    client.last_pages_attempted = 0
+                try:
+                    async with self._provider_capacity(venue, stage="list_events") as lease:
+                        payload, timed_out = await self._await_bounded_with_capacity(
+                            client.list_events(**series_filters),
+                            timeout,
+                            venue=venue,
+                            lease=lease,
+                        )
+                    self._attribution.add(
+                        venue=venue.value,
+                        stage="list_events",
+                        elapsed_ms=max(0, int((monotonic() - started) * 1000)),
+                        timed_out=timed_out,
+                    )
+                    pages_attempted = int(getattr(client, "last_pages_attempted", 0) or 0)
+                    if timed_out:
+                        row = blank_series_row(
+                            series_id,
+                            status=HEALTH_DISCOVERY_TIMEOUT,
+                            reason="discovery_timeout",
+                            http_attempted=True,
+                            retryable=True,
+                            pages_attempted=pages_attempted,
+                        )
+                        series_results.append(row)
+                        recorded.add(series_id)
+                        continue
+                except asyncio.CancelledError:
+                    self._mark_unattempted_series(
+                        series_ids,
+                        series_results,
+                        recorded=recorded,
+                    )
+                    self._discovery_cancelled[venue.value] = True
+                    raise
+                except Exception as exc:
+                    status, retryable = _collector_series_failure_kind(exc)
+                    pages_attempted = int(getattr(client, "last_pages_attempted", 0) or 0)
+                    issues.append(
+                        CollectorIssue(
+                            stage="list_events",
+                            venue=venue,
+                            source_id=series_id,
+                            detail=str(exc),
+                        )
+                    )
+                    row = blank_series_row(
+                        series_id,
+                        status=status,
+                        reason=str(exc),
+                        http_attempted=True,
+                        retryable=retryable,
+                        pages_attempted=pages_attempted,
+                    )
+                    series_results.append(row)
+                    recorded.add(series_id)
+                    continue
+                page_events, page_extra = _payload_events(payload, venue)
+                if page_extra:
+                    extra.update(page_extra)
+                if venue is VenueName.POLYMARKET:
+                    retained_events, stats = retain_polymarket_page(
+                        page_events,
+                        seen=seen,
+                        now=self._polymarket_discovery_clock(),
+                        event_id=lambda item: _discovery_event_id(item, venue),
+                    )
+                    events.extend(retained_events)
+                    series_results.append(
+                        _polymarket_series_ok_row(
+                            series_id,
+                            stats,
+                            pages_attempted=pages_attempted,
+                        )
+                    )
+                else:
+                    retained = 0
+                    for item in page_events:
+                        event_id = _discovery_event_id(item, venue)
+                        if event_id and event_id in seen:
+                            continue
+                        if event_id:
+                            seen.add(event_id)
+                        events.append(item)
+                        retained += 1
                     series_results.append(
                         {
                             "series": series_id,
-                            "status": HEALTH_DISCOVERY_TIMEOUT,
-                            "retryable": True,
-                            "event_count": 0,
-                            "reason": "discovery_timeout",
+                            "status": "ok",
+                            "retryable": False,
+                            "event_count": retained,
+                            "raw_event_count": len(page_events),
+                            "retained_event_count": retained,
+                            "pages_attempted": pages_attempted,
+                            "http_attempted": True,
+                            "empty": retained == 0,
+                            "reason": None,
                         }
                     )
-                    continue
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                status, retryable = _collector_series_failure_kind(exc)
-                issues.append(
-                    CollectorIssue(
-                        stage="list_events",
-                        venue=venue,
-                        source_id=series_id,
-                        detail=str(exc),
-                    )
-                )
-                series_results.append(
-                    {
-                        "series": series_id,
-                        "status": status,
-                        "retryable": retryable,
-                        "event_count": 0,
-                        "reason": str(exc),
-                    }
-                )
-                continue
-            page_events, page_extra = _payload_events(payload, venue)
-            if page_extra:
-                extra.update(page_extra)
-            retained = 0
-            for item in page_events:
-                event_id = _discovery_event_id(item, venue)
-                if event_id and event_id in seen:
-                    continue
-                if event_id:
-                    seen.add(event_id)
-                events.append(item)
-                retained += 1
-            series_results.append(
-                {
-                    "series": series_id,
-                    "status": "ok",
-                    "retryable": False,
-                    "event_count": retained,
-                    "reason": None,
-                }
-            )
-        self._op_series_results[venue.value] = series_results
-        extra["series_results"] = series_results
-        extra["events"] = events
-        any_ok = any(item["status"] == "ok" for item in series_results)
-        any_fail = any(item["status"] != "ok" for item in series_results)
-        if any_ok and any_fail:
-            venue_health[venue.value] = "degraded"
-        elif any_ok:
-            venue_health[venue.value] = "ok"
-        elif any(item.get("status") == HEALTH_DISCOVERY_TIMEOUT for item in series_results):
-            venue_health[venue.value] = HEALTH_DISCOVERY_TIMEOUT
-        elif series_results:
-            venue_health[venue.value] = str(series_results[0].get("status") or "unavailable")
-        else:
-            venue_health[venue.value] = "unavailable"
+                recorded.add(series_id)
+        except asyncio.CancelledError:
+            self._mark_unattempted_series(series_ids, series_results, recorded=recorded)
+            self._discovery_cancelled[venue.value] = True
+            raise
+        finally:
+            self._op_series_results[venue.value] = list(series_results)
+            self._discovery_partial_events[venue.value] = list(events)
+            extra["series_results"] = series_results
+            extra["events"] = events
+            _apply_series_venue_health(venue, series_results, venue_health)
         return events, extra
+
+    def _polymarket_discovery_clock(self) -> datetime:
+        pinned = self._polymarket_discovery_now
+        if pinned is not None:
+            return pinned if pinned.tzinfo is not None else pinned.replace(tzinfo=UTC)
+        return polymarket_discovery.discovery_clock()
+
+    def _mark_unattempted_series(
+        self,
+        series_ids: list[str],
+        series_results: list[dict[str, Any]],
+        *,
+        recorded: set[str],
+    ) -> None:
+        for series_id in series_ids:
+            if series_id in recorded:
+                continue
+            series_results.append(
+                blank_series_row(
+                    series_id,
+                    status=SERIES_NOT_STARTED,
+                    reason=SERIES_DEFERRED_REASON,
+                    http_attempted=False,
+                    retryable=True,
+                )
+            )
+            recorded.add(series_id)
+
+    def _restore_cancelled_discovery_events(
+        self,
+        raw_matchbook_events: list[dict[str, Any]],
+        raw_polymarket_events: list[dict[str, Any]],
+        raw_kalshi_events: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Keep series that finished before a discovery task was cancelled.
+
+        ``_gather_bounded`` substitutes an empty default when it cancels a
+        venue task. The task's ``finally`` already stored completed events.
+        """
+
+        restored = {
+            VenueName.MATCHBOOK.value: list(raw_matchbook_events),
+            VenueName.POLYMARKET.value: list(raw_polymarket_events),
+            VenueName.KALSHI.value: list(raw_kalshi_events),
+        }
+        for venue in restored:
+            if not self._discovery_cancelled.get(venue):
+                continue
+            partial = self._discovery_partial_events.get(venue)
+            if partial is not None:
+                restored[venue] = list(partial)
+        return (
+            restored[VenueName.MATCHBOOK.value],
+            restored[VenueName.POLYMARKET.value],
+            restored[VenueName.KALSHI.value],
+        )
 
     async def _merge_retry_series(
         self,
@@ -2276,6 +2406,11 @@ class ReadOnlyCrossVenueCollector:
             incoming_series = list(self._op_series_results.get(venue.value) or [])
             self._op_series_results[venue.value] = _merge_series_rows(
                 previous_series, incoming_series
+            )
+            _apply_series_venue_health(
+                venue,
+                self._op_series_results.get(venue.value) or [],
+                venue_health,
             )
             seen = {
                 _discovery_event_id(item, venue)
@@ -2536,6 +2671,9 @@ class ReadOnlyCrossVenueCollector:
             ],
             "matching_coverage": matching_coverage,
             "series_results": dict(self._op_series_results),
+            "polymarket_series_results": list(
+                self._op_series_results.get(VenueName.POLYMARKET.value) or []
+            ),
             "canonical_work_total": clusters_before_resume or len(clusters),
             "canonical_work_set_authoritative": self._op_canonical_work_set_authoritative,
             "canonical_work_set_partial_reason": self._op_canonical_work_set_partial_reason,
@@ -2904,6 +3042,9 @@ class ReadOnlyCrossVenueCollector:
                 "normalized_by_venue": dict(context["normalized_counts"]),
                 "skipped_out_of_scope": context["skipped_out_of_scope"],
                 "skipped_by_reason": dict(context["skipped_by_reason"]),
+                "polymarket_series_results": list(
+                    self._op_series_results.get(VenueName.POLYMARKET.value) or []
+                ),
             },
         }
         attach_universe_matching_evidence(report, payload)
@@ -6752,6 +6893,80 @@ def _combined_kalshi_series_ok_rows(events: list[dict[str, Any]]) -> list[dict[s
     return rows
 
 
+def _polymarket_series_ok_row(
+    series_id: str,
+    stats: dict[str, Any],
+    *,
+    pages_attempted: int,
+) -> dict[str, Any]:
+    retained = int(stats.get("retained_event_count") or 0)
+    row = blank_series_row(
+        series_id,
+        status="ok",
+        reason=None if retained else "empty",
+        http_attempted=True,
+        retryable=False,
+        pages_attempted=pages_attempted,
+    )
+    row.update(stats)
+    row["event_count"] = retained
+    row["empty"] = retained == 0
+    row["status"] = "ok"
+    row["retryable"] = False
+    row["http_attempted"] = True
+    row["pages_attempted"] = pages_attempted
+    return row
+
+
+def _retain_polymarket_events(
+    events: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    retained, stats = retain_polymarket_page(
+        events,
+        seen=set(),
+        now=now,
+        event_id=lambda item: str(item.get("id") or "").strip(),
+    )
+    return retained, stats
+
+
+def _apply_series_venue_health(
+    venue: VenueName,
+    series_results: list[dict[str, Any]],
+    venue_health: dict[str, str],
+) -> None:
+    if venue_health.get(venue.value) == VENUE_HEALTH_DISABLED:
+        return
+    any_ok = any(item.get("status") == "ok" for item in series_results)
+    any_fail = any(item.get("status") != "ok" for item in series_results)
+    if any_ok and any_fail:
+        venue_health[venue.value] = "degraded"
+    elif any_ok:
+        venue_health[venue.value] = "ok"
+    elif any(item.get("status") == HEALTH_DISCOVERY_TIMEOUT for item in series_results):
+        venue_health[venue.value] = HEALTH_DISCOVERY_TIMEOUT
+    elif any(item.get("status") == SERIES_NOT_STARTED for item in series_results):
+        venue_health[venue.value] = "degraded"
+    elif series_results:
+        venue_health[venue.value] = str(series_results[0].get("status") or "unavailable")
+    else:
+        venue_health[venue.value] = "unavailable"
+
+
+def _series_results_incomplete(rows: list[dict[str, Any]] | None) -> bool:
+    if not rows:
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip()
+        if bool(row.get("retryable")) or status in _RETRYABLE_SERIES_STATUSES:
+            return True
+    return False
+
+
 def _discovery_event_id(item: dict[str, Any], venue: VenueName) -> str:
     if venue is VenueName.KALSHI:
         return str(item.get("event_ticker") or item.get("ticker") or item.get("id") or "").strip()
@@ -6787,7 +7002,9 @@ def _discovery_series_ids(venue: VenueName, client: Any, filters: dict[str, Any]
                 for item in (resolver() if callable(resolver) else [])
                 if str(item).strip()
             ]
-        return ids if len(ids) > 1 else []
+        # One selected series still uses the collector loop so its row carries
+        # the same horizon and not-started evidence as a multi-series sweep.
+        return ids
     return []
 
 
