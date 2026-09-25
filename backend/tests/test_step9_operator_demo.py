@@ -687,7 +687,7 @@ def test_windows_launcher_scripts_encode_paper_only_contract() -> None:
     assert "127.0.0.1:3000/demo" not in start_ps1
     assert "Wait-HttpOk -Url $BackendHealth -Label \"Sports Hedge backend\" | Out-Null" in start_ps1
     assert (
-        "Wait-HttpOk -Url $FrontendHealth -Label \"Sports Hedge operator console\" | Out-Null"
+        "Wait-HttpOk -Url $FrontendReady -Label \"Sports Hedge operator console\" | Out-Null"
         in start_ps1
     )
     identity_ps1 = (REPO_ROOT / "scripts/windows/Demo-LauncherIdentity.ps1").read_text(

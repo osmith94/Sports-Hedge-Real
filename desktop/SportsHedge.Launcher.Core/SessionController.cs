@@ -220,7 +220,7 @@ public sealed class SessionController
                       "command=\"npm run start -- -H 127.0.0.1 -p 3000\" (production Next.js)");
             State.Progress("Waiting for interface…");
             var frontendHealth = await WaitHealthyAsync(_frontend, "Interface",
-                ct => _deps.Health.CheckFrontendAsync(Git.Sha, _secrets.SessionId, includePage: true, ct),
+                ct => _deps.Health.CheckFrontendAsync(Git.Sha, _secrets.SessionId, ct),
                 _options.FrontendHealthTimeout, _layout.FrontendErrLog, token).ConfigureAwait(false);
             _log.Info($"frontend_health healthy={frontendHealth.Healthy} detail=\"{frontendHealth.Detail}\"");
             if (!frontendHealth.Healthy)
@@ -367,7 +367,7 @@ public sealed class SessionController
                     continue;
                 }
                 var backend = await _deps.Health.CheckBackendAsync(Git!.Sha, _secrets.SessionId, token).ConfigureAwait(false);
-                var frontend = await _deps.Health.CheckFrontendAsync(Git.Sha, _secrets.SessionId, includePage: false, token).ConfigureAwait(false);
+                var frontend = await _deps.Health.CheckFrontendAsync(Git.Sha, _secrets.SessionId, token).ConfigureAwait(false);
                 if (backend.Healthy && frontend.Healthy)
                 {
                     if (healthFailures >= _options.HealthFailuresBeforeDegraded && State.State == ControllerState.Degraded)
