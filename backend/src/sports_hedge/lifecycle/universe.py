@@ -258,6 +258,7 @@ def map_series_status_to_state(status: str, *, retryable: bool = False) -> str |
         "unavailable",
         "not_started",
         "deferred",
+        "incomplete",
     }:
         return SWEEP_RETRY_WAIT
     return SWEEP_FINAL_FAILED

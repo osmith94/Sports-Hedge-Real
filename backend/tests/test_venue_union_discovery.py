@@ -150,6 +150,7 @@ async def test_polymarket_kalshi_discovery_does_not_require_matchbook() -> None:
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=[
                 profit_commission_cost(VenueName.POLYMARKET, "0"),
                 kalshi_cost_from_series(KALSHI_SERIES, captured_at=datetime.now(UTC)),
@@ -325,6 +326,7 @@ async def test_split_pm_kalshi_events_cluster_and_btts_enters_solver() -> None:
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=[
                 profit_commission_cost(VenueName.POLYMARKET, "0"),
                 kalshi_cost_from_series(KALSHI_SERIES, captured_at=datetime.now(UTC)),

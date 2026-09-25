@@ -39,6 +39,8 @@ class PolymarketClient(ReadOnlyVenue):
         self._cooldown = cooldown
         self.last_series_report: list[dict[str, Any]] = []
         self.last_pages_attempted: int = 0
+        self._discovery_page_index = 0
+        self._discovery_page_budget: int | None = None
         self._client = client or httpx.AsyncClient(
             timeout=market_data_http_timeout(),
             headers={
@@ -68,12 +70,15 @@ class PolymarketClient(ReadOnlyVenue):
         }
         # Never a Gamma query parameter, including on the singular series_id path.
         requested_series_ids = params.pop("series_ids", _SERIES_IDS_UNSET)
+        page_index, max_pages = _discovery_page_window(params)
         caller_series = params.get("series_id")
         if caller_series is not None and str(caller_series).strip() == "":
             params.pop("series_id", None)
             return await self._get_event_page(params)
 
         if caller_series is not None:
+            self._discovery_page_index = page_index
+            self._discovery_page_budget = max_pages
             return await self._list_series_events(str(caller_series), params)
 
         if requested_series_ids is _SERIES_IDS_UNSET:
@@ -93,6 +98,8 @@ class PolymarketClient(ReadOnlyVenue):
         first_total_error: Exception | None = None
         for series_id in series_ids:
             try:
+                self._discovery_page_index = page_index
+                self._discovery_page_budget = max_pages
                 page_items = await self._list_series_events(series_id, params)
                 pages_attempted = self.last_pages_attempted
             except Exception as exc:
@@ -145,10 +152,15 @@ class PolymarketClient(ReadOnlyVenue):
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         page_limit = int(base_params.get("limit") or self.settings.polymarket_gamma_page_limit)
-        max_pages = self.settings.polymarket_gamma_max_pages_per_series
+        page_index = int(getattr(self, "_discovery_page_index", 0) or 0)
+        max_pages = getattr(self, "_discovery_page_budget", None)
+        page_budget = (
+            self.settings.polymarket_gamma_max_pages_per_series if max_pages is None else max_pages
+        )
         self.last_pages_attempted = 0
-        for page in range(max_pages):
-            self.last_pages_attempted = page + 1
+        for step in range(max(0, int(page_budget))):
+            page = page_index + step
+            self.last_pages_attempted = step + 1
             params = {
                 **base_params,
                 "series_id": series_id,
@@ -260,6 +272,28 @@ class PolymarketClient(ReadOnlyVenue):
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _discovery_page_window(params: dict[str, Any]) -> tuple[int, int | None]:
+    """Client-side page window. Popped before any Gamma request.
+
+    ``discovery_max_pages`` is the number of pages to fetch from
+    ``discovery_page_index``. Omitted, the series uses the configured
+    per-series page cap from the start.
+    """
+
+    raw_index = params.pop("discovery_page_index", 0)
+    raw_max = params.pop("discovery_max_pages", None)
+    try:
+        page_index = max(0, int(raw_index or 0))
+    except (TypeError, ValueError):
+        page_index = 0
+    if raw_max is None:
+        return page_index, None
+    try:
+        return page_index, max(1, int(raw_max))
+    except (TypeError, ValueError):
+        return page_index, None
 
 
 def _ordered_series_ids(value: Any) -> list[str]:

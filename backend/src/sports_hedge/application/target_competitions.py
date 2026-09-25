@@ -1560,6 +1560,28 @@ _NON_SOCCER_COMPETITION_CODES = frozenset(
 )
 
 
+def polymarket_series_is_football_fixture(series_id: str | None) -> bool:
+    """True when this Gamma series is a football fixture competition.
+
+    NFL, NBA, NCAAB, MLB, ATP and WTA stay outside the football discovery
+    horizon. Unknown series are not treated as football.
+    """
+
+    item = resolve_target_competition_from_series_id(series_id)
+    if item is None:
+        return False
+    return item.code.value not in _NON_SOCCER_COMPETITION_CODES
+
+
+def polymarket_event_is_football_fixture(payload: dict[str, Any]) -> bool:
+    """True when a Gamma payload belongs to a football fixture series."""
+
+    target = _polymarket_series_target(payload)
+    if target is None:
+        return False
+    return target.code.value not in _NON_SOCCER_COMPETITION_CODES
+
+
 def selected_includes_soccer(
     selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None,
 ) -> bool:

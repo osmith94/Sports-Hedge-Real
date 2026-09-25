@@ -708,6 +708,7 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),

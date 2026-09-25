@@ -5,7 +5,9 @@ Provider payloads here are fixtures. No owner-live Gamma call.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -19,6 +21,10 @@ from sports_hedge.application.polymarket_fixture_discovery import (
     classify_polymarket_discovery_event,
 )
 from sports_hedge.application.scan_lanes import DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING
+from sports_hedge.application.target_competitions import (
+    competition_by_code,
+    polymarket_series_ids_for_codes,
+)
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
@@ -450,3 +456,147 @@ async def test_owner_live_shape_keeps_league_fixtures_beside_stale_fa_cup() -> N
     assert report.scan_diagnostics["canonical_work_set_authoritative"] is False
     counts = report.scan_diagnostics["polymarket_series_results"]
     assert len(counts) == 8
+
+
+NON_FOOTBALL_CODES = ("nfl", "nba", "ncaab", "mlb", "atp", "wta")
+
+
+@pytest.mark.asyncio
+async def test_football_horizon_does_not_drop_non_football_polymarket_events() -> None:
+    old = NOW - timedelta(days=10)
+    payloads: dict[str, list[dict[str, Any]]] = {}
+    expected_ids: list[str] = []
+    for code in NON_FOOTBALL_CODES:
+        competition = competition_by_code(code)
+        assert competition is not None
+        series_id = str(competition.polymarket_gamma_series_id)
+        expected_ids.append(series_id)
+        payloads[series_id] = [
+            _event(
+                f"{code}-old",
+                f"{competition.display_name} home vs away",
+                old,
+                series_id=series_id,
+            )
+        ]
+    payloads[EPL] = [
+        _event("epl-old", "Arsenal vs Chelsea", old, series_id=EPL),
+    ]
+    client = ScriptedPolymarket(payloads)
+    report = await _scan(client, (*NON_FOOTBALL_CODES, "premier_league"))
+    rows = _rows(report)
+    for series_id in expected_ids:
+        assert rows[series_id]["status"] == "ok"
+        assert rows[series_id]["retained_event_count"] == 1
+        assert rows[series_id]["stale_fixture_rejections"] == 0
+        assert rows[series_id]["raw_event_count"] == 1
+    assert rows[EPL]["stale_fixture_rejections"] == 1
+    assert rows[EPL]["retained_event_count"] == 0
+    assert report.raw_polymarket_events == len(NON_FOOTBALL_CODES)
+
+
+class _PageSettings:
+    polymarket_gamma_page_limit = 100
+    polymarket_gamma_max_pages_per_series = 5
+
+
+class FairPagedPolymarket:
+    """One Gamma page per call. Each call advances a simulated discovery clock."""
+
+    def __init__(
+        self,
+        pages: dict[str, list[list[dict[str, Any]]]],
+        *,
+        clock: dict[str, float | None],
+        simulated_seconds: float,
+    ) -> None:
+        self.pages = pages
+        self.clock = clock
+        self.simulated_seconds = simulated_seconds
+        self.calls: list[tuple[str, int]] = []
+        self.last_pages_attempted = 0
+        self.settings = _PageSettings()
+
+    async def list_events(self, **filters: Any) -> list[dict[str, Any]]:
+        series = str(filters.get("series_id") or "")
+        page_index = int(filters.get("discovery_page_index") or 0)
+        await asyncio.sleep(0.01)
+        if self.clock["now"] is None:
+            self.clock["now"] = monotonic()
+        self.clock["now"] = float(self.clock["now"]) + self.simulated_seconds
+        self.calls.append((series, page_index))
+        self.last_pages_attempted = 1
+        series_pages = self.pages.get(series, [])
+        if page_index >= len(series_pages):
+            return []
+        return list(series_pages[page_index])
+
+    async def list_markets(self, event_id: int | str, **filters: Any) -> list[dict[str, Any]]:
+        del event_id, filters
+        return []
+
+    async def get_order_book(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        return {"bids": [], "asks": []}
+
+
+@pytest.mark.asyncio
+async def test_football_series_share_the_first_page_before_later_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    series_ids = polymarket_series_ids_for_codes(list(OWNER_SELECTED))
+    assert len(series_ids) == 8
+    kick = NOW + timedelta(days=1)
+    stale_start = NOW - timedelta(days=40)
+    pages: dict[str, list[list[dict[str, Any]]]] = {}
+    for series_id in series_ids:
+        if series_id == FA_CUP:
+            pages[series_id] = [
+                [
+                    _event(f"fa-old-{page}-{index}", "Arsenal vs Chelsea", stale_start)
+                    for index in range(100)
+                ]
+                for page in range(5)
+            ]
+        else:
+            pages[series_id] = [[_event(f"{series_id}-next", "Home vs Away", kick)]]
+    clock: dict[str, float | None] = {"now": None}
+
+    def simulated_monotonic() -> float:
+        if clock["now"] is None:
+            clock["now"] = monotonic()
+        return float(clock["now"])
+
+    monkeypatch.setattr("sports_hedge.application.collector.monotonic", simulated_monotonic)
+    client = FairPagedPolymarket(pages, clock=clock, simulated_seconds=0.5)
+    repository, collector = _collector(client)
+    try:
+        report = await collector.collect_and_scan(
+            selected_competition_codes=list(OWNER_SELECTED),
+            enabled_venues=[VenueName.POLYMARKET],
+            unbounded_cycle=False,
+            cycle_timeout_seconds=4.8,
+            polymarket_discovery_now=NOW,
+            scan_lane="universe",
+        )
+    finally:
+        repository.close()
+    assert [series for series, page in client.calls[:8]] == series_ids
+    assert [page for _, page in client.calls[:8]] == [0] * 8
+    assert all(page == 0 for _, page in client.calls[:8])
+    assert all(index >= 8 for index, (_, page) in enumerate(client.calls) if page > 0)
+    rows = _rows(report)
+    for series_id in series_ids:
+        if series_id == FA_CUP:
+            continue
+        assert rows[series_id]["status"] == "ok"
+        assert rows[series_id]["retained_event_count"] == 1
+        assert rows[series_id]["http_attempted"] is True
+    fa_row = rows[FA_CUP]
+    assert fa_row["http_attempted"] is True
+    assert fa_row["pages_attempted"] == 1
+    assert fa_row["raw_event_count"] == 100
+    assert fa_row["stale_fixture_rejections"] == 100
+    assert fa_row["status"] == "incomplete"
+    assert fa_row["retryable"] is True
+    assert fa_row["empty"] is False
+    assert report.scan_diagnostics["canonical_work_set_authoritative"] is False
+    assert report.raw_polymarket_events == 7

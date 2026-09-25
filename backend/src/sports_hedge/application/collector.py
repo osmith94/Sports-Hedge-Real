@@ -99,10 +99,14 @@ from sports_hedge.application.opportunity_viability import (
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.polymarket_fixture_discovery import (
     SERIES_DEFERRED_REASON,
+    SERIES_INCOMPLETE,
     SERIES_NOT_STARTED,
     blank_series_row,
+    empty_discovery_stats,
+    merge_discovery_stats,
     retain_polymarket_page,
 )
+from sports_hedge.application.target_competitions import polymarket_series_is_football_fixture
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -389,6 +393,7 @@ _RETRYABLE_SERIES_STATUSES = frozenset(
         "pending",
         "not_started",
         "deferred",
+        "incomplete",
     }
 )
 DEFAULT_MAX_EVENT_PAIRS = 60
@@ -2075,6 +2080,14 @@ class ReadOnlyCrossVenueCollector:
         venue_health: dict[str, str],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         series_ids = _discovery_series_ids(venue, client, filters)
+        if series_ids and venue is VenueName.POLYMARKET:
+            return await self._list_polymarket_series_fair(
+                client,
+                filters=filters,
+                series_ids=series_ids,
+                issues=issues,
+                venue_health=venue_health,
+            )
         if series_ids:
             return await self._list_raw_events_by_series(
                 client,
@@ -2143,6 +2156,7 @@ class ReadOnlyCrossVenueCollector:
             events, _horizon = _retain_polymarket_events(
                 events,
                 now=self._polymarket_discovery_clock(),
+                apply_football_horizon=None,
             )
         client_report = list(getattr(client, "last_series_report", None) or [])
         if extra.get("series_results"):
@@ -2158,6 +2172,252 @@ class ReadOnlyCrossVenueCollector:
         else:
             venue_health[venue.value] = "ok"
         return events, extra if extra else ({"events": events} if events else {})
+
+    async def _list_polymarket_series_fair(
+        self,
+        client: Any,
+        *,
+        filters: dict[str, Any],
+        series_ids: list[str],
+        issues: list[CollectorIssue],
+        venue_health: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """One page from each football series before any series gets another.
+
+        Non-football series keep a single whole-series read when the sweep
+        reaches them, so NFL, NBA, NCAAB, MLB, ATP and WTA paging stays the
+        previous per-series behaviour. The stale fixture horizon applies only
+        to football fixture series.
+        """
+
+        venue = VenueName.POLYMARKET
+        events: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        extra: dict[str, Any] = {}
+        page_limit, max_pages = _polymarket_page_bounds(client)
+        states = {
+            series_id: {
+                "football": polymarket_series_is_football_fixture(series_id),
+                "pages_attempted": 0,
+                "http_attempted": False,
+                "status": "ok",
+                "retryable": False,
+                "reason": None,
+                "finished": False,
+                "stats": empty_discovery_stats(),
+            }
+            for series_id in series_ids
+        }
+        active = list(series_ids)
+        series_results: list[dict[str, Any]] = []
+
+        def _defer(series_id: str) -> None:
+            state = states[series_id]
+            if state["finished"]:
+                return
+            state["finished"] = True
+            state["retryable"] = True
+            if state["pages_attempted"] == 0 and not state["http_attempted"]:
+                state["status"] = SERIES_NOT_STARTED
+                state["reason"] = SERIES_DEFERRED_REASON
+            else:
+                state["status"] = SERIES_INCOMPLETE
+                state["reason"] = SERIES_DEFERRED_REASON
+
+        try:
+            for page_index in range(max_pages):
+                if not active:
+                    break
+                next_active: list[str] = []
+                budget_stopped = False
+                for index, series_id in enumerate(active):
+                    await yield_event_loop()
+                    state = states[series_id]
+                    timeout = self._discovery_timeout_budget(self._op_venue_timeout)
+                    if timeout <= 0:
+                        for rest_id in active[index:]:
+                            _defer(rest_id)
+                        for rest_id in next_active:
+                            _defer(rest_id)
+                        budget_stopped = True
+                        break
+                    series_filters = dict(filters)
+                    series_filters["series_id"] = series_id
+                    if state["football"]:
+                        series_filters["discovery_page_index"] = page_index
+                        series_filters["discovery_max_pages"] = 1
+                    started = monotonic()
+                    if hasattr(client, "last_pages_attempted"):
+                        client.last_pages_attempted = 0
+                    try:
+                        async with self._provider_capacity(venue, stage="list_events") as lease:
+                            payload, timed_out = await self._await_bounded_with_capacity(
+                                client.list_events(**series_filters),
+                                timeout,
+                                venue=venue,
+                                lease=lease,
+                            )
+                        self._attribution.add(
+                            venue=venue.value,
+                            stage="list_events",
+                            elapsed_ms=max(0, int((monotonic() - started) * 1000)),
+                            timed_out=timed_out,
+                        )
+                        reported_pages = int(getattr(client, "last_pages_attempted", 0) or 0)
+                        state["pages_attempted"] += reported_pages if reported_pages > 0 else 1
+                        state["http_attempted"] = True
+                        if timed_out:
+                            state["finished"] = True
+                            state["status"] = HEALTH_DISCOVERY_TIMEOUT
+                            state["reason"] = "discovery_timeout"
+                            state["retryable"] = True
+                            continue
+                    except asyncio.CancelledError:
+                        _defer(series_id)
+                        for rest_id in active[index + 1 :]:
+                            _defer(rest_id)
+                        for rest_id in next_active:
+                            _defer(rest_id)
+                        self._discovery_cancelled[venue.value] = True
+                        raise
+                    except Exception as exc:
+                        status, retryable = _collector_series_failure_kind(exc)
+                        reported_pages = int(getattr(client, "last_pages_attempted", 0) or 0)
+                        state["pages_attempted"] += reported_pages if reported_pages > 0 else 1
+                        state["http_attempted"] = True
+                        state["finished"] = True
+                        state["status"] = status
+                        state["reason"] = str(exc)
+                        state["retryable"] = retryable
+                        issues.append(
+                            CollectorIssue(
+                                stage="list_events",
+                                venue=venue,
+                                source_id=series_id,
+                                detail=str(exc),
+                            )
+                        )
+                        continue
+                    page_events, page_extra = _payload_events(payload, venue)
+                    if page_extra:
+                        extra.update(page_extra)
+                    retained_events, stats = retain_polymarket_page(
+                        page_events,
+                        seen=seen,
+                        now=self._polymarket_discovery_clock(),
+                        event_id=lambda item: _discovery_event_id(item, venue),
+                        apply_football_horizon=bool(state["football"]),
+                    )
+                    merge_discovery_stats(state["stats"], stats)
+                    events.extend(retained_events)
+                    # Non-football stays one whole-series read. Football continues
+                    # only when this page was full, so later series get page 1 first.
+                    if state["football"] and len(page_events) >= page_limit:
+                        next_active.append(series_id)
+                    else:
+                        state["finished"] = True
+                        state["status"] = "ok"
+                        state["retryable"] = False
+                        state["reason"] = None
+                if budget_stopped:
+                    break
+                active = next_active
+            else:
+                for series_id in active:
+                    state = states[series_id]
+                    if state["finished"]:
+                        continue
+                    state["finished"] = True
+                    state["status"] = "ok"
+                    state["retryable"] = False
+            for series_id in series_ids:
+                state = states[series_id]
+                if not state["finished"]:
+                    state["finished"] = True
+                    state["status"] = "ok"
+                    state["retryable"] = False
+                if state["status"] == "ok":
+                    series_results.append(
+                        _polymarket_series_ok_row(
+                            series_id,
+                            state["stats"],
+                            pages_attempted=int(state["pages_attempted"]),
+                        )
+                    )
+                else:
+                    retained = int(state["stats"].get("retained_event_count") or 0)
+                    row = blank_series_row(
+                        series_id,
+                        status=str(state["status"]),
+                        reason=state["reason"],
+                        http_attempted=bool(state["http_attempted"]),
+                        retryable=bool(state["retryable"]),
+                        pages_attempted=int(state["pages_attempted"]),
+                    )
+                    row.update(state["stats"])
+                    row["event_count"] = retained
+                    row["empty"] = False
+                    row["status"] = state["status"]
+                    row["retryable"] = bool(state["retryable"])
+                    row["http_attempted"] = bool(state["http_attempted"])
+                    row["pages_attempted"] = int(state["pages_attempted"])
+                    row["reason"] = state["reason"]
+                    series_results.append(row)
+        except asyncio.CancelledError:
+            self._discovery_cancelled[venue.value] = True
+            if not series_results:
+                for series_id in series_ids:
+                    state = states[series_id]
+                    if not state["finished"]:
+                        _defer(series_id)
+                    retained = int(state["stats"].get("retained_event_count") or 0)
+                    row = blank_series_row(
+                        series_id,
+                        status=str(state["status"]),
+                        reason=state["reason"],
+                        http_attempted=bool(state["http_attempted"]),
+                        retryable=bool(state["retryable"]),
+                        pages_attempted=int(state["pages_attempted"]),
+                    )
+                    row.update(state["stats"])
+                    row["event_count"] = retained
+                    row["empty"] = False
+                    series_results.append(row)
+            raise
+        finally:
+            if not series_results:
+                for series_id in series_ids:
+                    state = states[series_id]
+                    if not state["finished"]:
+                        _defer(series_id)
+                    if state["status"] == "ok" and state["finished"]:
+                        series_results.append(
+                            _polymarket_series_ok_row(
+                                series_id,
+                                state["stats"],
+                                pages_attempted=int(state["pages_attempted"]),
+                            )
+                        )
+                    else:
+                        retained = int(state["stats"].get("retained_event_count") or 0)
+                        row = blank_series_row(
+                            series_id,
+                            status=str(state["status"] or SERIES_NOT_STARTED),
+                            reason=state["reason"] or SERIES_DEFERRED_REASON,
+                            http_attempted=bool(state["http_attempted"]),
+                            retryable=True,
+                            pages_attempted=int(state["pages_attempted"]),
+                        )
+                        row.update(state["stats"])
+                        row["event_count"] = retained
+                        row["empty"] = False
+                        series_results.append(row)
+            self._op_series_results[venue.value] = list(series_results)
+            self._discovery_partial_events[venue.value] = list(events)
+            extra["series_results"] = series_results
+            extra["events"] = events
+            _apply_series_venue_health(venue, series_results, venue_health)
+        return events, extra
 
     async def _list_raw_events_by_series(
         self,
@@ -2267,6 +2527,7 @@ class ReadOnlyCrossVenueCollector:
                         seen=seen,
                         now=self._polymarket_discovery_clock(),
                         event_id=lambda item: _discovery_event_id(item, venue),
+                        apply_football_horizon=polymarket_series_is_football_fixture(series_id),
                     )
                     events.extend(retained_events)
                     series_results.append(
@@ -6918,16 +7179,25 @@ def _polymarket_series_ok_row(
     return row
 
 
+def _polymarket_page_bounds(client: Any) -> tuple[int, int]:
+    settings = getattr(client, "settings", None)
+    page_limit = int(getattr(settings, "polymarket_gamma_page_limit", 100) or 100)
+    max_pages = int(getattr(settings, "polymarket_gamma_max_pages_per_series", 5) or 5)
+    return max(1, page_limit), max(1, max_pages)
+
+
 def _retain_polymarket_events(
     events: list[dict[str, Any]],
     *,
     now: datetime,
+    apply_football_horizon: bool | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     retained, stats = retain_polymarket_page(
         events,
         seen=set(),
         now=now,
         event_id=lambda item: str(item.get("id") or "").strip(),
+        apply_football_horizon=apply_football_horizon,
     )
     return retained, stats
 
@@ -6947,7 +7217,9 @@ def _apply_series_venue_health(
         venue_health[venue.value] = "ok"
     elif any(item.get("status") == HEALTH_DISCOVERY_TIMEOUT for item in series_results):
         venue_health[venue.value] = HEALTH_DISCOVERY_TIMEOUT
-    elif any(item.get("status") == SERIES_NOT_STARTED for item in series_results):
+    elif any(
+        item.get("status") in {SERIES_NOT_STARTED, SERIES_INCOMPLETE} for item in series_results
+    ):
         venue_health[venue.value] = "degraded"
     elif series_results:
         venue_health[venue.value] = str(series_results[0].get("status") or "unavailable")

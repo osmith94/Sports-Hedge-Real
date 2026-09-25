@@ -190,6 +190,7 @@ async def test_collector_matches_athletic_bilbao_to_athletic_club_and_compares_m
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=matchbook_kalshi_costs(),
             fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
             capital_limit_gbp=Decimal("100"),
@@ -222,6 +223,7 @@ async def test_unmatched_reason_is_identity_when_la_liga_coverage_exists() -> No
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             polymarket_queried_series_ids=["10188", "10355", "10193"],
         )
         fixture = report.discovered_fixtures[0]
@@ -257,6 +259,7 @@ async def test_unmatched_reason_is_series_not_queried_for_legacy_epl_override() 
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             polymarket_queried_series_ids=["10188"],
         )
         fixture = report.discovered_fixtures[0]
@@ -277,6 +280,7 @@ async def test_unmatched_reason_is_coverage_when_la_liga_series_was_queried_empt
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             polymarket_queried_series_ids=["10188", "10355", "10193"],
         )
         fixture = report.discovered_fixtures[0]

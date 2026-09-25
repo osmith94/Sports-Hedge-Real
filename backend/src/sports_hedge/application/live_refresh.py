@@ -3911,6 +3911,7 @@ class LiveRefreshCoordinator:
             "timeout",
             "not_started",
             "deferred",
+            "incomplete",
         }:
             _schedule_capped_retry(unit, reason=reason or status, scanned=scanned)
         elif status and not retryable_flag:

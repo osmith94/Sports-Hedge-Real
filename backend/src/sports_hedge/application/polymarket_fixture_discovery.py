@@ -28,7 +28,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sports_hedge.application.scan_lanes import DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING
-from sports_hedge.application.target_competitions import resolve_target_competition_from_series_id
+from sports_hedge.application.target_competitions import (
+    polymarket_event_is_football_fixture,
+    resolve_target_competition_from_series_id,
+)
 from sports_hedge.normalization.venues import (
     VenueNormalizationError,
     _parse_polymarket_fixture_datetime,
@@ -36,6 +39,7 @@ from sports_hedge.normalization.venues import (
 )
 
 SERIES_NOT_STARTED = "not_started"
+SERIES_INCOMPLETE = "incomplete"
 SERIES_DEFERRED_REASON = "discovery_deferred"
 STALE_FIXTURE_OUTSIDE_DISCOVERY_HORIZON = "stale_fixture_outside_discovery_horizon"
 STALE_FIXTURE_SAMPLE_LIMIT = 3
@@ -124,21 +128,8 @@ def blank_series_row(
     }
 
 
-def retain_polymarket_page(
-    page_events: list[dict[str, Any]],
-    *,
-    seen: set[str],
-    now: datetime,
-    event_id,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Split one series page into retained events and discovery counts.
-
-    ``event_id`` is a callable ``(item) -> str`` so the collector keeps its
-    venue id rule. Stale fixtures are counted and sampled, not retained.
-    """
-
-    retained: list[dict[str, Any]] = []
-    stats = {
+def empty_discovery_stats() -> dict[str, Any]:
+    return {
         "raw_event_count": 0,
         "retained_event_count": 0,
         "deduped_event_count": 0,
@@ -150,6 +141,36 @@ def retain_polymarket_page(
         "schedule_exception_count": 0,
         "stale_fixture_sample_ids": [],
     }
+
+
+def merge_discovery_stats(total: dict[str, Any], page: dict[str, Any]) -> None:
+    samples: list[str] = total.setdefault("stale_fixture_sample_ids", [])
+    for key, value in page.items():
+        if key == "stale_fixture_sample_ids":
+            for sample in value or []:
+                if sample not in samples and len(samples) < STALE_FIXTURE_SAMPLE_LIMIT:
+                    samples.append(sample)
+            continue
+        if isinstance(value, int):
+            total[key] = int(total.get(key) or 0) + value
+
+
+def retain_polymarket_page(
+    page_events: list[dict[str, Any]],
+    *,
+    seen: set[str],
+    now: datetime,
+    event_id,
+    apply_football_horizon: bool | None = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Split one series page into retained events and discovery counts.
+
+    ``event_id`` is a callable ``(item) -> str`` so the collector keeps its
+    venue id rule. Stale fixtures are counted and sampled, not retained.
+    """
+
+    retained: list[dict[str, Any]] = []
+    stats = empty_discovery_stats()
     samples: list[str] = stats["stale_fixture_sample_ids"]
     for item in page_events:
         if not isinstance(item, dict):
@@ -158,6 +179,17 @@ def retain_polymarket_page(
         identity = str(event_id(item) or "").strip()
         if identity and identity in seen:
             stats["deduped_event_count"] += 1
+            continue
+        use_horizon = (
+            polymarket_event_is_football_fixture(item)
+            if apply_football_horizon is None
+            else apply_football_horizon
+        )
+        if not use_horizon:
+            if identity:
+                seen.add(identity)
+            retained.append(item)
+            stats["retained_event_count"] += 1
             continue
         kind = classify_polymarket_discovery_event(item, now=now)
         if kind == "stale_fixture":

@@ -8,6 +8,7 @@ Provider responses in this file are fixtures.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -125,6 +126,7 @@ async def test_collector_selected_nations_league_queries_series_11446() -> None:
                 selected_competition_codes=[UNL],
                 enabled_venues=[VenueName.POLYMARKET],
                 unbounded_cycle=True,
+                polymarket_discovery_now=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
             )
     finally:
         repository.close()

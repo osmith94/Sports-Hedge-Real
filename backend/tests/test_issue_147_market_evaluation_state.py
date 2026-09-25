@@ -409,6 +409,7 @@ async def test_deadline_leftover_three_venue_elche_is_not_evaluated() -> None:
     collector._deadline_reached = lambda: scans["count"] >= 1  # type: ignore[method-assign]
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
@@ -455,6 +456,7 @@ async def test_evaluated_zero_equivalents_is_not_the_unevaluated_state() -> None
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=matchbook_polymarket_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
@@ -482,6 +484,7 @@ async def test_elche_regulation_match_result_yields_equivalent_pair() -> None:
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
@@ -523,6 +526,7 @@ async def test_baseline_match_result_is_kept_when_pair_cap_is_one() -> None:
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=matchbook_kalshi_costs() + matchbook_polymarket_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
@@ -553,6 +557,7 @@ async def test_list_markets_timeout_is_market_fetch_unavailable_not_equivalent_z
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=matchbook_polymarket_costs("0.02", "0.02"),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
@@ -857,6 +862,7 @@ async def test_thirty_three_league_fixtures_are_not_truncated_by_event_pair_capa
     )
     try:
         report = await collector.collect_and_scan(
+            polymarket_discovery_now=KICKOFF,
             venue_costs=matchbook_polymarket_costs(),
             fx_snapshots=_fx(),
             maximum_execution_risk=100,
