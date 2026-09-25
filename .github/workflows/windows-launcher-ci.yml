@@ -103,6 +103,10 @@ jobs:
           python -m venv backend/.venv
           backend/.venv/Scripts/python.exe -m pip install --upgrade pip
           backend/.venv/Scripts/python.exe -m pip install -e "backend[dev]"
+          # Windows CPython ships no IANA tz database; sports_hedge imports
+          # ZoneInfo("Europe/London") at startup. Pre-existing operator venv
+          # requirement (not declared in backend/pyproject.toml).
+          backend/.venv/Scripts/python.exe -m pip install tzdata
       - name: Frontend dependencies
         working-directory: frontend
         run: npm ci --no-audit --no-fund
