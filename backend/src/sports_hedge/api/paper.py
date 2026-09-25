@@ -1464,6 +1464,8 @@ async def _collect_report(
     on_fixture_evaluated=None,
     on_canonical_work_set=None,
     retry_series: dict[str, list[str]] | None = None,
+    series_page_cursors: dict[str, dict[str, int]] | None = None,
+    prior_series_results: dict[str, list[dict[str, Any]]] | None = None,
     hot_market_relationships=None,
     selected_competition_codes: list[str] | tuple[str, ...] | None = None,
     selected_season_scope_codes: list[str] | tuple[str, ...] | None = None,
@@ -1521,6 +1523,8 @@ async def _collect_report(
             on_fixture_evaluated=on_fixture_evaluated,
             on_canonical_work_set=on_canonical_work_set,
             retry_series=retry_series,
+            series_page_cursors=series_page_cursors,
+            prior_series_results=prior_series_results,
             hot_market_relationships=hot_market_relationships,
             selected_competition_codes=selected_competition_codes,
             selected_season_scope_codes=selected_season_scope_codes,
@@ -1988,6 +1992,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
             on_fixture_evaluated=on_fixture,
             on_canonical_work_set=on_work_set,
             retry_series=resolved.retry_series,
+            series_page_cursors=resolved.series_page_cursors,
+            prior_series_results=(
+                coordinator.universe_series_results_snapshot()
+                if resolved.generation_resume
+                else None
+            ),
             hot_market_relationships=getattr(resolved, "hot_market_relationships", None),
             selected_competition_codes=selected_codes,
             selected_season_scope_codes=selected_season_codes,

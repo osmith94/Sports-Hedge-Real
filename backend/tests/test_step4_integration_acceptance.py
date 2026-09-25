@@ -245,6 +245,7 @@ async def test_collector_composes_scoped_discovery_backend_fx_and_native_pools()
         paper_scan=service,
     )
     report = await collector.collect_and_scan(
+        polymarket_discovery_now=KICKOFF,
         maximum_execution_risk=100,
         polymarket_queried_series_ids=Settings().resolved_polymarket_series_ids(),
     )

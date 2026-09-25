@@ -211,6 +211,8 @@ EVALUATION_TO_SWEEP_STATE: dict[str, str] = {
 
 SERIES_STATUS_TO_STATE: dict[str, str] = {
     "ok": SWEEP_OK,
+    # More provider pages may exist. Unfinished discovery, not a failure.
+    "pagination_capped": SWEEP_PENDING,
     "unsupported": SWEEP_SKIPPED_UNSUPPORTED,
     "skipped_unsupported": SWEEP_SKIPPED_UNSUPPORTED,
     "auth_failure": SWEEP_FINAL_FAILED,
@@ -250,7 +252,16 @@ def map_series_status_to_state(status: str, *, retryable: bool = False) -> str |
         return None
     if key in SERIES_STATUS_TO_STATE:
         return SERIES_STATUS_TO_STATE[key]
-    if retryable or key in {"timeout", "rate_limited", "discovery_timeout", "market_timeout", "unavailable"}:
+    if retryable or key in {
+        "timeout",
+        "rate_limited",
+        "discovery_timeout",
+        "market_timeout",
+        "unavailable",
+        "not_started",
+        "deferred",
+        "incomplete",
+    }:
         return SWEEP_RETRY_WAIT
     return SWEEP_FINAL_FAILED
 

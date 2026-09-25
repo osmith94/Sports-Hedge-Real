@@ -8,6 +8,7 @@ Provider responses in this file are fixtures.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -78,6 +79,10 @@ async def test_explicit_series_ids_query_nations_league_absent_from_settings_def
             "status": "ok",
             "retryable": False,
             "event_count": 1,
+            "pages_attempted": 1,
+            "http_attempted": True,
+            "empty": False,
+            "pagination_cap_reached": False,
             "reason": None,
         }
     ]
@@ -122,6 +127,7 @@ async def test_collector_selected_nations_league_queries_series_11446() -> None:
                 selected_competition_codes=[UNL],
                 enabled_venues=[VenueName.POLYMARKET],
                 unbounded_cycle=True,
+                polymarket_discovery_now=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
             )
     finally:
         repository.close()
