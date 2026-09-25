@@ -25,4 +25,5 @@ public static class LauncherConstants
     public const string TrayStopping = "Sports Hedge — Stopping";
     public const string TrayStopped = "Sports Hedge — Stopped";
     public const string TrayFailed = "Sports Hedge — Startup failed";
+    public const string TrayShutdownIncomplete = "Sports Hedge — Shutdown incomplete";
 }

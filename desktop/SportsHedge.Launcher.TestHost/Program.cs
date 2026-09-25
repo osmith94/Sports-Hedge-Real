@@ -97,7 +97,8 @@ static async Task<int> RunSessionAsync(string[] args)
     var report = await controller.Completion;
     Console.WriteLine($"STOPPED source={report.Source} failed={report.Failed} backend_graceful={report.BackendGraceful} " +
                       $"backend_forced={report.BackendForced} remaining=[{string.Join(',', report.RemainingProcessIds)}] " +
-                      $"ports=[{string.Join(',', report.PortsStillListening)}]");
+                      $"ports=[{string.Join(',', report.PortsStillListening)}] verification={report.Verification} " +
+                      $"owned_checked={report.OwnedProcessIdsChecked.Count} clean={report.CleanStop}");
     if (!result.Success && !result.StoppedByRequest) return 3;
-    return report.RemainingProcessIds.Count == 0 && report.PortsStillListening.Count == 0 ? 0 : 4;
+    return report.CleanStop ? 0 : 4;
 }

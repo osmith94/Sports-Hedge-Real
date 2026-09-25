@@ -61,7 +61,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
 
         _controller.State.Changed += status => _ui.Post(_ => OnStatusChanged(status), null);
-        _controller.Completion.ContinueWith(_ => _ui.Post(_ => ExitApplication(), null), TaskScheduler.Default);
+        _controller.Completion.ContinueWith(t => _ui.Post(_ => ExitApplication(t.IsCompletedSuccessfully ? t.Result : null), null), TaskScheduler.Default);
         activation.Listen(() => _ui.Post(_ => OnActivatedBySecondInstance(), null));
         SystemEvents.SessionEnding += OnSessionEnding;
 
@@ -98,7 +98,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _tray.Text = Truncate(OperatorMessages.TrayText(status.State));
         _openItem.Enabled = OperatorMessages.CanOpenBrowser(status.State);
-        _exitItem.Enabled = status.State is not (ControllerState.Stopping or ControllerState.Stopped or ControllerState.Failed);
+        _exitItem.Enabled = status.State is not (ControllerState.Stopping or ControllerState.Stopped or ControllerState.Failed or ControllerState.ShutdownIncomplete);
         if (status.State == ControllerState.Starting)
         {
             _startupWindow.SetStatus(status.Message);
@@ -162,13 +162,22 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _controller.RequestShutdown(ShutdownSource.ControllerExit);
     }
 
-    private void ExitApplication()
+    private void ExitApplication(ShutdownReport? report)
     {
         if (_exiting)
         {
             return;
         }
         _exiting = true;
+        if (report is { Failed: false, CleanStop: false })
+        {
+            ExitCode = 2;
+            MessageBox.Show(
+                $"{OperatorMessages.ShutdownOutcome(report)}\n\nLogs: {_controller.Layout.LogsDir}",
+                "Sports Hedge — shutdown incomplete",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
         SystemEvents.SessionEnding -= OnSessionEnding;
         _tray.Visible = false;
         _startupWindow.Close();

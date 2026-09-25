@@ -147,6 +147,9 @@ public sealed class FakeJob : IJobObject
 
     public int TerminateCalls { get; private set; }
     public bool Disposed { get; private set; }
+
+    /// <summary>Simulates members that survive TerminateJobObject until the job handle closes.</summary>
+    public bool IgnoreTerminate { get; set; }
     public bool KillOnClose => true;
 
     public IReadOnlyList<int> ProcessIds()
@@ -162,7 +165,10 @@ public sealed class FakeJob : IJobObject
         lock (_gate)
         {
             TerminateCalls++;
-            _pids.Clear();
+            if (!IgnoreTerminate)
+            {
+                _pids.Clear();
+            }
         }
     }
 
@@ -250,7 +256,10 @@ public sealed class FakeGroup : IOwnedProcessGroup
     {
         _journal.Add($"{Label}:terminate");
         Inner.TerminateAll();
-        Root.Exit(1);
+        if (!Job.IgnoreTerminate)
+        {
+            Root.Exit(1);
+        }
     }
 
     public Task<bool> WaitForAllExitedAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
@@ -367,6 +376,44 @@ public sealed class FakeIpc : IControllerIpcHost
     }
 }
 
+/// <summary>
+/// OS-level liveness for fake PIDs: a PID is alive while its fake job still holds
+/// it (closing the job kills members) or while it is listed in <see cref="Stuck"/>.
+/// </summary>
+public sealed class FakeOwnedProcesses : IOwnedProcessProbe
+{
+    private readonly FakeLauncher _launcher;
+
+    public FakeOwnedProcesses(FakeLauncher launcher)
+    {
+        _launcher = launcher;
+    }
+
+    public HashSet<int> Stuck { get; } = new();
+    public List<int> Captured { get; } = new();
+
+    public OwnedProcessIdentity? Capture(int pid)
+    {
+        if (!Alive(pid))
+        {
+            return null;
+        }
+        lock (Captured) Captured.Add(pid);
+        return new OwnedProcessIdentity(pid, null);
+    }
+
+    public bool IsAlive(OwnedProcessIdentity identity) => Alive(identity.Pid);
+
+    private bool Alive(int pid)
+    {
+        lock (Stuck)
+        {
+            if (Stuck.Contains(pid)) return true;
+        }
+        return _launcher.Groups.Values.Any(g => g.Job.ProcessIds().Contains(pid));
+    }
+}
+
 public sealed class FakePrereqs : IPrerequisites
 {
     public string? Problem { get; set; }
@@ -417,6 +464,7 @@ public sealed class Harness
         BackendShutdown = new FakeBackendShutdown(Journal);
         Ipc = new FakeIpc();
         Prereqs = new FakePrereqs();
+        OwnedProcesses = new FakeOwnedProcesses(Launcher);
         if (markerMatches)
         {
             TestLayouts.WriteBuild(Layout, Git.Identity.Sha);
@@ -425,7 +473,7 @@ public sealed class Harness
         BackendShutdown.OnRequest = () => Launcher.Groups.GetValueOrDefault("backend")?.ExitNaturally(0);
         var specs = new ServiceSpecFactory(Layout, Secrets, new Dictionary<string, string>(), "npm");
         Controller = new SessionController(Layout, Secrets,
-            new SessionDependencies(Log, Git, Ports, Health, Launcher, Builder, BackendShutdown, Prereqs, specs, Ipc),
+            new SessionDependencies(Log, Git, Ports, Health, Launcher, Builder, BackendShutdown, Prereqs, specs, Ipc, OwnedProcesses),
             Options);
     }
 
@@ -438,6 +486,7 @@ public sealed class Harness
         ForcedExitTimeout = TimeSpan.FromMilliseconds(400),
         FrontendStopTimeout = TimeSpan.FromMilliseconds(400),
         PortReleaseTimeout = TimeSpan.FromMilliseconds(300),
+        FinalVerificationTimeout = TimeSpan.FromMilliseconds(300),
         MonitorInterval = TimeSpan.FromMilliseconds(30),
         MonitorHealthEveryTicks = 2,
         HealthFailuresBeforeDegraded = 2,
@@ -455,6 +504,7 @@ public sealed class Harness
     public FakeBackendShutdown BackendShutdown { get; }
     public FakeIpc Ipc { get; }
     public FakePrereqs Prereqs { get; }
+    public FakeOwnedProcesses OwnedProcesses { get; }
     public SessionController Controller { get; }
 
     public FakeGroup Backend => Launcher.Groups["backend"];

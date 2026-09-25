@@ -9,6 +9,11 @@ public enum ControllerState
     Stopping,
     Stopped,
     Failed,
+    /// <summary>
+    /// Shutdown finished but the final verification did not pass: an owned
+    /// process could not be confirmed gone, or port 8000/3000 is still held.
+    /// </summary>
+    ShutdownIncomplete,
 }
 
 public enum ShutdownSource
@@ -98,6 +103,7 @@ public sealed class ControllerStateMachine
                     return ShutdownRequestResult.AlreadyStopping;
                 case ControllerState.Stopped:
                 case ControllerState.Failed:
+                case ControllerState.ShutdownIncomplete:
                     return ShutdownRequestResult.AlreadyStopped;
                 case ControllerState.NotStarted:
                     LastShutdownSource = source;
@@ -117,8 +123,12 @@ public sealed class ControllerStateMachine
         return ShutdownRequestResult.Accepted;
     }
 
-    public void MarkFinished(bool failed, string message) =>
-        Transition(failed ? ControllerState.Failed : ControllerState.Stopped, message, ControllerState.Stopping);
+    /// <summary>Clean <see cref="ControllerState.Stopped"/> only when the final shutdown verification passed.</summary>
+    public void MarkFinished(bool failed, bool verified, string message) =>
+        Transition(
+            failed ? ControllerState.Failed : verified ? ControllerState.Stopped : ControllerState.ShutdownIncomplete,
+            message,
+            ControllerState.Stopping);
 
     private bool Transition(ControllerState target, string message, params ControllerState[] allowedFrom)
     {

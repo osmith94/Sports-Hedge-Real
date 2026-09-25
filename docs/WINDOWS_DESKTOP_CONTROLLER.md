@@ -125,8 +125,17 @@ Controller log: `logs\desktop-controller.log` (startup, Git SHA/branch, build de
 3. `desktop_host` sets `server.should_exit = True`; uvicorn shuts down gracefully and runs the FastAPI lifespan cleanup in `sports_hedge.api.main` (accounting schedule, live-refresh coordinator, shared provider runtime, shared Matchbook client). The backend log shows `Application shutdown complete.`
 4. Controller waits up to 30 s for every backend job member to exit, then for port 8000 to stop listening. If graceful shutdown fails or times out it logs `backend_forced_cleanup` and terminates **only the backend Job Object**.
 5. Interface: Next.js production keeps no durable state and Windows has no SIGTERM equivalent, so the interface Job Object is terminated; the controller waits for its members and port 3000.
-6. Verification: logs remaining owned PIDs (must be none) and whether 8000/3000 still listen. A foreign listener is reported, never killed.
-7. Named pipe closed, Job Objects released, state → `Stopped`, `SportsHedge.exe` exits.
+6. The named pipe is closed. The controller records every owned PID (PID plus process start time, so a reused PID is never mistaken for ours) from the Job Objects at the start of shutdown and again just before disposal, then closes the Job Objects (the kill-on-close backstop).
+7. Final verification, after the jobs are closed: every recorded owned PID is checked directly against the OS (bounded, 10 s). The disposed groups are not consulted. Ports 8000 and 3000 are then inspected, and each listener is classified as owned (its owner is a still-alive owned PID) or foreign.
+8. The outcome is recorded in `ShutdownReport.Verification` and in the `shutdown_verify` / `shutdown_complete` log lines:
+
+   | Verification | Meaning | State and message |
+   | --- | --- | --- |
+   | `Verified` | All owned PIDs are confirmed gone and nothing listens on 8000/3000. | `Stopped`, "Sports Hedge has stopped". |
+   | `OwnedProcessesRemain` | An owned PID is still alive after the jobs were closed and re-checked. | `ShutdownIncomplete`; the message and logs list the PID(s). |
+   | `ForeignPortOccupant` | The owned tree is gone, but another process holds 8000 or 3000. It is never terminated. | `ShutdownIncomplete`; the message names the port and owner. |
+
+   Only `Verified` produces the clean `Stopped` state. For the other two outcomes the tray shows a warning dialog before `SportsHedge.exe` exits with code 2.
 
 ### Crash handling
 
@@ -180,6 +189,7 @@ These mirror `Start-SportsHedge-Demo.ps1`. No venue write, order, wallet-signing
 - Running `next dev` against the same checkout while `SportsHedge.exe` is running on another port would wipe `.next` underneath the production server.
 - Any change to `frontend\` while uncommitted forces a rebuild on every launch (correctness over speed).
 - The exe is unsigned; SmartScreen may warn on first run.
+- The browser's "Sports Hedge has stopped" screen appears once the interface stops answering. The browser cannot see the controller's final verification; an incomplete shutdown is reported by the tray dialog, the controller state and the log.
 - CI exercises the controller core headlessly (Job Objects, pipe ACL, end-to-end lifecycle on `windows-latest`) and verifies the published exe, but the WinForms tray surface itself (tray menu, balloon tips, progress window, failure dialog, activation of a running instance by a second `SportsHedge.exe`) needs a manual check on an interactive Windows desktop.
 
 ## Remaining work before a fully portable installed app

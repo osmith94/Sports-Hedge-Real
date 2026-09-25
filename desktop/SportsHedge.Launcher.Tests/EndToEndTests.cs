@@ -71,6 +71,8 @@ public sealed class EndToEndTests
         Assert.Contains("backend_graceful=True", stopped);
         Assert.Contains("remaining=[]", stopped);
         Assert.Contains("ports=[]", stopped);
+        Assert.Contains("verification=Verified", stopped);
+        Assert.Contains("clean=True", stopped);
         Assert.Equal(0, await host.WaitForExitAsync(StopTimeout));
         await AssertAllGone(pids);
         AssertPortsListening(false);
@@ -107,6 +109,7 @@ public sealed class EndToEndTests
         var stopped = await host.WaitForLineAsync("STOPPED", StopTimeout);
         Assert.Contains("source=Tray", stopped);
         Assert.Contains("backend_graceful=True", stopped);
+        Assert.Contains("verification=Verified", stopped);
         Assert.Equal(0, await host.WaitForExitAsync(StopTimeout));
         await AssertAllGone(pids);
         AssertPortsListening(false);
@@ -129,6 +132,7 @@ public sealed class EndToEndTests
         await host.SendAsync("tray-exit");
         var stopped = await host.WaitForLineAsync("STOPPED", StopTimeout);
         Assert.Contains("remaining=[]", stopped);
+        Assert.Contains("verification=Verified", stopped);
         Assert.Equal(0, await host.WaitForExitAsync(StopTimeout));
         AssertPortsListening(false);
     }
@@ -148,7 +152,8 @@ public sealed class EndToEndTests
         Assert.Contains("Interface process exited unexpectedly", degraded);
 
         await host.SendAsync("tray-exit");
-        await host.WaitForLineAsync("STOPPED", StopTimeout);
+        var stopped = await host.WaitForLineAsync("STOPPED", StopTimeout);
+        Assert.Contains("verification=Verified", stopped);
         Assert.Equal(0, await host.WaitForExitAsync(StopTimeout));
         AssertPortsListening(false);
     }
@@ -163,6 +168,10 @@ public sealed class EndToEndTests
         var failed = await host.WaitForLineAsync("STARTUP_FAILED", TimeSpan.FromSeconds(120));
         Assert.Contains("component=Ports", failed);
         Assert.Contains("No processes were terminated", failed);
+        var stopped = await host.WaitForLineAsync("STOPPED", StopTimeout);
+        Assert.Contains("remaining=[]", stopped);
+        Assert.Contains("verification=ForeignPortOccupant", stopped);
+        Assert.Contains("clean=False", stopped);
         Assert.Equal(3, await host.WaitForExitAsync(StopTimeout));
         Assert.False(host.Saw("backend_started"));
 

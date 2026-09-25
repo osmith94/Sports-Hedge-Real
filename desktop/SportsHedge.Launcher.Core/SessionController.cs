@@ -21,6 +21,7 @@ public sealed record SessionOptions
     public TimeSpan ForcedExitTimeout { get; init; } = TimeSpan.FromSeconds(10);
     public TimeSpan FrontendStopTimeout { get; init; } = TimeSpan.FromSeconds(15);
     public TimeSpan PortReleaseTimeout { get; init; } = TimeSpan.FromSeconds(15);
+    public TimeSpan FinalVerificationTimeout { get; init; } = TimeSpan.FromSeconds(10);
     public TimeSpan MonitorInterval { get; init; } = TimeSpan.FromSeconds(2);
     public int MonitorHealthEveryTicks { get; init; } = 5;
     public int HealthFailuresBeforeDegraded { get; init; } = 3;
@@ -36,10 +37,29 @@ public sealed record SessionDependencies(
     IBackendShutdownClient BackendShutdown,
     IPrerequisites Prerequisites,
     IServiceSpecFactory Specs,
-    IControllerIpcHost Ipc);
+    IControllerIpcHost Ipc,
+    IOwnedProcessProbe? OwnedProcesses = null);
 
 public sealed record StartupResult(bool Success, string? FailedComponent, string? Reason, GitIdentity? Git, bool StoppedByRequest = false);
 
+public enum ShutdownVerification
+{
+    /// <summary>Every owned PID confirmed gone and nothing listening on 8000/3000.</summary>
+    Verified,
+
+    /// <summary>At least one owned PID is still alive after the jobs were closed and re-verified.</summary>
+    OwnedProcessesRemain,
+
+    /// <summary>The owned tree is gone, but another (not owned, never terminated) process holds 8000 or 3000.</summary>
+    ForeignPortOccupant,
+}
+
+public sealed record PortOccupant(int Port, int? OwnerPid, string Owner);
+
+/// <param name="RemainingProcessIds">Owned PIDs still alive after final OS re-verification.</param>
+/// <param name="PortsStillListening">Every one of 8000/3000 still listening at the end, owned or foreign.</param>
+/// <param name="OwnedProcessIdsChecked">Every owned PID captured from the Job Objects and re-verified.</param>
+/// <param name="ForeignPortOccupants">Listeners on 8000/3000 not owned by this controller. Never terminated.</param>
 public sealed record ShutdownReport(
     ShutdownSource? Source,
     bool Failed,
@@ -47,7 +67,13 @@ public sealed record ShutdownReport(
     bool BackendForced,
     bool FrontendStopped,
     IReadOnlyList<int> RemainingProcessIds,
-    IReadOnlyList<int> PortsStillListening);
+    IReadOnlyList<int> PortsStillListening,
+    ShutdownVerification Verification,
+    IReadOnlyList<int> OwnedProcessIdsChecked,
+    IReadOnlyList<PortOccupant> ForeignPortOccupants)
+{
+    public bool CleanStop => !Failed && Verification == ShutdownVerification.Verified;
+}
 
 /// <summary>
 /// Owns one Sports Hedge session: preflight, frontend build check, backend and
@@ -61,6 +87,8 @@ public sealed class SessionController
     private readonly SessionDependencies _deps;
     private readonly SessionOptions _options;
     private readonly ILog _log;
+    private readonly IOwnedProcessProbe _ownedProcesses;
+    private readonly Dictionary<int, OwnedProcessIdentity> _ownedIdentities = new();
     private readonly CancellationTokenSource _startupCts = new();
     private readonly CancellationTokenSource _monitorCts = new();
     private readonly TaskCompletionSource<ShutdownReport> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -77,6 +105,7 @@ public sealed class SessionController
         _deps = deps;
         _options = options ?? new SessionOptions();
         _log = deps.Log;
+        _ownedProcesses = deps.OwnedProcesses ?? new SystemOwnedProcessProbe();
         State.Changed += status => _log.Info($"state={status.State} message=\"{status.Message}\"");
     }
 
@@ -234,7 +263,8 @@ public sealed class SessionController
         {
             case ControllerState.NotStarted:
                 Interlocked.Exchange(ref _shutdownRan, 1);
-                _completion.TrySetResult(new ShutdownReport(source, false, false, false, false, Array.Empty<int>(), Array.Empty<int>()));
+                _completion.TrySetResult(new ShutdownReport(source, false, false, false, false, Array.Empty<int>(), Array.Empty<int>(),
+                    ShutdownVerification.Verified, Array.Empty<int>(), Array.Empty<PortOccupant>()));
                 break;
             case ControllerState.Starting:
                 _startupCts.Cancel();
@@ -382,6 +412,8 @@ public sealed class SessionController
             }
         }
 
+        CaptureOwnedProcesses();
+
         var backendGraceful = false;
         var backendForced = false;
         if (_backend is not null)
@@ -429,26 +461,111 @@ public sealed class SessionController
         var frontendPortListening = _frontend is not null
             && await WaitPortReleasedAsync(LauncherConstants.FrontendPort).ConfigureAwait(false);
 
-        var remaining = BackendProcessIds.Concat(FrontendProcessIds).ToArray();
-        var ports = new List<int>();
-        if (backendPortListening) ports.Add(LauncherConstants.BackendPort);
-        if (frontendPortListening) ports.Add(LauncherConstants.FrontendPort);
-        _log.Info($"shutdown_verify remaining_owned_pids=[{string.Join(',', remaining)}] " +
+        _log.Info($"shutdown_interim remaining_job_pids=[{string.Join(',', BackendProcessIds.Concat(FrontendProcessIds))}] " +
                   $"port_8000_listening={backendPortListening} port_3000_listening={frontendPortListening}");
 
         if (_ipcStarted)
         {
             await _deps.Ipc.StopAsync().ConfigureAwait(false);
         }
+
+        // Last look at job membership before the handles close; after Dispose
+        // the groups report nothing, so verification uses these PIDs directly.
+        CaptureOwnedProcesses();
         _backend?.Dispose();
         _frontend?.Dispose();
         _log.Info("job_objects_released");
 
-        var message = failed ? "Startup failed" : "Sports Hedge has stopped";
-        State.MarkFinished(failed, message);
+        var checkedPids = _ownedIdentities.Keys.OrderBy(pid => pid).ToArray();
+        var remaining = await VerifyOwnedProcessesGoneAsync().ConfigureAwait(false);
+        var (portsListening, foreign) = InspectPortsAfterShutdown(remaining);
+        var verification = remaining.Count > 0
+            ? ShutdownVerification.OwnedProcessesRemain
+            : foreign.Count > 0 || portsListening.Count > 0
+                ? ShutdownVerification.ForeignPortOccupant
+                : ShutdownVerification.Verified;
+
+        _log.Info($"shutdown_verify owned_pids_checked=[{string.Join(',', checkedPids)}] " +
+                  $"remaining_owned_pids=[{string.Join(',', remaining)}] " +
+                  $"port_8000_listening={portsListening.Contains(LauncherConstants.BackendPort)} " +
+                  $"port_3000_listening={portsListening.Contains(LauncherConstants.FrontendPort)} " +
+                  $"foreign_listeners=[{string.Join(',', foreign.Select(f => $"{f.Port}:{f.Owner}"))}] verification={verification}");
+        if (verification == ShutdownVerification.OwnedProcessesRemain)
+        {
+            _log.Error($"shutdown_unverified owned Sports Hedge process(es) still running after Job Object closure: " +
+                       $"[{string.Join(',', remaining)}]");
+        }
+        else if (verification == ShutdownVerification.ForeignPortOccupant)
+        {
+            _log.Warn("shutdown_port_occupied Sports Hedge process tree is gone, but " +
+                      $"{string.Join("; ", foreign.Select(f => $"port {f.Port} is held by {f.Owner}"))}; not terminated (not owned)");
+        }
+
+        var report = new ShutdownReport(source, failed, backendGraceful, backendForced, frontendStopped, remaining, portsListening,
+            verification, checkedPids, foreign);
+        State.MarkFinished(failed, verification == ShutdownVerification.Verified, failed ? "Startup failed" : OperatorMessages.ShutdownOutcome(report));
         _log.Info($"shutdown_complete source={source} failed={failed} backend_graceful={backendGraceful} " +
-                  $"backend_forced={backendForced} frontend_stopped={frontendStopped}");
-        _completion.TrySetResult(new ShutdownReport(source, failed, backendGraceful, backendForced, frontendStopped, remaining, ports));
+                  $"backend_forced={backendForced} frontend_stopped={frontendStopped} verification={verification} clean={report.CleanStop}");
+        _completion.TrySetResult(report);
+    }
+
+    private void CaptureOwnedProcesses()
+    {
+        foreach (var group in new[] { _backend, _frontend })
+        {
+            if (group is null)
+            {
+                continue;
+            }
+            foreach (var pid in group.ActiveProcessIds().Append(group.RootProcessId).Distinct())
+            {
+                if (!_ownedIdentities.ContainsKey(pid) && _ownedProcesses.Capture(pid) is { } identity)
+                {
+                    _ownedIdentities[pid] = identity;
+                }
+            }
+        }
+    }
+
+    /// <summary>Bounded OS re-check of every captured owned PID. Returns those still alive.</summary>
+    private async Task<IReadOnlyList<int>> VerifyOwnedProcessesGoneAsync()
+    {
+        var deadline = DateTime.UtcNow + _options.FinalVerificationTimeout;
+        while (true)
+        {
+            var alive = _ownedIdentities.Values.Where(_ownedProcesses.IsAlive).Select(id => id.Pid).OrderBy(pid => pid).ToArray();
+            if (alive.Length == 0 || DateTime.UtcNow >= deadline)
+            {
+                return alive;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(100)).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Final read-only look at 8000/3000. A listener whose owner is a still-alive
+    /// owned PID is part of the owned failure; anything else is foreign and is
+    /// only reported, never terminated.
+    /// </summary>
+    private (IReadOnlyList<int> Listening, IReadOnlyList<PortOccupant> Foreign) InspectPortsAfterShutdown(IReadOnlyList<int> remainingOwned)
+    {
+        var listening = new List<int>();
+        var foreign = new List<PortOccupant>();
+        foreach (var port in new[] { LauncherConstants.BackendPort, LauncherConstants.FrontendPort })
+        {
+            var status = _deps.Ports.Inspect(port);
+            if (!status.Listening)
+            {
+                continue;
+            }
+            listening.Add(port);
+            var ownedListener = status.OwnerPid is int owner ? remainingOwned.Contains(owner) : remainingOwned.Count > 0;
+            if (!ownedListener)
+            {
+                foreign.Add(new PortOccupant(port, status.OwnerPid, status.OwnerDescription));
+            }
+        }
+        return (listening, foreign);
     }
 
     /// <summary>Returns true if the port is STILL listening after the timeout. Never kills the occupant.</summary>

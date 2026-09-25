@@ -185,7 +185,14 @@ public sealed class SessionControllerTests
         Assert.True(report.FrontendStopped);
         Assert.Empty(report.RemainingProcessIds);
         Assert.Empty(report.PortsStillListening);
+        Assert.Equal(ShutdownVerification.Verified, report.Verification);
+        Assert.True(report.CleanStop);
+        Assert.Empty(report.ForeignPortOccupants);
+        Assert.Equal(
+            new[] { h.Backend.RootProcessId, h.Backend.RootProcessId + 1, h.Frontend.RootProcessId, h.Frontend.RootProcessId + 1 }.OrderBy(p => p),
+            report.OwnedProcessIdsChecked);
         Assert.Equal(ControllerState.Stopped, h.Controller.State.State);
+        Assert.Equal("Sports Hedge has stopped", h.Controller.State.Snapshot().Message);
         lock (states)
         {
             Assert.Equal(ControllerState.Running, states[^3]);
@@ -265,6 +272,115 @@ public sealed class SessionControllerTests
 
         Assert.Equal(new[] { 3000 }, report.PortsStillListening);
         Assert.True(h.Log.Contains("not terminated because it is not owned by this controller"));
+        Assert.Equal(ShutdownVerification.ForeignPortOccupant, report.Verification);
+        Assert.False(report.CleanStop);
+        Assert.Empty(report.RemainingProcessIds);
+        var occupant = Assert.Single(report.ForeignPortOccupants);
+        Assert.Equal((3000, (int?)999), (occupant.Port, occupant.OwnerPid));
+        Assert.Equal(ControllerState.ShutdownIncomplete, h.Controller.State.State);
+        var message = h.Controller.State.Snapshot().Message;
+        Assert.Contains("processes have stopped, but port 3000 is in use by another process (PID 999 (node))", message);
+        Assert.DoesNotContain("Sports Hedge has stopped", message);
+        Assert.True(h.Log.Contains("verification=ForeignPortOccupant"));
+        Assert.True(h.Ports.Inspect(3000).Listening, "foreign listener must be left running");
+    }
+
+    [Fact]
+    public async Task Forced_shutdown_where_owned_processes_exit_normally_is_verified_clean()
+    {
+        var h = new Harness();
+        h.BackendShutdown.Accept = false;
+        h.BackendShutdown.OnRequest = null;
+        Assert.True((await h.Controller.StartAsync()).Success);
+
+        h.Controller.RequestShutdown(ShutdownSource.Tray);
+        var report = await h.Controller.Completion.WaitAsync(Wait);
+
+        Assert.True(report.BackendForced);
+        Assert.Equal(ShutdownVerification.Verified, report.Verification);
+        Assert.True(report.CleanStop);
+        Assert.Equal(ControllerState.Stopped, h.Controller.State.State);
+    }
+
+    [Fact]
+    public async Task Owned_process_surviving_termination_but_gone_after_job_close_is_verified_clean()
+    {
+        var h = new Harness();
+        h.BackendShutdown.OnRequest = null;
+        Assert.True((await h.Controller.StartAsync()).Success);
+        h.Backend.Job.IgnoreTerminate = true;
+
+        h.Controller.RequestShutdown(ShutdownSource.Ui);
+        var report = await h.Controller.Completion.WaitAsync(Wait);
+
+        Assert.True(report.BackendForced);
+        Assert.True(h.Log.Contains($"shutdown_interim remaining_job_pids=[{h.Backend.RootProcessId},{h.Backend.RootProcessId + 1}]"),
+            "the backend should still have been alive before the job handle closed");
+        Assert.True(h.Backend.Job.Disposed);
+        Assert.Empty(report.RemainingProcessIds);
+        Assert.Contains(h.Backend.RootProcessId, report.OwnedProcessIdsChecked);
+        Assert.Equal(ShutdownVerification.Verified, report.Verification);
+        Assert.Equal(ControllerState.Stopped, h.Controller.State.State);
+    }
+
+    [Fact]
+    public async Task Owned_process_that_cannot_be_verified_gone_is_not_reported_as_clean()
+    {
+        var h = new Harness();
+        Assert.True((await h.Controller.StartAsync()).Success);
+        var orphan = h.Backend.RootProcessId + 1;
+        h.OwnedProcesses.Stuck.Add(orphan);
+        h.Ports.Occupied[8000] = new PortStatus(8000, true, orphan, "python");
+
+        h.Controller.RequestShutdown(ShutdownSource.Ui);
+        var report = await h.Controller.Completion.WaitAsync(Wait);
+
+        Assert.Equal(ShutdownVerification.OwnedProcessesRemain, report.Verification);
+        Assert.False(report.CleanStop);
+        Assert.False(report.Failed);
+        Assert.Equal(new[] { orphan }, report.RemainingProcessIds);
+        Assert.Equal(new[] { 8000 }, report.PortsStillListening);
+        Assert.Empty(report.ForeignPortOccupants);
+        Assert.Equal(ControllerState.ShutdownIncomplete, h.Controller.State.State);
+        var message = h.Controller.State.Snapshot().Message;
+        Assert.Contains($"PID {orphan}", message);
+        Assert.DoesNotContain("Sports Hedge has stopped", message);
+        Assert.True(h.Log.Contains($"remaining_owned_pids=[{orphan}]"));
+        Assert.True(h.Log.Contains("shutdown_unverified"));
+        Assert.True(h.Log.Contains("clean=False"));
+        Assert.Equal(ShutdownRequestResult.AlreadyStopped, h.Controller.RequestShutdown(ShutdownSource.Tray));
+    }
+
+    [Fact]
+    public async Task Owned_orphan_takes_precedence_over_a_foreign_listener_and_both_are_reported()
+    {
+        var h = new Harness();
+        Assert.True((await h.Controller.StartAsync()).Success);
+        var orphan = h.Frontend.RootProcessId;
+        h.OwnedProcesses.Stuck.Add(orphan);
+        h.Ports.Occupied[8000] = new PortStatus(8000, true, 4242, "python");
+
+        h.Controller.RequestShutdown(ShutdownSource.Tray);
+        var report = await h.Controller.Completion.WaitAsync(Wait);
+
+        Assert.Equal(ShutdownVerification.OwnedProcessesRemain, report.Verification);
+        Assert.Equal(new[] { orphan }, report.RemainingProcessIds);
+        Assert.Equal(4242, Assert.Single(report.ForeignPortOccupants).OwnerPid);
+    }
+
+    [Fact]
+    public async Task Verification_uses_pids_captured_before_disposal_not_the_disposed_groups()
+    {
+        var h = new Harness();
+        Assert.True((await h.Controller.StartAsync()).Success);
+        var orphan = h.Backend.RootProcessId;
+        h.OwnedProcesses.Stuck.Add(orphan);
+
+        h.Controller.RequestShutdown(ShutdownSource.Ui);
+        var report = await h.Controller.Completion.WaitAsync(Wait);
+
+        Assert.Empty(h.Controller.BackendProcessIds);
+        Assert.Contains(orphan, report.RemainingProcessIds);
     }
 
     [Fact]

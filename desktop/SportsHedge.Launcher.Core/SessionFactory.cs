@@ -43,7 +43,8 @@ public static class SessionFactory
             new HttpBackendShutdownClient(),
             new SystemPrerequisites(npm, node, git),
             specs,
-            new PipeControllerIpcHost(secrets.PipeName, log));
+            new PipeControllerIpcHost(secrets.PipeName, log),
+            new SystemOwnedProcessProbe());
         return new SessionController(layout, secrets, deps, options);
     }
 }
