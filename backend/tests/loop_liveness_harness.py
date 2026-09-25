@@ -22,6 +22,7 @@ venue quotes. PAPER / read-only.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 import threading
 import time
@@ -42,6 +43,7 @@ class SlowCallback:
     label: str
     lane: str
     phase: str
+    gc_s: float = 0.0
 
 
 @dataclass
@@ -66,8 +68,8 @@ class CallbackProfile:
         ]
         for item in sorted(self.slow, key=lambda s: s.elapsed_s, reverse=True)[:top]:
             lines.append(
-                f"  {int(item.elapsed_s * 1000):>6}ms lane={item.lane} phase={item.phase} "
-                f"{item.label}"
+                f"  {int(item.elapsed_s * 1000):>6}ms (gc {int(item.gc_s * 1000)}ms) "
+                f"lane={item.lane} phase={item.phase} {item.label}"
             )
         if self.leaf_samples:
             lines.append("  hottest repository frames while a callback was long:")
@@ -107,6 +109,17 @@ class CallbackProfiler:
         self._current_started: float | None = None
         self._stop = threading.Event()
         self._sampler: threading.Thread | None = None
+        self._gc_total_s = 0.0
+        self._gc_started: float | None = None
+
+    def _gc_callback(self, phase: str, _info: dict[str, Any]) -> None:
+        if threading.get_ident() != self._loop_thread:
+            return
+        if phase == "start":
+            self._gc_started = time.perf_counter()
+        elif self._gc_started is not None:
+            self._gc_total_s += time.perf_counter() - self._gc_started
+            self._gc_started = None
 
     def __enter__(self) -> CallbackProfiler:
         from sports_hedge.application.event_loop_activity import LOOP_ACTIVITY
@@ -115,11 +128,13 @@ class CallbackProfiler:
         original = asyncio.events.Handle._run
         self._original = original
         profiler = self
+        gc.callbacks.append(self._gc_callback)
 
         def timed_run(handle: asyncio.Handle) -> None:
             if threading.get_ident() != profiler._loop_thread:
                 return original(handle)
             started = time.perf_counter()
+            gc_before = profiler._gc_total_s
             profiler._current_started = started
             lane = LOOP_ACTIVITY.current.lane
             phase = LOOP_ACTIVITY.current.phase
@@ -133,7 +148,13 @@ class CallbackProfiler:
                 profile.total_s += elapsed
                 if elapsed >= profiler.record_over_s:
                     profile.slow.append(
-                        SlowCallback(elapsed, _callback_label(handle), lane, phase)
+                        SlowCallback(
+                            elapsed,
+                            _callback_label(handle),
+                            lane,
+                            phase,
+                            gc_s=profiler._gc_total_s - gc_before,
+                        )
                     )
 
         asyncio.events.Handle._run = timed_run  # type: ignore[method-assign]
@@ -145,6 +166,8 @@ class CallbackProfiler:
         self._stop.set()
         if self._sampler is not None:
             self._sampler.join(timeout=2)
+        if self._gc_callback in gc.callbacks:
+            gc.callbacks.remove(self._gc_callback)
         if self._original is not None:
             asyncio.events.Handle._run = self._original  # type: ignore[method-assign]
 

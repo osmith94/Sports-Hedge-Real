@@ -34,6 +34,7 @@ EventMatcher thresholds and the Approved Match Register are unchanged.
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -505,6 +506,10 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         await asyncio.sleep(0.005)
 
     heartbeat = HeartbeatProbe()
+    # Measure this workload's slices, not gen-2 GC over objects left behind by
+    # the thousands of earlier tests in the same pytest process.
+    gc.collect()
+    gc.freeze()
     try:
         with CallbackProfiler() as profiler:
             heartbeat.start()
@@ -513,6 +518,7 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
             await asyncio.sleep(0.6)
             await heartbeat.stop()
     finally:
+        gc.unfreeze()
         await coordinator.stop_server_loop()
         repository.close()
         get_settings.cache_clear()
@@ -524,7 +530,7 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         if item.market_evaluation_state == MarketEvaluationState.EVALUATED.value
     ]
     over = profiler.profile.over(LIVENESS_BOUND_S)
-    detail = profiler.profile.report()
+    detail = f"{profiler.profile.report()}\nsubphases={loop_subphase_snapshot()}"
 
     assert len(report.discovered_fixtures) == REPRESENTATIVE_FIXTURES
     assert len(evaluated) == REPRESENTATIVE_FIXTURES
