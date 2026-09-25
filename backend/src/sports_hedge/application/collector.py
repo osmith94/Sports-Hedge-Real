@@ -25,7 +25,12 @@ from sports_hedge.application.equivalence_diagnostics import (
     zero_equivalent_reason_counts,
     zero_equivalent_reason_from_inventory,
 )
-from sports_hedge.application.event_loop_activity import mark_loop_phase, yield_event_loop
+from sports_hedge.application.event_loop_activity import (
+    close_loop_slice,
+    mark_loop_phase,
+    sync_subphase,
+    yield_event_loop,
+)
 from sports_hedge.application.executable_liquidity import (
     NO_EXECUTABLE_ARB,
     HeadlineBand,
@@ -3413,14 +3418,17 @@ class ReadOnlyCrossVenueCollector:
             | None
         ] = [None] * len(clusters)
 
+        lane_label = str(self._op_request_lane or "universe")
+
         def accept(index: int, cluster: FixtureCluster, row: Any) -> None:
             results[index] = row
             if row is None:
                 return
             fixture, cluster_decisions, inventory, _counts, _fetched, _pairs = row
-            self._emit_fixture_evaluated(
-                cluster, fixture, cluster_decisions, inventory
-            )
+            with sync_subphase(lane_label, "fixture_published", candidates=len(inventory)):
+                self._emit_fixture_evaluated(
+                    cluster, fixture, cluster_decisions, inventory
+                )
 
         async def run(index: int, cluster: FixtureCluster) -> None:
             try:
@@ -3488,11 +3496,7 @@ class ReadOnlyCrossVenueCollector:
         universe_lane = self._op_request_lane == ScanLane.UNIVERSE.value
         hot_lane = self._op_request_lane == ScanLane.HOT.value
         work_indexes: list[int] = []
-        mark_loop_phase(
-            lane=str(self._op_request_lane or "universe"),
-            phase="market_evaluation",
-            events=len(clusters),
-        )
+        mark_loop_phase(lane=lane_label, phase="market_evaluation", events=len(clusters))
         last_yield = perf_counter()
         for index, cluster in enumerate(clusters):
             if (perf_counter() - last_yield) >= COOP_MAX_SLICE_SECONDS:
@@ -3561,6 +3565,9 @@ class ReadOnlyCrossVenueCollector:
             if drain > 0 and pending:
                 await asyncio.wait(set(pending.values()), timeout=drain)
 
+        # The phase slice must not span awaits: cluster tasks spend most of
+        # their time waiting on providers, and other lanes run meanwhile.
+        close_loop_slice()
         try:
             while next_work < len(work_indexes) or pending:
                 while next_work < len(work_indexes) and len(pending) < concurrency:
@@ -3623,6 +3630,7 @@ class ReadOnlyCrossVenueCollector:
         if pending:
             await cancel_pending()
 
+        mark_loop_phase(lane=lane_label, phase="market_evaluation", events=len(clusters))
         discovered: list[DiscoveredFixture] = []
         decisions: list[PaperScanDecision] = []
         fixture_markets: dict[str, list[FixtureMarketInventoryRow]] = {}
@@ -3886,22 +3894,27 @@ class ReadOnlyCrossVenueCollector:
             tuple[VenueName, VenueName, _NormalizedMarket, _NormalizedMarket, MarketMatchResult]
         ] = []
         matched_market_pairs = 0
-        for left_venue, right_venue in pair_specs:
-            left_markets = venue_markets[left_venue]
-            right_markets = venue_markets[right_venue]
-            if not left_markets or not right_markets:
-                continue
-            market_pairs = _select_prioritized_market_pairs(
-                _greedy_unique_market_pairs(
-                    left_markets, right_markets, matcher=self.market_matcher
-                ),
-                max_market_pairs_per_event,
-            )
-            matched_market_pairs += len(market_pairs)
-            selected_pairs.extend(
-                (left_venue, right_venue, left_market, right_market, match)
-                for left_market, right_market, match in market_pairs
-            )
+        lane_label = str(self._op_request_lane or "universe")
+        listed_market_count = sum(len(items) for items in venue_markets.values())
+        with sync_subphase(
+            lane_label, "market_relationships", events=1, candidates=listed_market_count
+        ):
+            for left_venue, right_venue in pair_specs:
+                left_markets = venue_markets[left_venue]
+                right_markets = venue_markets[right_venue]
+                if not left_markets or not right_markets:
+                    continue
+                market_pairs = _select_prioritized_market_pairs(
+                    _greedy_unique_market_pairs(
+                        left_markets, right_markets, matcher=self.market_matcher
+                    ),
+                    max_market_pairs_per_event,
+                )
+                matched_market_pairs += len(market_pairs)
+                selected_pairs.extend(
+                    (left_venue, right_venue, left_market, right_market, match)
+                    for left_market, right_market, match in market_pairs
+                )
         catalogue_pairs = universe_catalogue_pairs(selected_pairs)
         eligible_pairs = [
             item
@@ -3968,80 +3981,91 @@ class ReadOnlyCrossVenueCollector:
             )
             for source_id, observation in kalshi_side.observations.items():
                 observations_by_market_id[(VenueName.KALSHI, source_id)] = observation
-        for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
-            left_obs = observations_by_market_id.get(
-                (left_venue, left_market.canonical.source_market_id)
-            )
-            right_obs = observations_by_market_id.get(
-                (right_venue, right_market.canonical.source_market_id)
-            )
-            if left_obs is None or right_obs is None:
-                if fixture.current_net_edge is None:
-                    fixture.no_comparison_reason = "order_book_unavailable"
-                continue
-            stored = self.paper_scan.scan_pair(
-                left_obs,
-                right_obs,
-                fixture_canonical_event_id=fixture.canonical_event_id,
-                **scan_kwargs,
-            )
-            phases = getattr(self.paper_scan, "last_scan_phase_ms", None) or {}
-            self._attribution.add(
-                stage="mapping_equivalence",
-                elapsed_ms=int(phases.get("mapping_equivalence", 0)),
-                calls=1,
-            )
-            self._attribution.add(
-                stage="fees_fx_risk",
-                elapsed_ms=int(phases.get("fees_fx_risk", 0)),
-                calls=1,
-            )
-            self._attribution.add(
-                stage="solver_allocation",
-                elapsed_ms=int(phases.get("solver_allocation", 0)),
-                calls=1,
-            )
-            if mb_event is not None:
-                state = matchbook_fixture_state(mb_event.raw)
-                stored = stored.model_copy(
-                    update={
-                        "fixture_discovery_source": cluster.anchor.venue,
-                        "fixture_status": state.venue_status,
-                        "in_running": state.in_running,
-                        "live_score_supported": state.live_score_supported,
-                        "home_score": state.home_score,
-                        "away_score": state.away_score,
-                    }
+        with sync_subphase(
+            lane_label, "paper_scan", events=1, candidates=len(eligible_pairs)
+        ):
+            for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
+                left_obs = observations_by_market_id.get(
+                    (left_venue, left_market.canonical.source_market_id)
                 )
-            else:
-                stored = stored.model_copy(
-                    update={"fixture_discovery_source": cluster.anchor.venue}
+                right_obs = observations_by_market_id.get(
+                    (right_venue, right_market.canonical.source_market_id)
                 )
-            decisions.append(stored)
-            decisions_by_source_ids[
-                (left_market.canonical.source_market_id, right_market.canonical.source_market_id)
-            ] = stored
-            decisions_by_pair[
-                (
-                    left_obs.venue.value,
-                    left_market.canonical.source_market_id,
-                    right_obs.venue.value,
-                    right_market.canonical.source_market_id,
+                if left_obs is None or right_obs is None:
+                    if fixture.current_net_edge is None:
+                        fixture.no_comparison_reason = "order_book_unavailable"
+                    continue
+                stored = self.paper_scan.scan_pair(
+                    left_obs,
+                    right_obs,
+                    fixture_canonical_event_id=fixture.canonical_event_id,
+                    **scan_kwargs,
                 )
-            ] = stored
-            headline_applies.append((left_market, left_obs, right_obs, stored))
+                phases = getattr(self.paper_scan, "last_scan_phase_ms", None) or {}
+                self._attribution.add(
+                    stage="mapping_equivalence",
+                    elapsed_ms=int(phases.get("mapping_equivalence", 0)),
+                    calls=1,
+                )
+                self._attribution.add(
+                    stage="fees_fx_risk",
+                    elapsed_ms=int(phases.get("fees_fx_risk", 0)),
+                    calls=1,
+                )
+                self._attribution.add(
+                    stage="solver_allocation",
+                    elapsed_ms=int(phases.get("solver_allocation", 0)),
+                    calls=1,
+                )
+                if mb_event is not None:
+                    state = matchbook_fixture_state(mb_event.raw)
+                    stored = stored.model_copy(
+                        update={
+                            "fixture_discovery_source": cluster.anchor.venue,
+                            "fixture_status": state.venue_status,
+                            "in_running": state.in_running,
+                            "live_score_supported": state.live_score_supported,
+                            "home_score": state.home_score,
+                            "away_score": state.away_score,
+                        }
+                    )
+                else:
+                    stored = stored.model_copy(
+                        update={"fixture_discovery_source": cluster.anchor.venue}
+                    )
+                decisions.append(stored)
+                decisions_by_source_ids[
+                    (left_market.canonical.source_market_id, right_market.canonical.source_market_id)
+                ] = stored
+                decisions_by_pair[
+                    (
+                        left_obs.venue.value,
+                        left_market.canonical.source_market_id,
+                        right_obs.venue.value,
+                        right_market.canonical.source_market_id,
+                    )
+                ] = stored
+                headline_applies.append((left_market, left_obs, right_obs, stored))
 
-        inventory_rows = assemble_fixture_inventory(
-            matchbook_inventory,
-            polymarket_inventory,
-            kalshi_markets=kalshi_inventory,
-            matcher=self.market_matcher,
-            decisions_by_source_ids=decisions_by_source_ids,
-            decisions_by_pair=decisions_by_pair,
-            venue_costs=scan_kwargs.get("venue_costs"),
-            fx_snapshots=scan_kwargs.get("fx_snapshots"),
-            cost_resolver=self.paper_scan.cost_resolver,
-        )
+        with sync_subphase(
+            lane_label,
+            "inventory_composition",
+            events=1,
+            candidates=len(matchbook_inventory)
+            + len(polymarket_inventory)
+            + len(kalshi_inventory),
+        ):
+            inventory_rows = assemble_fixture_inventory(
+                matchbook_inventory,
+                polymarket_inventory,
+                kalshi_markets=kalshi_inventory,
+                matcher=self.market_matcher,
+                decisions_by_source_ids=decisions_by_source_ids,
+                decisions_by_pair=decisions_by_pair,
+                venue_costs=scan_kwargs.get("venue_costs"),
+                fx_snapshots=scan_kwargs.get("fx_snapshots"),
+                cost_resolver=self.paper_scan.cost_resolver,
+            )
         discovered_count, equivalent_count, _observed_edge = inventory_summary(inventory_rows)
         fixture.discovered_market_count = discovered_count
         fixture.matched_market_count = matched_market_pairs

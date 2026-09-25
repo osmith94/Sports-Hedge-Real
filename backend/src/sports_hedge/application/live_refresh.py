@@ -23,8 +23,10 @@ from sports_hedge.application.active_trade_lane import (
 )
 from sports_hedge.application.event_loop_activity import (
     LOOP_ACTIVITY,
+    TimedRLock,
     close_loop_slice,
     mark_loop_phase,
+    sync_subphase,
 )
 from sports_hedge.application.hot_market_relationships import HotMarketRelationship
 from sports_hedge.application.collector import (
@@ -453,7 +455,7 @@ class _CountedRLock:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
+        self._lock = TimedRLock("coordinator_state")
         self._depth = 0
         self._owner: int | None = None
 
@@ -4186,14 +4188,15 @@ class LiveRefreshCoordinator:
             decisions: list[Any],
             inventory: list[Any],
         ) -> None:
-            self.record_universe_fixture_progress(
-                cluster,
-                fixture,
-                decisions,
-                inventory,
-                chunk_epoch=epoch,
-                apply_epoch=apply_epoch,
-            )
+            with sync_subphase("universe", "fixture_progress", candidates=len(inventory)):
+                self.record_universe_fixture_progress(
+                    cluster,
+                    fixture,
+                    decisions,
+                    inventory,
+                    chunk_epoch=epoch,
+                    apply_epoch=apply_epoch,
+                )
 
         def on_work(
             canonical_ids: list[str],

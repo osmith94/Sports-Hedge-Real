@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +23,7 @@ from sports_hedge.application.current_market_inventory import (
     stamp_current_market_row,
     union_paper_market_ids,
 )
+from sports_hedge.application.event_loop_activity import TimedRLock
 from sports_hedge.application.fixture_inventory import sort_fixture_inventory_rows
 from sports_hedge.application.hot_identity import (
     hot_scheduling_key,
@@ -165,7 +165,7 @@ class FixtureCurrentStateStore:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
+        self._lock = TimedRLock("fixture_current_state")
         self._generation = 0
         self._reset_generation = 0
         self._rows: dict[str, _FixtureRecord] = {}
