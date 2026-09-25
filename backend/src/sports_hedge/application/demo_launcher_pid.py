@@ -8,11 +8,16 @@ The PowerShell start/stop launchers must apply the same rules:
   descendants discovered via ParentProcessId for the same checkout;
 - never broad-kill Node; unrelated processes are refused even if they share
   port 3000/8000;
-- reuse a healthy process only when that owned identity also records this
-  checkout's repo root and Git HEAD;
-- if the owned process is healthy on a different HEAD, restart it;
-- if a healthy port occupant is not this launcher's process, fail clearly
-  rather than silently reuse or kill it;
+- occupancy is whether the service port is LISTENING, never an HTTP probe;
+  HTTP readiness is checked separately after start/reuse;
+- reuse a listening process only when that owned identity also records this
+  checkout's repo root and Git HEAD, and the port listener PID is the owned
+  root or a verified descendant of it;
+- an owned current-HEAD process that has not bound its port yet is awaited,
+  never duplicated;
+- if the owned process is listening on a different HEAD, restart it;
+- if a port occupant is not this launcher's process, fail clearly rather than
+  silently reuse or kill it;
 - never delete frontend/.next while verified frontend descendants are alive
   or port 3000 is still listening.
 """
@@ -23,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 StopAction = Literal["stop", "stale", "missing"]
-StartAction = Literal["start", "reuse", "restart", "conflict"]
+StartAction = Literal["start", "await", "reuse", "restart", "conflict"]
 DescendantAction = Literal["stop", "refuse", "missing"]
 
 _WRAPPER_PROCESS_NAMES = frozenset({"cmd", "npm", "conhost", "powershell", "pwsh"})
@@ -78,7 +83,8 @@ def decide_demo_stop_action(
 def decide_demo_start_action(
     identity: dict[str, Any] | None,
     *,
-    health_ok: bool,
+    port_listening: bool,
+    listener_owned: bool,
     current_git_head: str,
     current_repo_root: str,
     live_pid: int | None = None,
@@ -86,14 +92,17 @@ def decide_demo_start_action(
     live_path: str | None = None,
     live_command_line: str | None = None,
 ) -> StartAction:
-    """Return whether a healthy demo process may be reused, restarted, or refused."""
+    """Return whether to start, await, reuse, restart, or refuse a service port.
 
-    if not health_ok:
-        return "start"
+    ``listener_owned`` means every listener PID on the port is the owned root or
+    a verified descendant (see ``listener_belongs_to_owned_tree``).
+    """
+
+    idle: StartAction = "conflict" if port_listening else "start"
     current_sha = (current_git_head or "").strip()
     current_root = _norm_root(current_repo_root)
     if not current_sha or not current_root:
-        return "conflict"
+        return idle
     owned = decide_demo_stop_action(
         identity,
         live_pid=live_pid,
@@ -102,13 +111,15 @@ def decide_demo_start_action(
         live_command_line=live_command_line,
     )
     if owned != "stop" or not identity:
-        return "conflict"
+        return idle
     recorded_root = _norm_root(str(identity.get("repo_root") or ""))
     if recorded_root and recorded_root != current_root:
+        return idle
+    if port_listening and not listener_owned:
         return "conflict"
     recorded_sha = str(identity.get("git_head") or "").strip().lower()
     if recorded_sha and recorded_sha == current_sha.lower():
-        return "reuse"
+        return "reuse" if port_listening else "await"
     return "restart"
 
 
@@ -138,8 +149,13 @@ def format_service_disposition(
         )
     if action == "start":
         return f"{label}: started for SHA {current_sha}"
+    if action == "await":
+        return (
+            f"{label}: owned Sports Hedge process for SHA {current_sha} is still "
+            "starting; waiting for its port instead of launching a second copy"
+        )
     return (
-        f"{label} is healthy but is not a Sports Hedge launcher process for this "
+        f"{label} port is already in use but is not a Sports Hedge launcher process for this "
         f"checkout (SHA {current_sha}). Refusing to reuse or kill the unrelated "
         "process occupying the port."
     )
@@ -304,6 +320,49 @@ def plan_owned_process_tree_stop(
         elif decision == "refuse":
             refused.append(pid)
     return "stop", stop_pids, refused
+
+
+def listener_belongs_to_owned_tree(
+    identity: dict[str, Any] | None,
+    *,
+    listener_pids: Sequence[int],
+    processes: Sequence[Mapping[str, Any]],
+    label: str,
+) -> bool:
+    """True only if every port listener PID is the owned root or a verified descendant.
+
+    Unknown, missing, or foreign listener PIDs fail closed (conflict, never killed).
+    """
+
+    if not identity or identity.get("pid") is None or not listener_pids:
+        return False
+    try:
+        root_pid = int(identity["pid"])
+    except (TypeError, ValueError):
+        return False
+    tree_set = set(collect_owned_tree_pids(root_pid, processes))
+    by_pid: dict[int, Mapping[str, Any]] = {}
+    for proc in processes:
+        try:
+            by_pid[int(proc["pid"])] = proc
+        except (TypeError, ValueError, KeyError):
+            continue
+    for listener_pid in listener_pids:
+        if int(listener_pid) == root_pid:
+            continue
+        proc = by_pid.get(int(listener_pid), {})
+        decision = decide_descendant_stop_action(
+            identity,
+            descendant_pid=int(listener_pid),
+            tree_pids=tree_set,
+            label=label,
+            live_name=proc.get("name") if proc else None,
+            live_path=proc.get("path") if proc else None,
+            live_command_line=proc.get("command_line") if proc else None,
+        )
+        if decision != "stop":
+            return False
+    return True
 
 
 def refresh_allows_next_cache_clear(

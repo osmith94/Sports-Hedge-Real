@@ -10,6 +10,7 @@ from sports_hedge.application.demo_launcher_pid import (
     decide_demo_stop_action,
     format_checkout_report,
     format_service_disposition,
+    listener_belongs_to_owned_tree,
     start_action_allows_owned_stop,
 )
 from sports_hedge.application.serving_build import (
@@ -44,7 +45,8 @@ OWNED_LIVE = {
 def _start(**overrides):
     payload = {
         "identity": OWNED_IDENTITY,
-        "health_ok": True,
+        "port_listening": True,
+        "listener_owned": True,
         "current_git_head": CURRENT_SHA,
         "current_repo_root": REPO,
         **OWNED_LIVE,
@@ -91,7 +93,7 @@ def test_stale_untrusted_pid_identity_is_not_killed() -> None:
     assert _start(identity={"pid": 4242}, **OWNED_LIVE) == "conflict"
 
 
-def test_unrelated_healthy_process_fails_clearly_rather_than_silently_reuse() -> None:
+def test_unrelated_listener_fails_clearly_rather_than_silently_reuse() -> None:
     action = _start(identity=None, live_pid=None, live_name=None, live_path=None, live_command_line=None)
     assert action == "conflict"
     assert start_action_allows_owned_stop(action) is False
@@ -106,9 +108,80 @@ def test_unrelated_healthy_process_fails_clearly_rather_than_silently_reuse() ->
     assert start_action_allows_owned_stop("conflict") is False
 
 
-def test_unhealthy_port_starts_without_kill() -> None:
-    assert _start(health_ok=False) == "start"
+def test_free_port_starts_without_kill() -> None:
+    dead = {"live_pid": None, "live_name": None, "live_path": None, "live_command_line": None}
+    assert _start(port_listening=False, listener_owned=False, **dead) == "start"
+    assert _start(port_listening=False, listener_owned=False, identity=None, **dead) == "start"
     assert start_action_allows_owned_stop("start") is False
+
+
+def test_owned_current_sha_not_yet_listening_is_awaited_not_duplicated() -> None:
+    assert _start(port_listening=False, listener_owned=False) == "await"
+    assert start_action_allows_owned_stop("await") is False
+    assert "waiting for its port instead of launching a second copy" in format_service_disposition(
+        "frontend", "await", current_sha=CURRENT_SHA
+    )
+
+
+def test_owned_old_sha_not_yet_listening_restarts_owned_tree() -> None:
+    identity = {**OWNED_IDENTITY, "git_head": OTHER_SHA}
+    assert _start(identity=identity, port_listening=False, listener_owned=False) == "restart"
+
+
+def test_unowned_or_other_checkout_process_with_free_port_starts() -> None:
+    other_root = {**OWNED_IDENTITY, "repo_root": r"C:\Other-Clone"}
+    assert _start(identity=other_root, port_listening=False, listener_owned=False) == "start"
+    assert _start(identity={"pid": 4242}, port_listening=False, listener_owned=False) == "start"
+
+
+def test_owned_root_alive_but_foreign_listener_is_conflict() -> None:
+    assert _start(listener_owned=False) == "conflict"
+    identity = {**OWNED_IDENTITY, "git_head": OTHER_SHA}
+    assert _start(identity=identity, listener_owned=False) == "conflict"
+
+
+FRONTEND_IDENTITY = {
+    "pid": 5000,
+    "path": r"C:\Windows\System32\cmd.exe",
+    "command_tokens": ["run", "dev", "127.0.0.1", "3000"],
+    "git_head": CURRENT_SHA,
+    "repo_root": REPO,
+}
+FRONTEND_PROCESSES = [
+    {"pid": 5000, "parent_pid": 1, "name": "cmd", "command_line": "cmd /c npm run dev -- -p 3000"},
+    {
+        "pid": 5001,
+        "parent_pid": 5000,
+        "name": "node",
+        "command_line": rf"node {REPO}\frontend\node_modules\next\dist\bin\next dev",
+    },
+    {"pid": 5002, "parent_pid": 5001, "name": "node", "command_line": "node start-server.js next"},
+    {"pid": 7777, "parent_pid": 1, "name": "node", "command_line": r"node C:\other\server.js"},
+    {"pid": 8888, "parent_pid": 5001, "name": "notepad", "command_line": "notepad.exe"},
+]
+
+
+def _listener_owned(pids: list[int]) -> bool:
+    return listener_belongs_to_owned_tree(
+        FRONTEND_IDENTITY, listener_pids=pids, processes=FRONTEND_PROCESSES, label="frontend"
+    )
+
+
+def test_listener_owned_by_verified_descendant_or_root() -> None:
+    assert _listener_owned([5002]) is True
+    assert _listener_owned([5000]) is True
+    assert _listener_owned([5001, 5002]) is True
+
+
+def test_listener_owned_by_foreign_or_unknown_pid_fails_closed() -> None:
+    assert _listener_owned([7777]) is False
+    assert _listener_owned([5002, 7777]) is False
+    assert _listener_owned([8888]) is False
+    assert _listener_owned([4040]) is False
+    assert _listener_owned([]) is False
+    assert listener_belongs_to_owned_tree(
+        None, listener_pids=[5002], processes=FRONTEND_PROCESSES, label="frontend"
+    ) is False
 
 
 def test_current_sha_shown_to_operator() -> None:
@@ -159,8 +232,14 @@ def test_restart_path_stops_only_after_ownership_check() -> None:
     start_ps1 = (REPO_ROOT / "scripts/windows/Start-SportsHedge-Demo.ps1").read_text(encoding="utf-8")
     restart_index = start_ps1.index('$action -eq "restart"')
     assert start_ps1.index("Stop-DemoPid") > restart_index
-    assert "Wait-HttpGone" in start_ps1
-    assert "unexpected occupant" in start_ps1
+    # Port release after an owned stop is verified from the OS listener, not HTTP.
+    assert "Wait-HttpGone" not in start_ps1
+    assert start_ps1.index("Wait-DemoPortGone -Port $Port -Label $Label") > start_ps1.index(
+        "Stop-DemoPid -PidFile $PidFile -Label $Label"
+    )
+    assert "Wait-DemoPortGone -Port 3000 -Label $Label" in identity_ps1
+    assert "Wait-DemoPortGone -Port 8000 -Label $Label" in identity_ps1
+    assert "unexpected occupant" in identity_ps1
 
 
 def test_build_info_prefers_launcher_env_over_git() -> None:

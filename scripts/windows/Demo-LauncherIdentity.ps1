@@ -2,6 +2,8 @@
 # Decision contract matches sports_hedge.application.demo_launcher_pid.
 # Owned stop also terminates verified ParentProcessId descendants of that PID.
 # Never broad-kill Node. Unrelated port occupants are refused, not killed.
+# Reuse requires the port listener PID itself to be the owned root or a verified
+# descendant; a live owned PID next to a foreign listener is a conflict.
 # Dot-source only. Do not execute this file directly.
 
 function ConvertTo-NormalizedRepoRoot {
@@ -128,34 +130,47 @@ function Get-RepoGitIdentity {
 }
 
 function Get-DemoStartAction {
+    # start    - port free and no verified owned process for this checkout
+    # await    - verified owned current-SHA process alive but port not bound yet
+    # reuse    - listener belongs to the verified owned current-SHA tree
+    # restart  - verified owned process (and its listener, if any) on another SHA
+    # conflict - anything else occupying the port; never killed
     param(
-        [bool]$HealthOk,
+        [bool]$PortListening,
+        [bool]$ListenerOwned,
         $Identity,
         $Live,
         [string]$CurrentGitHead,
         [string]$CurrentRepoRoot
     )
-    if (-not $HealthOk) {
-        return "start"
+    $idle = "conflict"
+    if (-not $PortListening) {
+        $idle = "start"
     }
     if ([string]::IsNullOrWhiteSpace($CurrentGitHead) -or [string]::IsNullOrWhiteSpace($CurrentRepoRoot)) {
-        return "conflict"
+        return $idle
     }
     if ($null -eq $Identity -or $null -eq $Live) {
-        return "conflict"
+        return $idle
     }
     $owned = Test-DemoPidOwned -Identity $Identity -Live $Live
     if ($owned -ne "stop") {
-        return "conflict"
+        return $idle
     }
     $recordedRoot = ConvertTo-NormalizedRepoRoot ([string]$Identity.repo_root)
     $currentRoot = ConvertTo-NormalizedRepoRoot $CurrentRepoRoot
     if ($recordedRoot -and $recordedRoot -ne $currentRoot) {
+        return $idle
+    }
+    if ($PortListening -and -not $ListenerOwned) {
         return "conflict"
     }
     $recordedHead = ([string]$Identity.git_head).Trim().ToLowerInvariant()
     $currentHead = $CurrentGitHead.Trim().ToLowerInvariant()
     if ($recordedHead -and $recordedHead -eq $currentHead) {
+        if (-not $PortListening) {
+            return "await"
+        }
         return "reuse"
     }
     return "restart"
@@ -318,24 +333,64 @@ function Test-DemoDescendantOwned {
     return "refuse"
 }
 
-function Test-DemoPortListening {
+function Get-DemoPortListenerPids {
     param([int]$Port)
     try {
         $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
         if ($conns.Count -gt 0) {
-            return $true
+            return @($conns | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
         }
     } catch {
         # Fall through to netstat; some hosts restrict Get-NetTCPConnection.
     }
     try {
         $escaped = [regex]::Escape([string]$Port)
-        $pattern = "[:.]$escaped\s+\S+\s+\S+\s+LISTENING"
-        $lines = @(netstat -ano | Select-String -Pattern $pattern)
-        return ($lines.Count -gt 0)
+        # netstat -ano columns: Proto  Local  Foreign  State  PID
+        $pattern = "[:.]$escaped\s+\S+\s+LISTENING\s+(\d+)"
+        $pids = @()
+        foreach ($match in @(netstat -ano | Select-String -Pattern $pattern)) {
+            $pids += [int]$match.Matches[0].Groups[1].Value
+        }
+        return @($pids | Sort-Object -Unique)
     } catch {
+        return @()
+    }
+}
+
+function Test-DemoPortListening {
+    param([int]$Port)
+    return (@(Get-DemoPortListenerPids -Port $Port).Count -gt 0)
+}
+
+function Test-DemoListenerOwned {
+    # Every listener PID must be the recorded owned root or a verified
+    # ParentProcessId descendant of it. Unknown/foreign listeners fail closed.
+    param(
+        [hashtable]$Identity,
+        [string]$Label,
+        [int[]]$ListenerPids,
+        $Processes = $null
+    )
+    if ($null -eq $Identity -or $null -eq $Identity.pid) {
         return $false
     }
+    $listeners = @($ListenerPids)
+    if ($listeners.Count -eq 0) {
+        return $false
+    }
+    $rootPid = [int]$Identity.pid
+    $treePids = @(Get-DemoOwnedTreePids -RootPid $rootPid -Processes $Processes)
+    foreach ($listenerPid in $listeners) {
+        if ([int]$listenerPid -eq $rootPid) {
+            continue
+        }
+        $live = Get-DemoLiveProcess -ProcId ([int]$listenerPid)
+        $verdict = Test-DemoDescendantOwned -Identity $Identity -TreePids $treePids -Label $Label -DescendantPid ([int]$listenerPid) -Live $live
+        if ($verdict -ne "stop") {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Wait-DemoPortGone {

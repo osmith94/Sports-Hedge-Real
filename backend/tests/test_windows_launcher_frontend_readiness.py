@@ -1,9 +1,10 @@
 """Launcher startup gating: frontend readiness is the lightweight
 ``/api/desktop/status`` route, never the expensive operator homepage ``/``.
 
-The homepage stays the browser target. The PID-identity occupancy probe and
-unrelated-listener refusal are unchanged, and the PAPER environment contract
-is still enforced by both the PowerShell launcher and SportsHedge.exe.
+The homepage stays the browser target. Port occupancy is detected from the
+listener itself, then PID/repo/Git identity decides reuse/restart/conflict.
+HTTP readiness is checked separately. The PAPER environment contract remains
+enforced by both the PowerShell launcher and SportsHedge.exe.
 """
 
 from __future__ import annotations
@@ -68,26 +69,45 @@ def test_powershell_browser_target_remains_homepage_after_readiness() -> None:
     assert script.index("Wait-HttpOk -Url $BackendHealth") < open_idx
 
 
-def test_powershell_unrelated_listener_protection_unchanged() -> None:
+def test_powershell_occupancy_is_port_based_not_homepage_based() -> None:
     script = _ps1()
-    # The reuse/restart/conflict decision still probes any HTTP listener on 3000,
-    # so an unrelated occupant answering "/" is refused rather than reused/killed.
-    assert _assignment(script, "FrontendHealth") == "http://127.0.0.1:3000"
+    identity = (REPO_ROOT / "scripts/windows/Demo-LauncherIdentity.ps1").read_text(
+        encoding="utf-8"
+    )
     assert (
-        'Invoke-DemoOwnedService -Label "frontend" -HealthUrl $FrontendHealth '
+        'Invoke-DemoOwnedService -Label "frontend" -Port 3000 '
         "-PidFile $FrontendPidFile"
     ) in script
     assert (
-        'Invoke-DemoOwnedService -Label "backend" -HealthUrl $BackendHealth '
+        'Invoke-DemoOwnedService -Label "backend" -Port 8000 '
         "-PidFile $BackendPidFile"
     ) in script
-    assert "$healthOk = Test-HttpOk $HealthUrl" in script
-    assert "Get-DemoStartAction -HealthOk $healthOk -Identity $identity -Live $live" in script
+    assert "$listenerPids = @(Get-DemoPortListenerPids -Port $Port)" in script
+    assert (
+        "Test-DemoListenerOwned -Identity $identity -Label $Label -ListenerPids $listenerPids"
+    ) in script
+    assert (
+        "Get-DemoStartAction -PortListening $portListening -ListenerOwned $listenerOwned "
+        "-Identity $identity -Live $live"
+    ) in script
+    assert "[bool]$PortListening" in identity
+    assert "OwningProcess" in identity
+    assert "[bool]$HealthOk" not in identity
+    assert "$healthOk = Test-HttpOk $HealthUrl" not in script
+    assert "$FrontendHealth" not in script
+    assert "Wait-HttpGone" not in script
+
+
+def test_powershell_unrelated_listener_is_refused_without_being_killed() -> None:
+    script = _ps1()
     assert "Refusing to reuse or kill the unrelated process occupying the port." in script
-    assert "Wait-HttpGone -Url $HealthUrl -Label $Label" in script
-    assert "Refusing to kill an unexpected occupant of the port." in script
+    assert "Stop-DemoPid -PidFile $PidFile -Label $Label" in script
+    assert "Stop-Process -Id" not in script
     restart_idx = script.index('if ($action -eq "restart") {')
-    assert script.index("Stop-DemoPid -PidFile $PidFile -Label $Label") > restart_idx
+    stop_idx = script.index("Stop-DemoPid -PidFile $PidFile -Label $Label")
+    assert stop_idx > restart_idx
+    assert script.index("Wait-DemoPortGone -Port $Port -Label $Label") > stop_idx
+    assert script.index("Wait-DemoPortGone -Port $Port -Label $Label") < script.index("& $Starter")
 
 
 def test_powershell_paper_enforcement_unchanged() -> None:
