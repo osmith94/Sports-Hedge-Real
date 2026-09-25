@@ -3653,8 +3653,7 @@ class LiveRefreshCoordinator:
                 )
                 return
             generation_id = self._ensure_store_universe_generation(scanned)
-            before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
-            self._fixture_state.upsert_evaluated_fixture(
+            before_hot, after_hot = self._fixture_state.upsert_evaluated_fixture_counting_hot(
                 fixture,
                 markets=inventory,
                 decisions=decisions,
@@ -3666,7 +3665,6 @@ class LiveRefreshCoordinator:
             )
             if rehydrating:
                 self._clear_universe_rehydration_unlocked(canonical_id)
-            after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
             promoted_now = after_hot > before_hot
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(scanned)

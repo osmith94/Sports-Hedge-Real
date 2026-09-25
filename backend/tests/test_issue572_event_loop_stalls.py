@@ -319,6 +319,58 @@ async def test_lifecycle_classification_matches_full_projection(
 
 
 @pytest.mark.asyncio
+async def test_single_pass_hot_counting_matches_two_membership_passes() -> None:
+    """Publication's exact HOT promotion counting, one classification pass per fixture."""
+
+    from test_issue200_universe_hot_promotion import _qualifying_universe_report
+
+    universe = RealisticUniverse(40, latency_s=0, hot_every=5)
+    collector, repository = _collector(universe)
+    try:
+        report = await _universe_sweep(collector)
+    finally:
+        repository.close()
+    base = datetime.now(UTC)
+    qualifying = _qualifying_universe_report(
+        "572-qualifying", kickoff=base + timedelta(days=4), when=base
+    )
+    sequence = [
+        (fixture, report.fixture_markets.get(fixture.canonical_event_id, []))
+        for fixture in report.discovered_fixtures
+    ]
+    sequence += [(fixture, []) for fixture in _mixed_store_report(base).discovered_fixtures]
+    sequence += [
+        (fixture, qualifying.fixture_markets.get(fixture.canonical_event_id, []))
+        for fixture in qualifying.discovered_fixtures
+    ]
+    first, first_markets = sequence[0]
+    sequence.append((first, first_markets))
+    sequence.append(
+        (first.model_copy(update={"canonical_event_id": f"{first.canonical_event_id}-alias"}), [])
+    )
+
+    counting = FixtureCurrentStateStore()
+    reference = FixtureCurrentStateStore()
+    promotions = 0
+    for step, (fixture, markets) in enumerate(sequence):
+        now = base + timedelta(seconds=step)
+        expected_before = reference.membership_counts(now)[0]
+        reference.upsert_evaluated_fixture(
+            fixture, markets=markets, scan_lane=ScanLane.UNIVERSE, now=now
+        )
+        expected_after = reference.membership_counts(now)[0]
+        counted = counting.upsert_evaluated_fixture_counting_hot(
+            fixture, markets=markets, scan_lane=ScanLane.UNIVERSE, now=now
+        )
+        assert counted == (expected_before, expected_after), (step, fixture.canonical_event_id)
+        assert _store_outputs(counting, now) == _store_outputs(reference, now), step
+        promotions += int(expected_after > expected_before)
+
+    assert promotions >= len(range(0, 40, 5)) + 2
+    assert "572-terminal" in counting._tombstones
+
+
+@pytest.mark.asyncio
 async def test_public_status_reads_sqlite_outside_the_coordinator_lock() -> None:
     """The API threadpool must not hold ``_state_lock`` across SQLite reads.
 

@@ -671,6 +671,9 @@ def current_slots_prove_qualifying_opportunity(
     for slot in slots:
         if slot.evaluated_absent:
             continue
+        # Pure row economics first; radar freshness is the costly clock check.
+        if not stored_row_proves_qualifying_executable(slot.row, max_quote_age_ms=max_quote_age_ms):
+            continue
         freshness = slot_freshness(
             slot,
             now=evaluated,
@@ -678,9 +681,7 @@ def current_slots_prove_qualifying_opportunity(
             universe_ttl_seconds=universe_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         )
-        if freshness == FRESHNESS_EXPIRED:
-            continue
-        if stored_row_proves_qualifying_executable(slot.row, max_quote_age_ms=max_quote_age_ms):
+        if freshness != FRESHNESS_EXPIRED:
             return True
     return False
 
@@ -755,6 +756,9 @@ def current_slots_prove_surveillance_opportunity(
     for slot in slots:
         if slot.evaluated_absent:
             continue
+        # Pure row economics first; radar freshness is the costly clock check.
+        if not stored_row_proves_surveillance_opportunity(slot.row):
+            continue
         freshness = slot_freshness(
             slot,
             now=evaluated,
@@ -762,9 +766,7 @@ def current_slots_prove_surveillance_opportunity(
             universe_ttl_seconds=universe_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         )
-        if freshness == FRESHNESS_EXPIRED:
-            continue
-        if stored_row_proves_surveillance_opportunity(slot.row):
+        if freshness != FRESHNESS_EXPIRED:
             return True
     return False
 

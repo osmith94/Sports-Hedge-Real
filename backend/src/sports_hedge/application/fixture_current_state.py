@@ -177,6 +177,7 @@ class FixtureCurrentStateStore:
         self._open_universe_generation_id: int | None = None
         self._universe_generation_closed_at_by_id: dict[int, datetime] = {}
         self._execution_miss_hot_until: dict[str, datetime] = {}
+        self._touched_ids: set[str] | None = None
 
     def clear(self, *, keep_tombstones: bool = False, keep_universe_generation: bool = False) -> None:
         with self._lock:
@@ -575,7 +576,6 @@ class FixtureCurrentStateStore:
             )
             rows: list[DiscoveredFixture] = []
             for record in list(self._rows.values()):
-                record.prune_markets(now, **market_kwargs)
                 fixture = record.status_fixture(now, **market_kwargs)
                 if fixture is None:
                     continue
@@ -821,7 +821,6 @@ class FixtureCurrentStateStore:
             self._evict_non_current(evaluated, **classify_kwargs, **market_kwargs)
             fixtures: list[DiscoveredFixture] = []
             for record in list(self._rows.values()):
-                record.prune_markets(evaluated, **market_kwargs)
                 lifecycle = record.lifecycle_fixture()
                 if lifecycle is None:
                     continue
@@ -896,6 +895,85 @@ class FixtureCurrentStateStore:
                     payload[canonical_id] = items
             return payload
 
+    def upsert_evaluated_fixture_counting_hot(
+        self,
+        fixture: DiscoveredFixture,
+        *,
+        now: datetime,
+        **upsert_kwargs: Any,
+    ) -> tuple[int, int]:
+        """``upsert_evaluated_fixture`` bracketed by exact unique-HOT unit counts.
+
+        Same result as ``membership_counts(now)[0]`` immediately before and after
+        the upsert. At one instant an upsert can only change the records it
+        touches, so the after-count reclassifies those and reuses the before pass
+        (in store order) for every other record.
+        """
+
+        with self._lock:
+            evaluated = require_aware_instant(now, "now")
+            kwargs = self._store_market_kwargs({})
+            classify_kwargs = _classify_kwargs(kwargs)
+            market_kwargs = _market_ttl_kwargs(kwargs)
+            self._evict_non_current(evaluated, **classify_kwargs, **market_kwargs)
+            before = {
+                canonical_id: self._hot_membership_fixture(
+                    record, evaluated, classify_kwargs, market_kwargs
+                )
+                for canonical_id, record in list(self._rows.items())
+            }
+            before_hot = len(
+                unique_hot_scheduling_ids([item for item in before.values() if item is not None])
+            )
+            self._touched_ids = set()
+            try:
+                self.upsert_evaluated_fixture(fixture, now=now, **upsert_kwargs)
+            finally:
+                touched, self._touched_ids = self._touched_ids, None
+            changed = {
+                canonical_id
+                for canonical_id in self._rows
+                if canonical_id in touched or canonical_id not in before
+            }
+            for canonical_id, record in list(self._rows.items()):
+                if canonical_id in changed:
+                    self._evict_record(
+                        canonical_id, record, evaluated, classify_kwargs, market_kwargs
+                    )
+            after: list[DiscoveredFixture] = []
+            for canonical_id, record in list(self._rows.items()):
+                item = (
+                    self._hot_membership_fixture(
+                        record, evaluated, classify_kwargs, market_kwargs
+                    )
+                    if canonical_id in changed
+                    else before[canonical_id]
+                )
+                if item is not None:
+                    after.append(item)
+            return before_hot, len(unique_hot_scheduling_ids(after))
+
+    def _hot_membership_fixture(
+        self,
+        record: _FixtureRecord,
+        now: datetime,
+        classify_kwargs: dict[str, Any],
+        market_kwargs: dict[str, Any],
+    ) -> DiscoveredFixture | None:
+        lifecycle = record.lifecycle_fixture()
+        if lifecycle is None:
+            return None
+        membership = self._identity_membership(
+            record,
+            lifecycle,
+            now,
+            classify_kwargs=classify_kwargs,
+            market_kwargs=market_kwargs,
+        )
+        if membership is not ScanLane.HOT:
+            return None
+        return record.status_fixture(now, **market_kwargs) or lifecycle
+
     def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:
         with self._lock:
             kwargs = self._store_market_kwargs(kwargs)
@@ -905,7 +983,6 @@ class FixtureCurrentStateStore:
             hot_fixtures: list[DiscoveredFixture] = []
             universe = 0
             for record in list(self._rows.values()):
-                record.prune_markets(now, **market_kwargs)
                 lifecycle = record.lifecycle_fixture()
                 if lifecycle is None:
                     continue
@@ -934,7 +1011,6 @@ class FixtureCurrentStateStore:
             lifecycle = 0
             promoted = 0
             for record in list(self._rows.values()):
-                record.prune_markets(now, **market_kwargs)
                 lifecycle_fixture = record.lifecycle_fixture()
                 if lifecycle_fixture is None:
                     continue
@@ -1162,6 +1238,7 @@ class FixtureCurrentStateStore:
 
         if source_id == target_id:
             return
+        self._note_touched(source_id, target_id)
         source = self._rows.get(source_id)
         target = self._rows.get(target_id)
         if source is None or target is None:
@@ -1189,7 +1266,12 @@ class FixtureCurrentStateStore:
         for alias in aliases:
             self._bind_alias(alias, target_id)
 
+    def _note_touched(self, *canonical_ids: str) -> None:
+        if self._touched_ids is not None:
+            self._touched_ids.update(canonical_ids)
+
     def _upsert_observation(self, canonical_id: str, observation: LaneObservation) -> None:
+        self._note_touched(canonical_id)
         record = self._rows.get(canonical_id)
         if record is None:
             record = _FixtureRecord()
@@ -1216,28 +1298,38 @@ class FixtureCurrentStateStore:
         market_kwargs = _market_ttl_kwargs(kwargs)
         evaluated = require_aware_instant(now, "now")
         for canonical_id, record in list(self._rows.items()):
-            record.prune_markets(evaluated, **market_kwargs)
-            fixture = record.lifecycle_fixture()
-            if fixture is None:
+            self._evict_record(canonical_id, record, evaluated, classify_kwargs, market_kwargs)
+
+    def _evict_record(
+        self,
+        canonical_id: str,
+        record: _FixtureRecord,
+        evaluated: datetime,
+        classify_kwargs: dict[str, Any],
+        market_kwargs: dict[str, Any],
+    ) -> None:
+        record.prune_markets(evaluated, **market_kwargs)
+        fixture = record.lifecycle_fixture()
+        if fixture is None:
+            self._drop_identity(canonical_id)
+            return
+        membership = classify_scan_lane(fixture, evaluated, **classify_kwargs)
+        if membership is ScanLane.DROP:
+            if is_explicit_terminal(fixture):
+                aliases = {
+                    alias
+                    for alias, target in self._aliases.items()
+                    if target == canonical_id
+                }
+                aliases.add(canonical_id)
+                self._record_tombstone(
+                    canonical_id,
+                    record.status_fixture(evaluated, **market_kwargs) or fixture,
+                    aliases=aliases,
+                    scanned_at=evaluated,
+                )
+            else:
                 self._drop_identity(canonical_id)
-                continue
-            membership = classify_scan_lane(fixture, evaluated, **classify_kwargs)
-            if membership is ScanLane.DROP:
-                if is_explicit_terminal(fixture):
-                    aliases = {
-                        alias
-                        for alias, target in self._aliases.items()
-                        if target == canonical_id
-                    }
-                    aliases.add(canonical_id)
-                    self._record_tombstone(
-                        canonical_id,
-                        record.status_fixture(evaluated, **market_kwargs) or fixture,
-                        aliases=aliases,
-                        scanned_at=evaluated,
-                    )
-                else:
-                    self._drop_identity(canonical_id)
 
     def _reject_or_tombstone_incoming(
         self,
@@ -1346,6 +1438,7 @@ class FixtureCurrentStateStore:
                 self._tombstone_aliases.pop(alias, None)
 
     def _drop_identity(self, canonical_id: str) -> None:
+        self._note_touched(canonical_id)
         self._rows.pop(canonical_id, None)
         for alias, target in list(self._aliases.items()):
             if target == canonical_id:
