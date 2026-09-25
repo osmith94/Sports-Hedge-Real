@@ -151,6 +151,8 @@ Before starting (and again after any rebuild) the controller inspects 8000 and 3
 
 Because the controller holds the single-instance mutex, a listener cannot be this session's own child, so there is no "reuse" path to confuse with an unrelated process. Health checks additionally require each listener to echo this controller's public per-launch session id, the current Git SHA, `mode=paper` and `execution_enabled=false`.
 
+Interface readiness (startup and runtime monitoring) is `GET /api/desktop/status` only: `desktop_controller=true`, this session id and the current Git SHA. The operator homepage `/` is not a health gate — it is expensive to render, so the controller enters Running, opens `/` in the browser and lets it load at its own pace. A dead interface process or a failing/mismatched status route still fails startup. `Start-SportsHedge-Demo.ps1` likewise gates on `/api/desktop/status` (2xx) and still opens `/`.
+
 ## Paper-only boundary
 
 Every child environment forces, after inheriting the operator's environment and overriding repo-root `.env`:

@@ -93,7 +93,13 @@ $BackendErr = Join-Path $Logs "demo-backend.err.log"
 $FrontendLog = Join-Path $Logs "demo-frontend.out.log"
 $FrontendErr = Join-Path $Logs "demo-frontend.err.log"
 $BackendHealth = "http://127.0.0.1:8000/health"
+# Occupancy probe for the PID-identity reuse/restart/conflict decision only.
+# Any HTTP listener answering on 3000 must be classified here, so it stays on
+# the root URL; it is not the startup readiness gate.
 $FrontendHealth = "http://127.0.0.1:3000"
+# Startup readiness gate: lightweight route, never the expensive operator
+# homepage. The homepage is opened in the browser and loads at its own pace.
+$FrontendReady = "http://127.0.0.1:3000/api/desktop/status"
 $DemoUrl = "http://127.0.0.1:3000/"
 
 try {
@@ -214,7 +220,7 @@ Invoke-DemoOwnedService -Label "frontend" -HealthUrl $FrontendHealth -PidFile $F
 }
 
 Wait-HttpOk -Url $BackendHealth -Label "Sports Hedge backend" | Out-Null
-Wait-HttpOk -Url $FrontendHealth -Label "Sports Hedge operator console" | Out-Null
+Wait-HttpOk -Url $FrontendReady -Label "Sports Hedge operator console" | Out-Null
 
 try {
     Start-Process $DemoUrl | Out-Null

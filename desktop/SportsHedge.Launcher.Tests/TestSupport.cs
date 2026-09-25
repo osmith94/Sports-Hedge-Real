@@ -131,7 +131,7 @@ public sealed class FakeHealth : IHealthProbe
     public Task<HealthResult> CheckBackendAsync(string expectedSha, string sessionId, CancellationToken cancellationToken) =>
         Task.FromResult(Backend());
 
-    public Task<HealthResult> CheckFrontendAsync(string expectedSha, string sessionId, bool includePage, CancellationToken cancellationToken) =>
+    public Task<HealthResult> CheckFrontendAsync(string expectedSha, string sessionId, CancellationToken cancellationToken) =>
         Task.FromResult(Frontend());
 }
 
@@ -450,7 +450,8 @@ public static class TestLayouts
 /// <summary>A controller wired entirely to fakes with fast timeouts.</summary>
 public sealed class Harness
 {
-    public Harness(bool markerMatches = true)
+    /// <param name="health">Replaces <see cref="FakeHealth"/> as the controller's probe (e.g. a real HttpHealthProbe on a stub server).</param>
+    public Harness(bool markerMatches = true, IHealthProbe? health = null)
     {
         Layout = TestLayouts.Create();
         Secrets = SessionSecrets.Create();
@@ -473,7 +474,7 @@ public sealed class Harness
         BackendShutdown.OnRequest = () => Launcher.Groups.GetValueOrDefault("backend")?.ExitNaturally(0);
         var specs = new ServiceSpecFactory(Layout, Secrets, new Dictionary<string, string>(), "npm");
         Controller = new SessionController(Layout, Secrets,
-            new SessionDependencies(Log, Git, Ports, Health, Launcher, Builder, BackendShutdown, Prereqs, specs, Ipc, OwnedProcesses),
+            new SessionDependencies(Log, Git, Ports, health ?? Health, Launcher, Builder, BackendShutdown, Prereqs, specs, Ipc, OwnedProcesses),
             Options);
     }
 

@@ -168,6 +168,12 @@ describe("desktop status route", () => {
     assert.equal(body.execution_enabled, false);
   });
 
+  it("answers 2xx without controller env so the PowerShell launcher can use it as its readiness gate", () => {
+    const response = handleDesktopStatus({});
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  });
+
   it("never exposes the controller secret or pipe path to the browser", async () => {
     process.env[CONTROLLER_PIPE_ENV] = ENV[CONTROLLER_PIPE_ENV];
     process.env[CONTROLLER_TOKEN_ENV] = TOKEN;

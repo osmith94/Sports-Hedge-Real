@@ -12,7 +12,12 @@ public sealed record HealthResult(bool Healthy, string Detail)
 public interface IHealthProbe
 {
     Task<HealthResult> CheckBackendAsync(string expectedSha, string sessionId, CancellationToken cancellationToken);
-    Task<HealthResult> CheckFrontendAsync(string expectedSha, string sessionId, bool includePage, CancellationToken cancellationToken);
+    /// <summary>
+    /// Readiness/identity of the interface via the lightweight /api/desktop/status
+    /// route only. The operator homepage "/" is deliberately not part of health:
+    /// it is expensive to render and loads in the browser at its own pace.
+    /// </summary>
+    Task<HealthResult> CheckFrontendAsync(string expectedSha, string sessionId, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -102,21 +107,32 @@ public static class HealthEvaluator
 
 public sealed class HttpHealthProbe : IHealthProbe, IDisposable
 {
+    public const string FrontendStatusPath = "/api/desktop/status";
+
     private readonly HttpClient _client;
+    private readonly string _backendBaseUrl;
+    private readonly string _frontendBaseUrl;
 
     public HttpHealthProbe()
+        : this(LauncherConstants.BackendBaseUrl, LauncherConstants.FrontendBaseUrl, TimeSpan.FromSeconds(5))
     {
+    }
+
+    internal HttpHealthProbe(string backendBaseUrl, string frontendBaseUrl, TimeSpan requestTimeout)
+    {
+        _backendBaseUrl = backendBaseUrl.TrimEnd('/');
+        _frontendBaseUrl = frontendBaseUrl.TrimEnd('/');
         // Loopback only; never route through a system proxy.
         _client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
         {
-            Timeout = TimeSpan.FromSeconds(5),
+            Timeout = requestTimeout,
         };
         _client.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoStore = true };
     }
 
     public async Task<HealthResult> CheckBackendAsync(string expectedSha, string sessionId, CancellationToken cancellationToken)
     {
-        var health = await GetAsync($"{LauncherConstants.BackendBaseUrl}/health", cancellationToken).ConfigureAwait(false);
+        var health = await GetAsync($"{_backendBaseUrl}/health", cancellationToken).ConfigureAwait(false);
         if (!health.Healthy)
         {
             return health;
@@ -126,24 +142,14 @@ public sealed class HttpHealthProbe : IHealthProbe, IDisposable
         {
             return verdict;
         }
-        var session = await GetAsync($"{LauncherConstants.BackendBaseUrl}/desktop/session", cancellationToken).ConfigureAwait(false);
+        var session = await GetAsync($"{_backendBaseUrl}/desktop/session", cancellationToken).ConfigureAwait(false);
         return session.Healthy ? HealthEvaluator.EvaluateBackendSession(session.Detail, sessionId) : session;
     }
 
-    public async Task<HealthResult> CheckFrontendAsync(string expectedSha, string sessionId, bool includePage, CancellationToken cancellationToken)
+    public async Task<HealthResult> CheckFrontendAsync(string expectedSha, string sessionId, CancellationToken cancellationToken)
     {
-        var status = await GetAsync($"{LauncherConstants.FrontendBaseUrl}/api/desktop/status", cancellationToken).ConfigureAwait(false);
-        if (!status.Healthy)
-        {
-            return status;
-        }
-        var verdict = HealthEvaluator.EvaluateFrontendStatus(status.Detail, expectedSha, sessionId);
-        if (!verdict.Healthy || !includePage)
-        {
-            return verdict;
-        }
-        var page = await GetAsync(LauncherConstants.AppUrl, cancellationToken).ConfigureAwait(false);
-        return page.Healthy ? HealthResult.Ok("interface serves / and desktop status") : page;
+        var status = await GetAsync($"{_frontendBaseUrl}{FrontendStatusPath}", cancellationToken).ConfigureAwait(false);
+        return status.Healthy ? HealthEvaluator.EvaluateFrontendStatus(status.Detail, expectedSha, sessionId) : status;
     }
 
     /// <summary>Healthy carries the body in Detail on success.</summary>
