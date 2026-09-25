@@ -167,6 +167,9 @@ function Invoke-DemoOwnedService {
     if ($action -eq "restart") {
         Write-Host "${Label}: restart required; recorded SHA $($identity.git_head) != current $($Git.sha)"
         Stop-DemoPid -PidFile $PidFile -Label $Label
+        # Stop-DemoPid returns early without a port wait if the owned PID has
+        # already exited; never start into a port something else still holds.
+        Wait-DemoPortGone -Port $Port -Label $Label
     }
     & $Starter
     if ($action -eq "restart") {

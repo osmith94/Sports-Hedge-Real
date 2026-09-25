@@ -44,7 +44,7 @@ OWNED_LIVE = {
 def _start(**overrides):
     payload = {
         "identity": OWNED_IDENTITY,
-        "health_ok": True,
+        "port_listening": True,
         "current_git_head": CURRENT_SHA,
         "current_repo_root": REPO,
         **OWNED_LIVE,
@@ -91,7 +91,7 @@ def test_stale_untrusted_pid_identity_is_not_killed() -> None:
     assert _start(identity={"pid": 4242}, **OWNED_LIVE) == "conflict"
 
 
-def test_unrelated_healthy_process_fails_clearly_rather_than_silently_reuse() -> None:
+def test_unrelated_listener_fails_clearly_rather_than_silently_reuse() -> None:
     action = _start(identity=None, live_pid=None, live_name=None, live_path=None, live_command_line=None)
     assert action == "conflict"
     assert start_action_allows_owned_stop(action) is False
@@ -106,8 +106,8 @@ def test_unrelated_healthy_process_fails_clearly_rather_than_silently_reuse() ->
     assert start_action_allows_owned_stop("conflict") is False
 
 
-def test_unhealthy_port_starts_without_kill() -> None:
-    assert _start(health_ok=False) == "start"
+def test_free_port_starts_without_kill() -> None:
+    assert _start(port_listening=False) == "start"
     assert start_action_allows_owned_stop("start") is False
 
 
@@ -159,8 +159,14 @@ def test_restart_path_stops_only_after_ownership_check() -> None:
     start_ps1 = (REPO_ROOT / "scripts/windows/Start-SportsHedge-Demo.ps1").read_text(encoding="utf-8")
     restart_index = start_ps1.index('$action -eq "restart"')
     assert start_ps1.index("Stop-DemoPid") > restart_index
-    assert "Wait-HttpGone" in start_ps1
-    assert "unexpected occupant" in start_ps1
+    # Port release after an owned stop is verified from the OS listener, not HTTP.
+    assert "Wait-HttpGone" not in start_ps1
+    assert start_ps1.index("Wait-DemoPortGone -Port $Port -Label $Label") > start_ps1.index(
+        "Stop-DemoPid -PidFile $PidFile -Label $Label"
+    )
+    assert "Wait-DemoPortGone -Port 3000 -Label $Label" in identity_ps1
+    assert "Wait-DemoPortGone -Port 8000 -Label $Label" in identity_ps1
+    assert "unexpected occupant" in identity_ps1
 
 
 def test_build_info_prefers_launcher_env_over_git() -> None:

@@ -8,11 +8,13 @@ The PowerShell start/stop launchers must apply the same rules:
   descendants discovered via ParentProcessId for the same checkout;
 - never broad-kill Node; unrelated processes are refused even if they share
   port 3000/8000;
-- reuse a healthy process only when that owned identity also records this
+- occupancy is whether the service port is LISTENING, never an HTTP probe;
+  HTTP readiness is checked separately after start/reuse;
+- reuse a listening process only when that owned identity also records this
   checkout's repo root and Git HEAD;
-- if the owned process is healthy on a different HEAD, restart it;
-- if a healthy port occupant is not this launcher's process, fail clearly
-  rather than silently reuse or kill it;
+- if the owned process is listening on a different HEAD, restart it;
+- if a port occupant is not this launcher's process, fail clearly rather than
+  silently reuse or kill it;
 - never delete frontend/.next while verified frontend descendants are alive
   or port 3000 is still listening.
 """
@@ -78,7 +80,7 @@ def decide_demo_stop_action(
 def decide_demo_start_action(
     identity: dict[str, Any] | None,
     *,
-    health_ok: bool,
+    port_listening: bool,
     current_git_head: str,
     current_repo_root: str,
     live_pid: int | None = None,
@@ -86,9 +88,9 @@ def decide_demo_start_action(
     live_path: str | None = None,
     live_command_line: str | None = None,
 ) -> StartAction:
-    """Return whether a healthy demo process may be reused, restarted, or refused."""
+    """Return whether a listening port occupant may be reused, restarted, or refused."""
 
-    if not health_ok:
+    if not port_listening:
         return "start"
     current_sha = (current_git_head or "").strip()
     current_root = _norm_root(current_repo_root)
@@ -139,7 +141,7 @@ def format_service_disposition(
     if action == "start":
         return f"{label}: started for SHA {current_sha}"
     return (
-        f"{label} is healthy but is not a Sports Hedge launcher process for this "
+        f"{label} port is already in use but is not a Sports Hedge launcher process for this "
         f"checkout (SHA {current_sha}). Refusing to reuse or kill the unrelated "
         "process occupying the port."
     )

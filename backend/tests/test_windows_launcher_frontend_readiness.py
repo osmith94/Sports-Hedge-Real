@@ -100,7 +100,10 @@ def test_powershell_unrelated_listener_is_refused_without_being_killed() -> None
     assert "Stop-DemoPid -PidFile $PidFile -Label $Label" in script
     assert "Stop-Process -Id" not in script
     restart_idx = script.index('if ($action -eq "restart") {')
-    assert script.index("Stop-DemoPid -PidFile $PidFile -Label $Label") > restart_idx
+    stop_idx = script.index("Stop-DemoPid -PidFile $PidFile -Label $Label")
+    assert stop_idx > restart_idx
+    assert script.index("Wait-DemoPortGone -Port $Port -Label $Label") > stop_idx
+    assert script.index("Wait-DemoPortGone -Port $Port -Label $Label") < script.index("& $Starter")
 
 
 def test_powershell_paper_enforcement_unchanged() -> None:
