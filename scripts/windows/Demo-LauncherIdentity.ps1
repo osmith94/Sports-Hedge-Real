@@ -330,7 +330,8 @@ function Test-DemoPortListening {
     }
     try {
         $escaped = [regex]::Escape([string]$Port)
-        $pattern = "[:.]$escaped\s+\S+\s+\S+\s+LISTENING"
+        # netstat -ano columns: Proto  Local  Foreign  State  PID
+        $pattern = "[:.]$escaped\s+\S+\s+LISTENING"
         $lines = @(netstat -ano | Select-String -Pattern $pattern)
         return ($lines.Count -gt 0)
     } catch {
