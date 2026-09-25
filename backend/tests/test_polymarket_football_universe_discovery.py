@@ -33,7 +33,7 @@ from sports_hedge.application.target_competitions import (
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.application.universe_checkpoint import series_work_key
-from sports_hedge.lifecycle.universe import SWEEP_FINAL_FAILED, SWEEP_RETRY_WAIT
+from sports_hedge.lifecycle.universe import SWEEP_FINAL_FAILED, SWEEP_PENDING, SWEEP_RETRY_WAIT
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.venues.polymarket import PolymarketClient
@@ -605,6 +605,7 @@ async def test_football_series_share_the_first_page_before_later_pages(monkeypat
     assert fa_row["raw_event_count"] == 100
     assert fa_row["stale_fixture_rejections"] == 100
     assert fa_row["status"] == "incomplete"
+    assert fa_row["next_page_index"] == 1
     assert fa_row["retryable"] is True
     assert fa_row["empty"] is False
     assert report.scan_diagnostics["canonical_work_set_authoritative"] is False
@@ -770,7 +771,7 @@ def test_pagination_cap_evidence_cannot_make_work_set_authoritative() -> None:
     assert healed[0]["status"] == "ok"
 
 
-def test_pagination_capped_series_is_terminal_for_the_generation_and_clear_resets() -> None:
+def test_pagination_capped_series_stays_unfinished_with_cursor_and_clear_resets() -> None:
     coordinator = LiveRefreshCoordinator()
     coordinator._universe_generation_id = 4
     coordinator._universe_generation_started_at = NOW
@@ -780,14 +781,20 @@ def test_pagination_capped_series_is_terminal_for_the_generation_and_clear_reset
         "reason": "pagination_cap_reached",
         "retryable": False,
         "event_count": 250,
+        "next_page_index": 5,
     }
     coordinator._apply_series_reports_unlocked({"polymarket": [capped]}, scanned=NOW)
     unit = coordinator._universe_series_work[series_work_key("polymarket", EPL)]
-    assert unit.state == SWEEP_FINAL_FAILED
-    assert unit.state != SWEEP_RETRY_WAIT
+    assert unit.state == SWEEP_PENDING
+    assert unit.state not in {SWEEP_FINAL_FAILED, SWEEP_RETRY_WAIT}
     assert unit.next_retry_at is None
+    assert unit.next_page_index == 5
     assert unit.reason == "pagination_cap_reached"
-    assert coordinator._due_retry_series_unlocked(NOW + timedelta(hours=6)) == {}
+    assert coordinator._universe_series_is_terminal_unlocked() is False
+    assert coordinator._universe_sweep_is_complete_unlocked() is False
+    due = coordinator._due_retry_series_unlocked(NOW)
+    assert due == {"polymarket": [EPL]}
+    assert coordinator._due_series_page_cursors_unlocked(due) == {"polymarket": {EPL: 5}}
     coordinator._universe_discovery_snapshot = {"polymarket": [{"id": "epl-0-0"}]}
     coordinator._universe_series_results = {"polymarket": [capped]}
     audit = coordinator.clear_universe_working_set(run_after=True)

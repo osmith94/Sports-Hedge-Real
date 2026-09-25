@@ -927,6 +927,7 @@ class ReadOnlyCrossVenueCollector:
         on_fixture_evaluated: Callable[..., Any] | None = None,
         on_canonical_work_set: Callable[..., Any] | None = None,
         retry_series: dict[str, list[str]] | None = None,
+        series_page_cursors: dict[str, dict[str, int]] | None = None,
         prior_series_results: dict[str, list[dict[str, Any]]] | None = None,
         polymarket_discovery_now: datetime | None = None,
         hot_market_relationships: dict[str, list[HotMarketRelationship]] | None = None,
@@ -1155,6 +1156,7 @@ class ReadOnlyCrossVenueCollector:
                             raw_polymarket_events,
                             raw_kalshi_events,
                             retry_series=retry_series,
+                            series_page_cursors=series_page_cursors,
                             enabled=enabled,
                             issues=issues,
                             venue_health=venue_health,
@@ -2187,6 +2189,7 @@ class ReadOnlyCrossVenueCollector:
         series_ids: list[str],
         issues: list[CollectorIssue],
         venue_health: dict[str, str],
+        start_pages: dict[str, int] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """One page from each football series before any series gets another.
 
@@ -2195,11 +2198,12 @@ class ReadOnlyCrossVenueCollector:
         previous per-series behaviour. The stale fixture horizon applies only
         to football fixture series.
 
-        A football series whose last allowed page is full ends as
-        ``pagination_capped``: its fixtures are kept, but more provider pages
-        may exist, so the work set is not authoritative. It is not retried in
-        the same generation because a retry would re-read the same capped
-        window.
+        A football series whose last page in this chunk is full ends as
+        ``pagination_capped`` with ``next_page_index``: its fixtures are kept,
+        more provider pages may exist, and the next chunk continues from that
+        cursor. ``start_pages`` carries those cursors when a resumed chunk
+        extends a snapshot that already holds the earlier pages. Each chunk
+        still reads at most the configured page cap per series.
         """
 
         venue = VenueName.POLYMARKET
@@ -2207,12 +2211,11 @@ class ReadOnlyCrossVenueCollector:
         seen: set[str] = set()
         extra: dict[str, Any] = {}
         page_limit, max_pages = _polymarket_page_bounds(client)
-        states = {
-            series_id: _FairSeriesState(
-                football=polymarket_series_is_football_fixture(series_id)
-            )
-            for series_id in series_ids
-        }
+        states = {}
+        for series_id in series_ids:
+            football = polymarket_series_is_football_fixture(series_id)
+            start = int((start_pages or {}).get(series_id) or 0) if football else 0
+            states[series_id] = _FairSeriesState(football=football, start_page=max(0, start))
         active = list(series_ids)
         series_results: list[dict[str, Any]] = []
 
@@ -2235,7 +2238,7 @@ class ReadOnlyCrossVenueCollector:
                     series_filters = dict(filters)
                     series_filters["series_id"] = series_id
                     if state.football:
-                        series_filters["discovery_page_index"] = page_index
+                        series_filters["discovery_page_index"] = state.start_page + page_index
                         series_filters["discovery_max_pages"] = 1
                     elif hasattr(client, "last_pages_attempted"):
                         client.last_pages_attempted = 0
@@ -2288,6 +2291,7 @@ class ReadOnlyCrossVenueCollector:
                         apply_football_horizon=state.football,
                     )
                     merge_discovery_stats(state.stats, stats)
+                    state.pages_read += 1
                     events.extend(retained_events)
                     # Non-football stays one whole-series read. Football continues
                     # only when this page was full, so later series get page 1 first.
@@ -2301,7 +2305,7 @@ class ReadOnlyCrossVenueCollector:
                 break
             else:
                 for series_id in active:
-                    states[series_id].cap(next_page_index=max_pages)
+                    states[series_id].cap()
         except asyncio.CancelledError:
             self._discovery_cancelled[venue.value] = True
             raise
@@ -2535,6 +2539,7 @@ class ReadOnlyCrossVenueCollector:
         raw_kalshi_events: list[dict[str, Any]],
         *,
         retry_series: dict[str, list[str]],
+        series_page_cursors: dict[str, dict[str, int]] | None = None,
         enabled: frozenset[VenueName],
         issues: list[CollectorIssue],
         venue_health: dict[str, str],
@@ -2554,14 +2559,24 @@ class ReadOnlyCrossVenueCollector:
             if venue not in enabled or not series_ids or clients[venue] is None:
                 continue
             previous_series = list(self._op_series_results.get(venue.value) or [])
-            events, _extra = await self._list_raw_events_by_series(
-                clients[venue],
-                venue=venue,
-                filters={},
-                series_ids=series_ids,
-                issues=issues,
-                venue_health=venue_health,
-            )
+            if venue is VenueName.POLYMARKET:
+                events, _extra = await self._list_polymarket_series_fair(
+                    clients[venue],
+                    filters={},
+                    series_ids=series_ids,
+                    issues=issues,
+                    venue_health=venue_health,
+                    start_pages=(series_page_cursors or {}).get(venue.value),
+                )
+            else:
+                events, _extra = await self._list_raw_events_by_series(
+                    clients[venue],
+                    venue=venue,
+                    filters={},
+                    series_ids=series_ids,
+                    issues=issues,
+                    venue_health=venue_health,
+                )
             incoming_series = list(self._op_series_results.get(venue.value) or [])
             self._op_series_results[venue.value] = _merge_series_rows(
                 previous_series, incoming_series
@@ -7080,16 +7095,27 @@ def _polymarket_series_ok_row(
 class _FairSeriesState:
     """Request-local progress for one Polymarket series in a fair sweep."""
 
-    def __init__(self, *, football: bool) -> None:
+    def __init__(self, *, football: bool, start_page: int = 0) -> None:
         self.football = football
+        self.start_page = start_page
         self.pages_attempted = 0
+        self.pages_read = 0
         self.http_attempted = False
         self.status = "ok"
         self.retryable = False
         self.reason: str | None = None
         self.finished = False
-        self.next_page_index: int | None = None
         self.stats = empty_discovery_stats()
+
+    @property
+    def next_page_index(self) -> int | None:
+        """First provider page not yet in the snapshot, for unfinished football."""
+
+        if not self.football or self.status == "ok":
+            return None
+        if self.start_page == 0 and self.pages_read == 0:
+            return None
+        return self.start_page + self.pages_read
 
     def record_request(self, client: Any) -> None:
         self.http_attempted = True
@@ -7105,9 +7131,8 @@ class _FairSeriesState:
         self.reason = reason
         self.retryable = retryable
 
-    def cap(self, *, next_page_index: int) -> None:
+    def cap(self) -> None:
         self.finish(SERIES_PAGINATION_CAPPED, reason=SERIES_PAGINATION_CAP_REASON)
-        self.next_page_index = next_page_index
 
     def defer(self) -> None:
         status = SERIES_NOT_STARTED if not self.http_attempted else SERIES_INCOMPLETE
@@ -7121,6 +7146,8 @@ class _FairSeriesState:
                 pages_attempted=self.pages_attempted,
             )
             row["pagination_cap_reached"] = False
+            if self.start_page:
+                row["start_page_index"] = self.start_page
             return row
         row = blank_series_row(
             series_id,
@@ -7139,6 +7166,8 @@ class _FairSeriesState:
         row["http_attempted"] = self.http_attempted
         row["pages_attempted"] = self.pages_attempted
         row["pagination_cap_reached"] = self.status == SERIES_PAGINATION_CAPPED
+        if self.start_page:
+            row["start_page_index"] = self.start_page
         if self.next_page_index is not None:
             row["next_page_index"] = self.next_page_index
         return row

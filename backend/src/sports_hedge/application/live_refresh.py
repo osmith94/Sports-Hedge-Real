@@ -410,6 +410,9 @@ class DualCadencePlan(BaseModel):
     discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
     reuse_discovery: bool = False
     retry_series: dict[str, list[str]] = Field(default_factory=dict)
+    # Continuation cursors apply only when the reused snapshot still holds the
+    # earlier pages. A fresh rediscovery reads each series from page 0.
+    series_page_cursors: dict[str, dict[str, int]] = Field(default_factory=dict)
     unbounded_cycle: bool = False
     sweep_id: str | None = None
     enabled_venues: list[VenueName] = Field(
@@ -2573,6 +2576,7 @@ class LiveRefreshCoordinator:
             sweep_id = self._universe_sweep_id
             universe_venues = list(self._pending_participation.venues_for(ScanLane.UNIVERSE))
             retry_series = self._due_retry_series_unlocked(evaluated)
+            series_page_cursors = self._due_series_page_cursors_unlocked(retry_series)
             run_now_pending = self._universe_run_now_pending
             generation_codes = list(self._universe_generation_selected_codes)
             generation_season_codes = list(self._universe_generation_selected_season_codes)
@@ -2622,6 +2626,7 @@ class LiveRefreshCoordinator:
             discovery_snapshot=snapshot,
             reuse_discovery=reuse,
             retry_series=retry_series,
+            series_page_cursors=series_page_cursors if reuse else {},
             unbounded_cycle=False,
             sweep_id=sweep_id,
             enabled_venues=universe_venues,
@@ -3869,6 +3874,7 @@ class LiveRefreshCoordinator:
                 unit.retryable = False
                 unit.reason = None
                 unit.next_retry_at = None
+                unit.next_page_index = None
                 unit.event_count = event_count
                 unit.last_attempted_at = scanned
                 self._universe_series_work[key] = unit
@@ -3884,10 +3890,20 @@ class LiveRefreshCoordinator:
             return
         unit.last_attempted_at = scanned
         unit.event_count = event_count
+        cursor = row.get("next_page_index")
+        if cursor is not None:
+            unit.next_page_index = max(0, int(cursor))
         if status == "ok":
             unit.state = SWEEP_OK
             unit.retryable = False
             unit.reason = None
+            unit.next_retry_at = None
+            unit.next_page_index = None
+        elif status == "pagination_capped":
+            # Unfinished, not failed: the next chunk continues from the cursor.
+            unit.state = SWEEP_PENDING
+            unit.retryable = False
+            unit.reason = reason or status
             unit.next_retry_at = None
         elif status in {"unsupported", "skipped_unsupported"}:
             unit.state = SWEEP_SKIPPED_UNSUPPORTED
@@ -3936,6 +3952,18 @@ class LiveRefreshCoordinator:
                 continue
             retry.setdefault(unit.venue, []).append(unit.series)
         return {key: value for key, value in retry.items() if value}
+
+    def _due_series_page_cursors_unlocked(
+        self, retry_series: dict[str, list[str]]
+    ) -> dict[str, dict[str, int]]:
+        cursors: dict[str, dict[str, int]] = {}
+        for venue, series_ids in retry_series.items():
+            for series in series_ids:
+                unit = self._universe_series_work.get(series_work_key(venue, series))
+                if unit is None or unit.next_page_index is None:
+                    continue
+                cursors.setdefault(venue, {})[series] = int(unit.next_page_index)
+        return cursors
 
     def _audit_universe_lifecycle(self, decision: LifecycleDecision) -> LifecycleDecision:
         return self._universe_lifecycle_audit.append(decision)

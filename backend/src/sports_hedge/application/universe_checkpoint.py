@@ -87,6 +87,8 @@ class SeriesWorkUnit(BaseModel):
     next_retry_at: datetime | None = None
     retryable: bool = False
     event_count: int = 0
+    # Provider page to continue from when this series ended on a full page.
+    next_page_index: int | None = None
 
 
 def series_work_key(venue: str, series: str) -> str:
