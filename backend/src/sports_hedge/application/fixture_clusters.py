@@ -156,6 +156,28 @@ def _kickoff_bucket(timestamp: float, window_seconds: float) -> int:
     return int(timestamp // window_seconds)
 
 
+def _record_bucket_window(sport: str, scheduled_window_seconds: float) -> float:
+    """Bucket width for one sport. Never narrower than that sport's matcher window."""
+
+    from sports_hedge.tennis.constants import (
+        TENNIS_SPORT,
+        TENNIS_SUPPORTING_KICKOFF_WINDOW_SECONDS,
+    )
+
+    scheduled = float(scheduled_window_seconds)
+    if sport == TENNIS_SPORT:
+        return max(scheduled, float(TENNIS_SUPPORTING_KICKOFF_WINDOW_SECONDS))
+    return scheduled
+
+
+def _pair_window_seconds(
+    left_sport: str, right_sport: str, scheduled_window_seconds: float
+) -> float:
+    if left_sport != right_sport:
+        return float(scheduled_window_seconds)
+    return _record_bucket_window(left_sport, scheduled_window_seconds)
+
+
 def _index_record(index: int, item: VenueEvent) -> _IndexRecord:
     canonical = item.canonical
     kickoff = canonical.kickoff_utc
@@ -260,9 +282,17 @@ def identity_name_block_overlap(left: VenueEvent, right: VenueEvent) -> bool:
 
 
 def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_seconds: float) -> bool:
+    """Cheap impossible-pair prune. Must not be stricter than EventMatcher.
+
+    ``window_seconds`` is the scheduled-team kickoff tolerance owned by the
+    matcher. Tennis uses its wider supporting window. MLB compares explicit
+    game ordinals, not the minute embedded in ``scheduled_game_key``.
+    """
+
     if left.sport != right.sport:
         return False
-    if abs(left.kickoff_ts - right.kickoff_ts) > window_seconds:
+    applicable = _pair_window_seconds(left.sport, right.sport, window_seconds)
+    if abs(left.kickoff_ts - right.kickoff_ts) > applicable:
         return False
     if (
         left.competition_code is not None
@@ -283,16 +313,21 @@ def _compatible_index_pair(left: _IndexRecord, right: _IndexRecord, *, window_se
     from sports_hedge.nfl.constants import NFL_SPORT
 
     if left.sport == MLB_SPORT or right.sport == MLB_SPORT:
-        return (
+        from sports_hedge.mlb.identity import mlb_scheduled_games_compatible
+
+        if not (
             left.sport == MLB_SPORT
             and right.sport == MLB_SPORT
             and bool(left.mlb_home)
             and bool(left.mlb_away)
             and left.mlb_home == right.mlb_home
             and left.mlb_away == right.mlb_away
-            and bool(left.scheduled_game_key)
-            and left.scheduled_game_key == right.scheduled_game_key
+        ):
+            return False
+        compatible, _reason = mlb_scheduled_games_compatible(
+            left.scheduled_game_key, right.scheduled_game_key
         )
+        return compatible
     if left.sport != NFL_SPORT and (
         left.squad_home != right.squad_home or left.squad_away != right.squad_away
     ):
@@ -383,7 +418,9 @@ class _IndexedCandidateBuilder:
         )
         self.by_sport_bucket: dict[tuple[str, int], list[_IndexRecord]] = defaultdict(list)
         for record in self.records:
-            bucket = _kickoff_bucket(record.kickoff_ts, window)
+            bucket = _kickoff_bucket(
+                record.kickoff_ts, _record_bucket_window(record.sport, window)
+            )
             self.by_sport_bucket_comp[(record.sport, bucket, record.competition_code)].append(record)
             self.by_sport_bucket[(record.sport, bucket)].append(record)
         self.seen: set[tuple[int, int]] = set()
@@ -540,7 +577,9 @@ class _IndexedCandidateBuilder:
         return True
 
     def _bucket_neighbours(self, record: _IndexRecord) -> Iterator[_IndexRecord]:
-        bucket = _kickoff_bucket(record.kickoff_ts, self.window)
+        bucket = _kickoff_bucket(
+            record.kickoff_ts, _record_bucket_window(record.sport, self.window)
+        )
         neighbour_buckets = (bucket - 1, bucket, bucket + 1)
         if record.competition_code is None:
             for neighbour in neighbour_buckets:
@@ -770,10 +809,13 @@ def build_indexed_candidates(
     """Correctness-preserving superset of EventMatcher-eligible pairs.
 
     Blocks on sport, known target competition, overlapping kickoff windows,
-    and squad-category compatibility. Unresolved competitions stay in a
-    fallback path that pairs against every same-sport window neighbour so
-    they are never dropped for speed. Kickoff buckets overlap by ±1 window
-    so a pair on a 5-minute boundary is not a false negative.
+    and squad-category compatibility. The window is the matcher's scheduled
+    tolerance, widened for tennis to the supporting 14-day window. Unresolved
+    competitions stay in a fallback path that pairs against every same-sport
+    window neighbour so they are never dropped for speed. Kickoff buckets
+    overlap by ±1 of that sport's window so a pair on a bucket boundary is
+    not a false negative. The index must retain every pair EventMatcher can
+    accept; it is not a second identity authority.
 
     When ``matcher`` exposes ``could_match``, index generation first builds
     the could-match graph and then keeps every compatible pair inside a

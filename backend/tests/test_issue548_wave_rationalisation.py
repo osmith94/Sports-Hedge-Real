@@ -137,7 +137,7 @@ def test_scope_and_matching_report_name_each_sport_rule() -> None:
     assert identity_rule_for_sport("football") == "football_participants_kickoff_5m"
     assert identity_rule_for_sport("american_football") == "nfl_curated_clubs_kickoff_5m"
     assert identity_rule_for_sport("basketball") == "basketball_curated_clubs_kickoff_5m"
-    assert identity_rule_for_sport("baseball") == "mlb_curated_clubs_minute_game_key"
+    assert identity_rule_for_sport("baseball") == "mlb_curated_clubs_ordinal_kickoff_5m"
     assert identity_rule_for_sport("tennis") == "tennis_player_pair_tour_tournament_round_14d"
 
 

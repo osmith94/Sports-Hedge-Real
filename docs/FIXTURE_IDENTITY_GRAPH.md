@@ -31,11 +31,20 @@ EventMatcher hard vetoes and thresholds stay authoritative. This layer does
 not change 0.92 / PAPER 0.80, kickoff tolerance, competition veto, squad
 category, NFL identity, aliases, or market-family equivalence.
 
-## Stage 1 — indexed candidates (unchanged)
+## Stage 1 — indexed candidates
 
 `build_indexed_candidates()` remains the fast first stage. Pair generation is
-still blocked on sport, known target competition, overlapping kickoff
-windows, and squad-category compatibility.
+blocked on sport, known target competition, the authoritative kickoff window,
+and squad-category compatibility.
+
+**Candidate-superset rule:** the index is an optimization only. It must retain
+every pair the authoritative `EventMatcher` could accept. It may drop
+impossible pairs. It must not drop a pair inside that matcher's sport-specific
+window because of a stricter key, including an MLB minute embedded in
+`scheduled_game_key`. Scheduled team sports use the inclusive five-minute
+tolerance. Tennis keeps its 14-day supporting window. MLB Game 1 versus Game 2
+stays a hard reject, and a one-sided ordinal stays fail-closed. The window
+does not by itself prove two events are the same fixture.
 
 ## Stage 2 — pairwise evidence
 

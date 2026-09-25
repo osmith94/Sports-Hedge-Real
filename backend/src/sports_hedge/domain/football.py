@@ -174,8 +174,10 @@ class CanonicalEvent(BaseModel):
     tournament: str = ""
     round_label: str = ""
     event_type: str = ""
-    # Scheduled game identity beyond team names. MLB doubleheaders set this
-    # from provider start plus an explicit game/header number when present.
+    # Scheduled game audit key. MLB stores a minute-precision start plus an
+    # explicit Game 1/Game 2 ordinal when the provider states one. The minute
+    # is not a second identity clock; EventMatcher kickoff tolerance and
+    # ordinal compatibility decide whether two listings are one game.
     # Absent means the provider did not prove which game this is.
     scheduled_game_key: str | None = None
 

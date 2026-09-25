@@ -95,13 +95,18 @@ class MarketMatcher:
                     provenance=event_result.provenance,
                 )
         elif is_mlb_canonical_event(left.event) or is_mlb_canonical_event(right.event):
+            from sports_hedge.mlb.identity import mlb_scheduled_games_compatible
+
+            games_compatible, _game_reason = mlb_scheduled_games_compatible(
+                left.event.scheduled_game_key,
+                right.event.scheduled_game_key,
+            )
             if not (
                 is_canonical_mlb_team(left.event.home_team)
                 and is_canonical_mlb_team(left.event.away_team)
                 and left.event.home_team == right.event.home_team
                 and left.event.away_team == right.event.away_team
-                and left.event.scheduled_game_key
-                and left.event.scheduled_game_key == right.event.scheduled_game_key
+                and games_compatible
             ):
                 return MarketMatchResult(
                     matched=False,

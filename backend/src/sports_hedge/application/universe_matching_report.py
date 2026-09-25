@@ -58,8 +58,10 @@ _HOW_TO_READ = (
         "normalized_identity.identity_rule names the sport's match rule. "
         "Football uses participant identity plus the 5-minute kickoff tolerance. "
         "NFL and basketball use curated clubs plus that tolerance. "
-        "MLB uses curated clubs plus a minute scheduled-game key; the 5-minute "
-        "tolerance does not replace a missing or unequal key. "
+        "MLB uses curated clubs, explicit doubleheader ordinals, and the same "
+        "inclusive 5-minute kickoff tolerance. A minute embedded in "
+        "scheduled_game_key does not override that window. A missing or "
+        "one-sided ordinal stays fail-closed. Game 1 never matches Game 2. "
         "Tennis uses an unordered player pair, tour, admitted tournament and round, "
         "with a 14-day supporting window. ATP/WTA coverage is Hangzhou, Chengdu, "
         "Singapore and Seoul only."
@@ -67,7 +69,7 @@ _HOW_TO_READ = (
     "provider_discovery_not_returned: no retained source event on that venue was linked, and raw discovery count is zero.",
     "competition_scope_rejected: a returned event was kept out of normalization by the competition/scope filter.",
     "normalization_rejected: a returned in-scope event failed normalization before clustering.",
-    "no_candidate_pair_generated: normalized events existed but the identity index did not emit a pair.",
+    "no_candidate_pair_generated: normalized events existed but the identity index did not emit a pair. For the same normalized teams inside the authoritative sport window this is an index correctness signal, not a different fixture.",
     "candidate_generated_not_scored: a candidate pair was indexed but not scored before the pass stopped.",
     "candidate_scored_and_rejected: EventMatcher scored the pair and did not accept it.",
     "eligible_assigned_elsewhere: a scored pair was eligible and graph assignment placed the other event in a different cluster.",
@@ -905,7 +907,7 @@ def identity_rule_for_sport(sport: str | None) -> str:
     if sport == "tennis":
         return "tennis_player_pair_tour_tournament_round_14d"
     if sport == "baseball":
-        return "mlb_curated_clubs_minute_game_key"
+        return "mlb_curated_clubs_ordinal_kickoff_5m"
     if sport == "american_football":
         return "nfl_curated_clubs_kickoff_5m"
     if sport == "basketball":

@@ -21,6 +21,14 @@ The architectural contract is:
 
 > **UNIVERSE catalogues. The price engine prices every ACTIVE catalogue row. HOT is a priority tier inside that engine. Execution decides.**
 
+### Candidate-superset rule
+
+Indexed candidate generation is an optimization only. It must retain every pair the authoritative `EventMatcher` could accept. Provider timestamp drift inside the authoritative sport-specific window must reach the matcher. An index must never become a stricter second identity authority.
+
+For scheduled team sports the default tolerance is the matcher's inclusive five-minute kickoff window. Sport-specific stronger discriminators remain authoritative: competition, participants, squad category, and MLB doubleheader ordinals. A minute embedded in an MLB `scheduled_game_key` does not override that window. Game 1 does not match Game 2. A one-sided MLB ordinal stays fail-closed.
+
+Tennis, and any other sport whose matcher uses a wider supporting-time window, keeps that wider window. Candidate generation must be at least as permissive as the matcher for that sport. The time window does not by itself establish that two events are the same fixture.
+
 UNIVERSE does **not** require executable books or solver/economics to finish a catalogue item. Pricing work is derived from the durable catalogue; it is not a second durable work-queue authority.
 
 ## Authoritative scanner operating model
