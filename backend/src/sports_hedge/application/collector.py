@@ -3667,6 +3667,7 @@ class ReadOnlyCrossVenueCollector:
                 polymarket_events=polymarket_events,
                 queried_series_ids=queried_series_ids,
             )
+        close_loop_slice()
         return (
             discovered,
             decisions,

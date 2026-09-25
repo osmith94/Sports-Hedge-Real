@@ -25,6 +25,7 @@ from sports_hedge.application.event_loop_activity import (
     LOOP_ACTIVITY,
     TimedRLock,
     close_loop_slice,
+    install_gc_pause_monitor,
     mark_loop_phase,
     sync_subphase,
 )
@@ -5613,6 +5614,7 @@ class LiveRefreshCoordinator:
         self.arm_startup_pricing_barrier()
         if self._hot_task is not None and not self._hot_task.done():
             return
+        install_gc_pause_monitor()
         self._stop = asyncio.Event()
         self._control = asyncio.Event()
         self._hot_task = asyncio.create_task(self._hot_loop(tick), name="hot-worker")

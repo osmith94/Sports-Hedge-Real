@@ -11,12 +11,14 @@ Windows probe.
 ``sync_subphase`` times one region that contains no await, so its elapsed time
 is a true synchronous stretch. ``TimedRLock`` reports how long the event-loop
 thread waited for a lock that API threadpool handlers also take; that wait
-blocks every coroutine exactly like CPU work does.
+blocks every coroutine exactly like CPU work does. ``install_gc_pause_monitor``
+records garbage-collection pauses on the loop thread for the same reason.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import threading
 import time
@@ -75,6 +77,8 @@ class LoopActivity:
         self.offloop_persistence: int = 0
         self.subphases: dict[tuple[str, str], SubphaseStat] = {}
         self.lock_waits: dict[str, SubphaseStat] = {}
+        self.gc_pauses: dict[str, SubphaseStat] = {}
+        self._gc_started: float | None = None
         self._slice_open = False
         self._slice_started = time.perf_counter()
 
@@ -176,6 +180,29 @@ class LoopActivity:
                 self.current.phase,
             )
 
+    def on_gc(self, phase: str, info: dict[str, object]) -> None:
+        """``gc.callbacks`` hook: a collection on the loop thread blocks every coroutine."""
+
+        if not _on_event_loop_thread():
+            return
+        if phase == "start":
+            self._gc_started = time.perf_counter()
+            return
+        started, self._gc_started = self._gc_started, None
+        if started is None:
+            return
+        elapsed = time.perf_counter() - started
+        generation = f"gen{info.get('generation', '?')}"
+        _accumulate(self.gc_pauses.setdefault(generation, SubphaseStat()), elapsed, 0, 0)
+        if elapsed >= STALL_LOG_SECONDS:
+            LOGGER.warning(
+                "event_loop_gc_pause generation=%s elapsed_ms=%s lane=%s phase=%s",
+                generation,
+                int(elapsed * 1000),
+                self.current.lane,
+                self.current.phase,
+            )
+
     def note_offloop_persistence(self) -> None:
         self.offloop_persistence += 1
 
@@ -198,6 +225,13 @@ def _accumulate(stat: SubphaseStat, elapsed_s: float, events: int, candidates: i
 
 
 LOOP_ACTIVITY = LoopActivity()
+
+
+def install_gc_pause_monitor() -> None:
+    """Record event-loop-thread GC pauses. Idempotent."""
+
+    if LOOP_ACTIVITY.on_gc not in gc.callbacks:
+        gc.callbacks.append(LOOP_ACTIVITY.on_gc)
 
 
 @contextmanager
@@ -311,6 +345,9 @@ def loop_subphase_snapshot() -> dict[str, object]:
         "lock_waits": {
             name: _stat_dict(stat) for name, stat in LOOP_ACTIVITY.lock_waits.items()
         },
+        "gc_pauses": {
+            name: _stat_dict(stat) for name, stat in LOOP_ACTIVITY.gc_pauses.items()
+        },
     }
 
 
@@ -360,6 +397,7 @@ def loop_activity_diagnostic_snapshot() -> dict[str, object]:
             "event_loop_current_open_sync_ms": LOOP_ACTIVITY.current_open_sync_ms(),
             "event_loop_worst_subphase": _worst_label(dict(LOOP_ACTIVITY.subphases)),
             "event_loop_worst_lock_wait": _worst_label(dict(LOOP_ACTIVITY.lock_waits)),
+            "event_loop_worst_gc_pause": _worst_label(dict(LOOP_ACTIVITY.gc_pauses)),
         }
     )
     return snapshot
