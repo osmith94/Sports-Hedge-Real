@@ -7,10 +7,10 @@
 # for the 16:15 UK window. Does not enable live execution, wallet signing, or
 # trading credentials.
 # Canonical local dotenv is repository-root .env. backend\.env is ignored.
-# Reuses a healthy backend/frontend only when the launcher-owned PID identity,
-# command, repo root, and Git HEAD match this checkout. A different HEAD
-# restarts that owned process. An unrelated occupant of 8000/3000 is refused
-# rather than killed.
+# Reuses a listening backend/frontend only when the launcher-owned PID identity,
+# command, repo root, and Git HEAD match this checkout. HTTP health/readiness is
+# checked separately after start/reuse. A different HEAD restarts that owned
+# process. An unrelated occupant of 8000/3000 is refused rather than killed.
 
 $ErrorActionPreference = "Stop"
 
@@ -62,21 +62,6 @@ function Wait-HttpOk {
     Show-StartupError "$Label did not become healthy at $Url within $Seconds seconds. Inspect logs under logs\."
 }
 
-function Wait-HttpGone {
-    param(
-        [string]$Url,
-        [int]$Seconds = 15,
-        [string]$Label
-    )
-    for ($i = 0; $i -lt $Seconds; $i++) {
-        if (-not (Test-HttpOk $Url)) {
-            return
-        }
-        Start-Sleep -Seconds 1
-    }
-    Show-StartupError "$Label is still healthy at $Url after stopping the launcher-owned process. Refusing to kill an unexpected occupant of the port."
-}
-
 $Root = Get-RepoRoot
 $Logs = Join-Path $Root "logs"
 if (-not (Test-Path $Logs)) {
@@ -93,10 +78,6 @@ $BackendErr = Join-Path $Logs "demo-backend.err.log"
 $FrontendLog = Join-Path $Logs "demo-frontend.out.log"
 $FrontendErr = Join-Path $Logs "demo-frontend.err.log"
 $BackendHealth = "http://127.0.0.1:8000/health"
-# Occupancy probe for the PID-identity reuse/restart/conflict decision only.
-# Any HTTP listener answering on 3000 must be classified here, so it stays on
-# the root URL; it is not the startup readiness gate.
-$FrontendHealth = "http://127.0.0.1:3000"
 # Startup readiness gate: lightweight route, never the expensive operator
 # homepage. The homepage is opened in the browser and loads at its own pace.
 $FrontendReady = "http://127.0.0.1:3000/api/desktop/status"
@@ -160,11 +141,13 @@ if (Test-Path $LegacyBackendDotEnv) {
 function Invoke-DemoOwnedService {
     param(
         [string]$Label,
-        [string]$HealthUrl,
+        [int]$Port,
         [string]$PidFile,
         [scriptblock]$Starter
     )
-    $healthOk = Test-HttpOk $HealthUrl
+    # Occupancy and identity are deliberately separate from HTTP readiness.
+    # A slow Sports Hedge page must never make an occupied port look empty.
+    $portListening = Test-DemoPortListening -Port $Port
     $identity = $null
     if (Test-Path $PidFile) {
         $identity = ConvertTo-DemoIdentity -Raw (Get-Content $PidFile -Raw -ErrorAction SilentlyContinue)
@@ -173,18 +156,17 @@ function Invoke-DemoOwnedService {
     if ($null -ne $identity -and $null -ne $identity.pid) {
         $live = Get-DemoLiveProcess -ProcId $identity.pid
     }
-    $action = Get-DemoStartAction -HealthOk $healthOk -Identity $identity -Live $live -CurrentGitHead $Git.sha -CurrentRepoRoot $Root
+    $action = Get-DemoStartAction -PortListening $portListening -Identity $identity -Live $live -CurrentGitHead $Git.sha -CurrentRepoRoot $Root
     if ($action -eq "reuse") {
         Write-Host "${Label}: reused existing Sports Hedge process for SHA $($Git.sha)"
         return
     }
     if ($action -eq "conflict") {
-        Show-StartupError "$Label is healthy at $HealthUrl but is not a Sports Hedge launcher process for this checkout (SHA $($Git.sha)). Refusing to reuse or kill the unrelated process occupying the port."
+        Show-StartupError "$Label port $Port is already in use but is not a Sports Hedge launcher process for this checkout (SHA $($Git.sha)). Refusing to reuse or kill the unrelated process occupying the port."
     }
     if ($action -eq "restart") {
         Write-Host "${Label}: restart required; recorded SHA $($identity.git_head) != current $($Git.sha)"
         Stop-DemoPid -PidFile $PidFile -Label $Label
-        Wait-HttpGone -Url $HealthUrl -Label $Label
     }
     & $Starter
     if ($action -eq "restart") {
@@ -194,7 +176,7 @@ function Invoke-DemoOwnedService {
     }
 }
 
-Invoke-DemoOwnedService -Label "backend" -HealthUrl $BackendHealth -PidFile $BackendPidFile -Starter {
+Invoke-DemoOwnedService -Label "backend" -Port 8000 -PidFile $BackendPidFile -Starter {
     $backend = Start-Process -FilePath $Python -ArgumentList @(
         "-m", "uvicorn", "sports_hedge.api.main:app",
         "--host", "127.0.0.1", "--port", "8000"
@@ -205,7 +187,7 @@ Invoke-DemoOwnedService -Label "backend" -HealthUrl $BackendHealth -PidFile $Bac
     ) -GitHead $Git.sha -RepoRoot $Root
 }
 
-Invoke-DemoOwnedService -Label "frontend" -HealthUrl $FrontendHealth -PidFile $FrontendPidFile -Starter {
+Invoke-DemoOwnedService -Label "frontend" -Port 3000 -PidFile $FrontendPidFile -Starter {
     $npmCmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if ($null -eq $npmCmd) {
         Show-StartupError "npm.cmd was not found on PATH. Install Node.js, then retry."
