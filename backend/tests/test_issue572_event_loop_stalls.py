@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import itertools
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -42,8 +43,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-
 from loop_liveness_harness import CallbackProfiler, HeartbeatProbe, RealisticUniverse
+
 from sports_hedge.application import fixture_current_state as current_state_module
 from sports_hedge.application.collector import (
     DEFAULT_PROVIDER_CONCURRENCY,
@@ -385,7 +386,6 @@ async def test_public_status_reads_sqlite_outside_the_coordinator_lock() -> None
     def slow_ledger_read(*_args, **_kwargs):
         held_during_reads.append(coordinator._state_lock.held_by_current_thread)
         time.sleep(read_s)
-        return None
 
     coordinator._active_trade_locked_gbp = slow_ledger_read  # type: ignore[method-assign]
     coordinator._recent_active_trade_timeline = lambda: (slow_ledger_read() or [])  # type: ignore[method-assign]
@@ -647,7 +647,7 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         stamps = [item[0] for item in during if item[1] == lane]
         assert len(stamps) >= 3, f"{lane} starved during UNIVERSE ({len(stamps)} runs)"
     active = [item[0] for item in during if item[1] == "active"]
-    worst_active_gap = max(b - a for a, b in zip(active, active[1:]))
+    worst_active_gap = max(b - a for a, b in itertools.pairwise(active))
     assert worst_active_gap < 0.1 + 2 * LIVENESS_BOUND_S, worst_active_gap
     end = universe_window["end"]
     assert any(item[1] == "background" and item[0] > end for item in trace), (

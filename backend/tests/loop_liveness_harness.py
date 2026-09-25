@@ -30,7 +30,7 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Self
 
 from sports_hedge.domain.models import VenueHealth, VenueName
 
@@ -62,10 +62,11 @@ class CallbackProfile:
         return [item for item in self.slow if item.elapsed_s >= bound_s]
 
     def report(self, *, top: int = 12) -> str:
-        lines = [
+        header = (
             f"callbacks={self.callbacks} busy_s={self.total_s:.3f} "
             f"longest_ms={int(self.longest_s * 1000)}"
-        ]
+        )
+        lines = [header]
         for item in sorted(self.slow, key=lambda s: s.elapsed_s, reverse=True)[:top]:
             lines.append(
                 f"  {int(item.elapsed_s * 1000):>6}ms (gc {int(item.gc_s * 1000)}ms) "
@@ -121,7 +122,7 @@ class CallbackProfiler:
             self._gc_total_s += time.perf_counter() - self._gc_started
             self._gc_started = None
 
-    def __enter__(self) -> CallbackProfiler:
+    def __enter__(self) -> Self:
         from sports_hedge.application.event_loop_activity import LOOP_ACTIVITY
 
         self._loop_thread = threading.get_ident()
