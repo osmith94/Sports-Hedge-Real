@@ -10,6 +10,21 @@ It is ``cross_venue_unavailable`` / ``no_cross_venue_candidate`` — honest
 current-state, not ``finished`` from elapsed time.
 
 Process-memory only. PAPER / read-only. No provider writes.
+
+Evidence scope is not widened. A market 404 or a closed market payload
+invalidates that native market only. Provider timeout, rate limit, and
+auth failure are provider health, not fixture unavailability. Unknown
+work stays unknown.
+
+Fixture-level event authority is venue-specific. Matchbook lists one
+physical event for the canonical fixture, so a terminal Matchbook event
+may block canonical fixture + Matchbook. Kalshi represents that fixture
+through sibling family events (GAME, BTTS, TOTAL, FTTS, and US sibling
+series). Polymarket is not fixture-level authority either: football
+clusters attach multiple Gamma events to one fixture, and a US-sports
+Gamma event that holds many child markets is still one source event, not
+proof it is the only Polymarket event for the physical fixture. A
+terminal family or source event blocks only that source event.
 """
 
 from __future__ import annotations
@@ -53,15 +68,78 @@ class ViabilityAssessment:
         return len(self.viable_venues)
 
 
+EVIDENCE_SCOPE_EVENT = "event"
+EVIDENCE_SCOPE_SOURCE_EVENT = "source_event"
+EVIDENCE_SCOPE_MARKET = "market"
+EVIDENCE_SCOPE_PROVIDER = "provider"
+EVENT_TERMINAL_REASON = "event_terminal"
+EVENT_CURRENT_REASON = "event_current"
+EVENT_UNAVAILABLE_REASON = "event_unavailable"
+SOURCE_EVENT_TERMINAL_REASON = "source_event_terminal"
+SOURCE_EVENT_CURRENT_REASON = "source_event_current"
+MARKET_GONE_REASON = "market_gone"
+MARKET_TERMINAL_REASON = "market_terminal"
+
+# Matchbook markets hang off one physical event id. Kalshi and Polymarket
+# source events are family listings unless a future explicit fixture-level
+# authority flag says otherwise. See ``provider_event_has_fixture_authority``.
+FIXTURE_LEVEL_EVENT_VENUES = frozenset({VenueName.MATCHBOOK})
+
+
+@dataclass(frozen=True)
+class VenueEvidence:
+    """Event-scoped venue observation. Market failures do not belong here."""
+
+    state: VenueViability
+    scope: str = EVIDENCE_SCOPE_EVENT
+    reason: str = ""
+    source_event_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceEventEvidence:
+    """One provider source event or family. Not the physical fixture."""
+
+    state: VenueViability
+    source_event_id: str
+    scope: str = EVIDENCE_SCOPE_SOURCE_EVENT
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class MarketEvidence:
+    """One native market. A 404 here must not block sibling markets."""
+
+    state: VenueViability
+    native_market_id: str
+    scope: str = EVIDENCE_SCOPE_MARKET
+    reason: str = ""
+
+
 @dataclass
 class OpportunityViabilityCache:
-    """Remember explicit venue terminal/unavailable observations.
+    """Process-memory viability evidence with an explicit scope boundary.
 
-    Keyed by canonical fixture id. A later non-terminal observation restores
-    that venue. Operator Clear & update / engine restart discards the cache.
+    Fixture-level event state is keyed by canonical fixture + venue and may
+    be written only for venues with fixture-level event authority
+    (Matchbook). Kalshi and Polymarket terminal or current observations are
+    keyed by canonical fixture + venue + source event id. A later
+    non-terminal observation of that same source event restores it. An open
+    sibling does not widen into fixture-level viability, and a closed
+    sibling does not write fixture-level terminal. Market 404/closed state
+    is keyed by canonical fixture + venue + native market id. Provider
+    failures are recorded separately and never mark a fixture unavailable.
+    A later successful provider call clears the stale provider issue.
+
+    Operator Clear & update / engine restart discards the cache.
     """
 
-    _venues: dict[str, dict[VenueName, VenueViability]] = field(default_factory=dict)
+    _venues: dict[str, dict[VenueName, VenueEvidence]] = field(default_factory=dict)
+    _source_events: dict[tuple[str, VenueName, str], SourceEventEvidence] = field(
+        default_factory=dict
+    )
+    _markets: dict[tuple[str, VenueName, str], MarketEvidence] = field(default_factory=dict)
+    _provider_issues: dict[VenueName, str] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
 
     def mark(
@@ -69,24 +147,218 @@ class OpportunityViabilityCache:
         canonical_event_id: str,
         venue: VenueName,
         state: VenueViability,
+        *,
+        reason: str | None = None,
+        source_event_id: str | None = None,
     ) -> None:
+        """Record event-level venue evidence. Does not touch market records."""
+
+        ident = str(canonical_event_id or "").strip()
+        if not ident:
+            return
+        resolved_reason = reason
+        if not resolved_reason:
+            if state is VenueViability.TERMINAL:
+                resolved_reason = EVENT_TERMINAL_REASON
+            elif state is VenueViability.UNAVAILABLE:
+                resolved_reason = EVENT_UNAVAILABLE_REASON
+            else:
+                resolved_reason = EVENT_CURRENT_REASON
+        source = str(source_event_id or "").strip() or None
+        with self._lock:
+            row = self._venues.setdefault(ident, {})
+            row[venue] = VenueEvidence(
+                state=state,
+                reason=resolved_reason,
+                source_event_id=source,
+            )
+
+    def mark_terminal(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        *,
+        reason: str = EVENT_TERMINAL_REASON,
+        source_event_id: str | None = None,
+    ) -> None:
+        self.mark(
+            canonical_event_id,
+            venue,
+            VenueViability.TERMINAL,
+            reason=reason,
+            source_event_id=source_event_id,
+        )
+
+    def mark_unavailable(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        *,
+        reason: str = EVENT_UNAVAILABLE_REASON,
+        source_event_id: str | None = None,
+    ) -> None:
+        """Event-level absence only. A market 404 must use ``mark_market_unavailable``."""
+
+        self.mark(
+            canonical_event_id,
+            venue,
+            VenueViability.UNAVAILABLE,
+            reason=reason,
+            source_event_id=source_event_id,
+        )
+
+    def mark_viable(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        *,
+        reason: str = EVENT_CURRENT_REASON,
+        source_event_id: str | None = None,
+    ) -> None:
+        """Restore event-level viability. Market-level gone rows stay gone."""
+
+        self.mark(
+            canonical_event_id,
+            venue,
+            VenueViability.VIABLE,
+            reason=reason,
+            source_event_id=source_event_id,
+        )
+
+    def mark_market_unavailable(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        native_market_id: str,
+        *,
+        reason: str = MARKET_GONE_REASON,
+    ) -> None:
+        self._mark_market(
+            canonical_event_id,
+            venue,
+            native_market_id,
+            VenueViability.UNAVAILABLE,
+            reason=reason,
+        )
+
+    def mark_market_terminal(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        native_market_id: str,
+        *,
+        reason: str = MARKET_TERMINAL_REASON,
+    ) -> None:
+        self._mark_market(
+            canonical_event_id,
+            venue,
+            native_market_id,
+            VenueViability.TERMINAL,
+            reason=reason,
+        )
+
+    def clear_market(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        native_market_id: str,
+    ) -> None:
+        ident = str(canonical_event_id or "").strip()
+        market_id = str(native_market_id or "").strip()
+        if not ident or not market_id:
+            return
+        with self._lock:
+            self._markets.pop((ident, venue, market_id), None)
+
+    def mark_source_event(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        source_event_id: str,
+        state: VenueViability,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """Record one provider family/source event. Does not touch fixture state."""
+
+        ident = str(canonical_event_id or "").strip()
+        source = str(source_event_id or "").strip()
+        if not ident or not source:
+            return
+        resolved_reason = reason
+        if not resolved_reason:
+            resolved_reason = (
+                SOURCE_EVENT_TERMINAL_REASON
+                if state is VenueViability.TERMINAL
+                else SOURCE_EVENT_CURRENT_REASON
+            )
+        with self._lock:
+            self._source_events[(ident, venue, source)] = SourceEventEvidence(
+                state=state,
+                source_event_id=source,
+                reason=resolved_reason,
+            )
+
+    def clear_event(self, canonical_event_id: str, venue: VenueName) -> None:
+        """Drop fixture-level venue evidence. Market and source-event rows stay."""
+
         ident = str(canonical_event_id or "").strip()
         if not ident:
             return
         with self._lock:
-            row = self._venues.setdefault(ident, {})
-            row[venue] = state
+            row = self._venues.get(ident)
+            if not row:
+                return
+            row.pop(venue, None)
+            if not row:
+                self._venues.pop(ident, None)
 
-    def mark_terminal(self, canonical_event_id: str, venue: VenueName) -> None:
-        self.mark(canonical_event_id, venue, VenueViability.TERMINAL)
+    def note_provider_issue(self, venue: VenueName, reason: str) -> None:
+        """Provider health only. Does not change fixture or market viability."""
 
-    def mark_unavailable(self, canonical_event_id: str, venue: VenueName) -> None:
-        self.mark(canonical_event_id, venue, VenueViability.UNAVAILABLE)
+        text = str(reason or "").strip() or "provider_issue"
+        with self._lock:
+            self._provider_issues[venue] = text
 
-    def mark_viable(self, canonical_event_id: str, venue: VenueName) -> None:
-        self.mark(canonical_event_id, venue, VenueViability.VIABLE)
+    def clear_provider_issue(self, venue: VenueName) -> None:
+        """A successful provider call retires the stale health diagnostic."""
+
+        with self._lock:
+            self._provider_issues.pop(venue, None)
+
+    def provider_issue(self, venue: VenueName) -> str | None:
+        with self._lock:
+            return self._provider_issues.get(venue)
+
+    def _mark_market(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        native_market_id: str,
+        state: VenueViability,
+        *,
+        reason: str,
+    ) -> None:
+        ident = str(canonical_event_id or "").strip()
+        market_id = str(native_market_id or "").strip()
+        if not ident or not market_id:
+            return
+        with self._lock:
+            self._markets[(ident, venue, market_id)] = MarketEvidence(
+                state=state,
+                native_market_id=market_id,
+                reason=reason,
+            )
 
     def state(self, canonical_event_id: str, venue: VenueName) -> VenueViability | None:
+        evidence = self.event_evidence(canonical_event_id, venue)
+        if evidence is None:
+            return None
+        return evidence.state
+
+    def event_evidence(
+        self, canonical_event_id: str, venue: VenueName
+    ) -> VenueEvidence | None:
         ident = str(canonical_event_id or "").strip()
         if not ident:
             return None
@@ -94,13 +366,91 @@ class OpportunityViabilityCache:
             row = self._venues.get(ident) or {}
             return row.get(venue)
 
+    def source_event_evidence(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        source_event_id: str,
+    ) -> SourceEventEvidence | None:
+        ident = str(canonical_event_id or "").strip()
+        source = str(source_event_id or "").strip()
+        if not ident or not source:
+            return None
+        with self._lock:
+            return self._source_events.get((ident, venue, source))
+
+    def source_event_is_blocked(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        source_event_id: str,
+    ) -> bool:
+        evidence = self.source_event_evidence(canonical_event_id, venue, source_event_id)
+        if evidence is None:
+            return False
+        return evidence.state in {VenueViability.TERMINAL, VenueViability.UNAVAILABLE}
+
+    def source_event_records_for(
+        self, canonical_event_id: str
+    ) -> tuple[tuple[VenueName, SourceEventEvidence], ...]:
+        ident = str(canonical_event_id or "").strip()
+        if not ident:
+            return ()
+        with self._lock:
+            rows = [
+                (venue, item)
+                for (event_id, venue, _source_id), item in self._source_events.items()
+                if event_id == ident
+            ]
+        return tuple(rows)
+
+    def market_state(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        native_market_id: str,
+    ) -> VenueViability | None:
+        ident = str(canonical_event_id or "").strip()
+        market_id = str(native_market_id or "").strip()
+        if not ident or not market_id:
+            return None
+        with self._lock:
+            evidence = self._markets.get((ident, venue, market_id))
+            return None if evidence is None else evidence.state
+
     def is_blocked(self, canonical_event_id: str, venue: VenueName) -> bool:
         current = self.state(canonical_event_id, venue)
         return current in {VenueViability.TERMINAL, VenueViability.UNAVAILABLE}
 
+    def market_is_blocked(
+        self,
+        canonical_event_id: str,
+        venue: VenueName,
+        native_market_id: str,
+    ) -> bool:
+        current = self.market_state(canonical_event_id, venue, native_market_id)
+        return current in {VenueViability.TERMINAL, VenueViability.UNAVAILABLE}
+
+    def market_records_for(
+        self, canonical_event_id: str
+    ) -> tuple[tuple[VenueName, MarketEvidence], ...]:
+        ident = str(canonical_event_id or "").strip()
+        if not ident:
+            return ()
+        with self._lock:
+            rows = [
+                (venue, item)
+                for (event_id, venue, _market_id), item in self._markets.items()
+                if event_id == ident
+            ]
+        return tuple(rows)
+
     def clear(self) -> None:
         with self._lock:
             self._venues.clear()
+            self._source_events.clear()
+            self._markets.clear()
+            self._provider_issues.clear()
 
 
 _CACHE = OpportunityViabilityCache()
@@ -123,27 +473,91 @@ def raw_status_is_terminal(raw: Any) -> bool:
     return status in TERMINAL_STATUSES
 
 
+def provider_event_has_fixture_authority(venue: VenueName) -> bool:
+    """True only when this provider event is the physical canonical fixture.
+
+    Matchbook: one event id owns the fixture's markets. A terminal Matchbook
+    event may persist at canonical fixture + Matchbook.
+
+    Kalshi: GAME, BTTS, TOTAL, FTTS, and US spread/total series are sibling
+    event tickers. One closed family is not fixture-wide Kalshi terminal.
+
+    Polymarket audit: not fixture-level authority. ``FixtureCluster``
+    documents that Polymarket, like Kalshi, often splits one fixture into
+    separate Gamma events (moneyline, BTTS, totals). NFL/NBA/NCAAB censuses
+    also show the other shape — many child markets on a single Gamma event —
+    but that event is still one source event. The cache has no flag proving
+    it is the only Polymarket listing for the physical fixture, and football
+    clusters do attach multiple Polymarket events. Terminal Polymarket state
+    therefore persists at source-event scope only.
+    """
+
+    return venue in FIXTURE_LEVEL_EVENT_VENUES
+
+
 def venue_event_is_currently_viable(
     event: Any,
     *,
     canonical_event_id: str,
     cache: OpportunityViabilityCache | None = None,
 ) -> bool:
-    """True when this listing can still participate in a cross-venue arb."""
+    """True when this listing can still participate in a cross-venue arb.
+
+    The return value is about this source event. Persistence follows
+    ``provider_event_has_fixture_authority``. A family event never writes
+    canonical fixture + venue.
+    """
 
     if event is None:
         return False
     venue = getattr(event, "venue", None)
     store = cache if cache is not None else get_opportunity_viability_cache()
-    if venue is not None and store.is_blocked(canonical_event_id, venue):
-        return False
     raw = getattr(event, "raw", None)
+    source_event_id = str(getattr(event, "source_event_id", "") or "").strip() or None
+    terminal = raw_status_is_terminal(raw)
     if venue is VenueName.MATCHBOOK and isinstance(raw, dict):
-        state = matchbook_fixture_state(raw)
-        if state.venue_status in TERMINAL_STATUSES:
+        observed = matchbook_fixture_state(raw)
+        if observed.venue_status in TERMINAL_STATUSES:
+            terminal = True
+    if venue is None:
+        return not terminal
+    if provider_event_has_fixture_authority(venue):
+        if terminal:
+            store.mark_terminal(
+                canonical_event_id,
+                venue,
+                reason=EVENT_TERMINAL_REASON,
+                source_event_id=source_event_id,
+            )
             return False
-    if raw_status_is_terminal(raw):
+        store.mark_viable(
+            canonical_event_id,
+            venue,
+            reason=EVENT_CURRENT_REASON,
+            source_event_id=source_event_id,
+        )
+        return True
+    # Family/source evidence only. Drop any fixture-wide row for this venue
+    # so a sibling cannot leave canonical fixture + venue terminal behind.
+    store.clear_event(canonical_event_id, venue)
+    if not source_event_id:
+        return not terminal
+    if terminal:
+        store.mark_source_event(
+            canonical_event_id,
+            venue,
+            source_event_id,
+            VenueViability.TERMINAL,
+            reason=SOURCE_EVENT_TERMINAL_REASON,
+        )
         return False
+    store.mark_source_event(
+        canonical_event_id,
+        venue,
+        source_event_id,
+        VenueViability.VIABLE,
+        reason=SOURCE_EVENT_CURRENT_REASON,
+    )
     return True
 
 
@@ -169,6 +583,133 @@ def currently_viable_venues(
         ):
             present.append(venue)
     return tuple(present)
+
+
+def identity_market_ids(identity: Any, venue: VenueName) -> tuple[str, ...]:
+    """Native market ids that belong to one catalogue relationship."""
+
+    if venue is VenueName.MATCHBOOK:
+        market_id = getattr(identity, "matchbook_market_id", None)
+        return (str(market_id),) if market_id else ()
+    if venue is VenueName.KALSHI:
+        tickers = list(getattr(identity, "kalshi_market_tickers", None) or [])
+        return tuple(str(item) for item in tickers if str(item).strip())
+    if venue is VenueName.POLYMARKET:
+        market_id = getattr(identity, "polymarket_market_id", None)
+        return (str(market_id),) if market_id else ()
+    return ()
+
+
+def identity_source_event_id(identity: Any, venue: VenueName) -> str | None:
+    """Provider source event that owns this catalogue relationship."""
+
+    if venue is VenueName.MATCHBOOK:
+        value = getattr(identity, "matchbook_event_id", None)
+    elif venue is VenueName.KALSHI:
+        value = getattr(identity, "kalshi_event_ticker", None)
+    elif venue is VenueName.POLYMARKET:
+        value = getattr(identity, "polymarket_event_id", None)
+    else:
+        return None
+    text = str(value or "").strip()
+    return text or None
+
+
+def venue_blocked_for_identity(
+    cache: OpportunityViabilityCache,
+    canonical_event_id: str,
+    venue: VenueName,
+    identity: Any,
+) -> bool:
+    """Fixture block rejects the venue. A family or market block rejects that row."""
+
+    if cache.is_blocked(canonical_event_id, venue):
+        return True
+    source_event_id = identity_source_event_id(identity, venue)
+    if source_event_id and cache.source_event_is_blocked(
+        canonical_event_id, venue, source_event_id
+    ):
+        return True
+    return any(
+        cache.market_is_blocked(canonical_event_id, venue, market_id)
+        for market_id in identity_market_ids(identity, venue)
+    )
+
+
+def build_viability_evidence(
+    canonical_event_id: str,
+    *,
+    cache: OpportunityViabilityCache | None = None,
+    venues_present: list[str] | None = None,
+    final_reason: str | None = None,
+    discovered_archetypes: list[str] | None = None,
+    attempted_relationships: list[str] | None = None,
+    registered_relationships: list[str] | None = None,
+    structural_rejections: list[str] | None = None,
+) -> dict[str, Any]:
+    """Operator diagnostic. Distinguishes event, market, and provider evidence."""
+
+    store = cache if cache is not None else get_opportunity_viability_cache()
+    ident = str(canonical_event_id or "").strip()
+    event_viability: dict[str, dict[str, Any]] = {}
+    for venue in (VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET):
+        evidence = store.event_evidence(ident, venue)
+        if evidence is None:
+            event_viability[venue.value] = {
+                "state": "unknown",
+                "evidence_scope": EVIDENCE_SCOPE_EVENT,
+                "evidence_reason": None,
+                "source_event_id": None,
+            }
+            continue
+        event_viability[venue.value] = {
+            "state": evidence.state.value,
+            "evidence_scope": evidence.scope,
+            "evidence_reason": evidence.reason,
+            "source_event_id": evidence.source_event_id,
+        }
+    source_events = []
+    for venue, evidence in store.source_event_records_for(ident):
+        source_events.append(
+            {
+                "venue": venue.value,
+                "source_event_id": evidence.source_event_id,
+                "state": evidence.state.value,
+                "evidence_scope": evidence.scope,
+                "evidence_reason": evidence.reason,
+            }
+        )
+    source_events.sort(key=lambda item: (item["venue"], item["source_event_id"]))
+    gone = []
+    for venue, evidence in store.market_records_for(ident):
+        gone.append(
+            {
+                "venue": venue.value,
+                "native_market_id": evidence.native_market_id,
+                "state": evidence.state.value,
+                "evidence_scope": evidence.scope,
+                "evidence_reason": evidence.reason,
+            }
+        )
+    gone.sort(key=lambda item: (item["venue"], item["native_market_id"]))
+    provider = {
+        venue.value: store.provider_issue(venue)
+        for venue in (VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET)
+        if store.provider_issue(venue)
+    }
+    return {
+        "canonical_event_id": ident,
+        "venues_present": list(venues_present or []),
+        "event_viability": event_viability,
+        "source_event_viability": source_events,
+        "market_gone": gone,
+        "provider_issues": provider,
+        "discovered_archetypes": list(discovered_archetypes or []),
+        "attempted_relationships": list(attempted_relationships or []),
+        "registered_relationships": list(registered_relationships or []),
+        "structural_rejections": list(structural_rejections or []),
+        "final_reason": final_reason,
+    }
 
 
 def catalogue_ready_venues(identity: Any) -> tuple[VenueName, ...]:
@@ -203,7 +744,11 @@ def assess_identity_viability(
     override = bool(active_trade_lane) or canonical_id in (active_event_ids or frozenset())
     store = cache if cache is not None else get_opportunity_viability_cache()
     ready = catalogue_ready_venues(identity)
-    viable = tuple(venue for venue in ready if not store.is_blocked(canonical_id, venue))
+    viable = tuple(
+        venue
+        for venue in ready
+        if not venue_blocked_for_identity(store, canonical_id, venue, identity)
+    )
     if override:
         return ViabilityAssessment(
             viable_venues=viable,

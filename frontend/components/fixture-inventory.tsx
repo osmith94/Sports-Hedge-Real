@@ -6,6 +6,7 @@ import {
   kickoffClockLabel,
   marketEvaluationLabel,
   marketEvaluationUnevaluated,
+  viabilityEvidenceSummary,
 } from "../lib/discovered-fixture-display";
 import {
   KalshiFixtureMarketInventoryRow,
@@ -74,6 +75,11 @@ export function FixtureInventoryWorkspace({
           : ""}
         .
       </p>
+      {viabilityEvidenceSummary(fixture.viability_evidence) ? (
+        <p className="section-copy">
+          Viability evidence: {viabilityEvidenceSummary(fixture.viability_evidence)}
+        </p>
+      ) : null}
       {fixtureCoverageRows(fixture).length ? (
         <ul className="catalogue-coverage-list">
           {fixtureCoverageRows(fixture).map((row) => (

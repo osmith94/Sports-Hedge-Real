@@ -70,6 +70,21 @@ For example, successful GAME and BTTS discovery does not prove that TOTAL or FTT
 
 Parameterized families such as `TOTAL_GOALS_FT:{line}` are separate catalogue rows per exact approved line. Adding 2.5, 3.5, 4.5, 5.5, etc. increases pricing workload but does not change scanner architecture.
 
+### Evidence-scope rule
+
+HOT, BACKGROUND, and UNIVERSE share process-memory viability evidence and may overlap. A lower-level failure in one lane must not corrupt discovery truth in another.
+
+> **Evidence-scope rule:** market-level failure cannot establish fixture-level venue unavailability. Provider-level failure cannot establish fixture-level unavailability. Unknown or incomplete work is not absence. Performance pruning may skip work only from evidence at the same or broader valid scope.
+
+- A Matchbook market 404/410, a gone market payload, or one closed betting market invalidates that native market relationship only. Sibling markets on the same event stay eligible.
+- Fixture + venue may be blocked only by authoritative **fixture-level** event evidence. Matchbook lists one physical event per canonical fixture, so a terminal Matchbook event may persist `canonical_event_id + MATCHBOOK = TERMINAL`.
+- Kalshi does not. One physical fixture is a set of sibling family events (GAME, BTTS, TOTAL, FTTS, and US sibling series such as spread/total). A terminal Kalshi family persists only as source-event evidence for that event ticker. It must not write fixture-wide Kalshi terminal, and it must not make a healthy sibling family ineligible.
+- Polymarket sports events are **not** fixture-level authority. Football clustering attaches multiple Gamma events (moneyline, BTTS, totals) to one canonical fixture, the same sibling shape as Kalshi. NFL, NBA, and NCAAB censuses also describe many child markets on a single Gamma event; that is one source event with child markets, not proof the event is the only Polymarket listing for the physical fixture. Until a provider event carries an explicit fixture-level authority flag, a terminal Polymarket event persists at source-event scope only.
+- When every observed Kalshi or Polymarket sibling in a cluster is terminal, that cluster may treat the venue as not currently viable. That assessment must not widen one sibling’s evidence into a fixture-wide terminal mark. An unobserved family stays unknown, not unavailable.
+- Timeout, authentication failure, rate limit, and provider backoff are provider health. They do not mark the fixture unavailable. A later successful call to that provider clears the stale provider issue so diagnostics do not keep showing `get_market_timeout`.
+- A fresh non-terminal observation restores a stale mark at the same scope: a Matchbook event restores fixture + Matchbook; a Kalshi or Polymarket source event restores that source event only. A successful market fetch does not clear genuine event-terminal or source-event-terminal evidence.
+- A market's closed state is not event-terminal evidence. Elapsed time still must not fabricate a finished fixture.
+
 ### Architecture-preservation rules
 
 Normal scanner changes must preserve all of the following:

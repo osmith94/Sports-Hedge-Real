@@ -263,7 +263,12 @@ async def test_matchbook_terminal_kalshi_still_listed_skips_subsequent_hot_books
     assert kalshi.book_calls == []
     assert row.catalogue_row_id in first.revalidation
     cache = get_opportunity_viability_cache()
-    assert cache.is_blocked(row.canonical_event_id, VenueName.MATCHBOOK)
+    assert cache.is_blocked(row.canonical_event_id, VenueName.MATCHBOOK) is False
+    assert cache.market_is_blocked(
+        row.canonical_event_id,
+        VenueName.MATCHBOOK,
+        str(row.matchbook_market_id),
+    )
 
     mb.get_market_calls.clear()
     second = await engine.run_slice(PriceEnginePriority.HOT)

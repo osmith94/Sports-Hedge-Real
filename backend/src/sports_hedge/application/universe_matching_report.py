@@ -15,6 +15,7 @@ from sports_hedge.application.fixture_clusters import (
     cluster_canonical_event_id,
     cluster_member_events,
 )
+from sports_hedge.application.opportunity_viability import build_viability_evidence
 from sports_hedge.application.universe_identity_cache import identity_cache_semantic_version
 from sports_hedge.matching.identity_graph import DEFAULT_ASSIGNMENT_MARGIN
 
@@ -270,6 +271,10 @@ async def capture_identity_review_evidence(
                         EVIDENCE_RETAINED if provenance is not None else EVIDENCE_UNAVAILABLE
                     ),
                     "shard_id": shard.shard_id,
+                    "viability_evidence": build_viability_evidence(
+                        cluster_canonical_event_id(cluster),
+                        venues_present=[venue.value for venue in cluster.venues_present],
+                    ),
                 }
             )
     threshold = getattr(matcher, "threshold", None)
@@ -1064,6 +1069,7 @@ def _fixture_row(
         "provenance_evidence": cluster.get("provenance_evidence", EVIDENCE_UNAVAILABLE),
         "members": member_rows,
         "missing_venues": missing,
+        "viability_evidence": cluster.get("viability_evidence"),
     }
 
 

@@ -161,6 +161,40 @@ export function marketEvaluationUnevaluated(item: DiscoveredFixture): boolean {
   return item.matched_equivalent_count == null && !item.solver_is_arbitrage;
 }
 
+export function viabilityEvidenceSummary(
+  evidence: DiscoveredFixture["viability_evidence"],
+): string | null {
+  if (!evidence) return null;
+  const events = evidence.event_viability ?? {};
+  const eventText = Object.entries(events)
+    .map(([venue, row]) => {
+      const state = row?.state ?? "unknown";
+      const reason = row?.evidence_reason ? ` (${row.evidence_reason})` : "";
+      return `${venue} ${state}${reason}`;
+    })
+    .join(" · ");
+  const sources = (evidence.source_event_viability ?? [])
+    .map(
+      (row) =>
+        `${row.venue ?? "venue"} ${row.source_event_id ?? "source"} ${row.state ?? "unknown"}`,
+    )
+    .join(", ");
+  const gone = (evidence.market_gone ?? [])
+    .map((row) => `${row.venue} ${row.native_market_id} ${row.evidence_reason ?? row.state}`)
+    .join(", ");
+  const provider = Object.entries(evidence.provider_issues ?? {})
+    .map(([venue, reason]) => `${venue} ${reason}`)
+    .join(", ");
+  const parts = [
+    eventText ? `event ${eventText}` : null,
+    sources ? `source ${sources}` : null,
+    gone ? `market gone ${gone}` : null,
+    provider ? `provider ${provider}` : null,
+    evidence.final_reason ? `final ${evidence.final_reason}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 export function marketEvaluationLabel(item: DiscoveredFixture): string {
   if (item.market_evaluation_state === "not_evaluated_scan_deadline") {
     return NOT_EVALUATED_SCAN_BUDGET_LABEL;

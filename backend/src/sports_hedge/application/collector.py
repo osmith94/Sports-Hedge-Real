@@ -92,6 +92,7 @@ from sports_hedge.application.opportunity_viability import (
     NO_CROSS_VENUE_CANDIDATE,
     UPPER_BOUND_BELOW_MIN_NET,
     assess_cluster_viability,
+    build_viability_evidence,
     get_opportunity_viability_cache,
 )
 from sports_hedge.application.paper_scan import PaperScanService
@@ -645,6 +646,7 @@ class DiscoveredFixture(BaseModel):
     catalogue_coverage: FixtureCatalogueCoverage | None = None
     event_match_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     event_match_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    viability_evidence: dict[str, Any] | None = None
 
 
 class FixturePaperEntry(BaseModel):
@@ -3772,6 +3774,7 @@ class ReadOnlyCrossVenueCollector:
             polymarket_matched=bool(fixture.polymarket_matched),
             target_competition_code=fixture.target_competition_code,
         )
+        _attach_viability_evidence(fixture, inventory_rows)
         return (
             fixture,
             decisions,
@@ -4306,7 +4309,12 @@ class ReadOnlyCrossVenueCollector:
             result.gone = True
             cache = getattr(self, "_op_viability_cache", None)
             if cache is not None:
-                cache.mark_unavailable(relationship.canonical_event_id, VenueName.MATCHBOOK)
+                cache.mark_market_unavailable(
+                    relationship.canonical_event_id,
+                    VenueName.MATCHBOOK,
+                    leg.source_market_id,
+                    reason="market_gone",
+                )
             self._bump_hot_stat("matchbook_get_market")
             return result
         self._bump_hot_stat("matchbook_get_market")
@@ -4321,7 +4329,12 @@ class ReadOnlyCrossVenueCollector:
             result.gone = True
             cache = getattr(self, "_op_viability_cache", None)
             if cache is not None:
-                cache.mark_terminal(relationship.canonical_event_id, VenueName.MATCHBOOK)
+                cache.mark_market_terminal(
+                    relationship.canonical_event_id,
+                    VenueName.MATCHBOOK,
+                    leg.source_market_id,
+                    reason="market_terminal",
+                )
             return result
         markets, inventory = self._inventory_markets(
             event, [market_payload], venue=VenueName.MATCHBOOK, issues=issues
@@ -6106,7 +6119,7 @@ def _fixture_from_cluster(
         no_comparison = unmatched_reason
         opportunity_state = "unmatched"
         equivalent_count = None
-    return DiscoveredFixture(
+    fixture = DiscoveredFixture(
         source=anchor.venue,
         source_event_id=anchor.source_event_id,
         canonical_event_id=cluster_canonical_event_id(cluster),
@@ -6142,6 +6155,56 @@ def _fixture_from_cluster(
         market_evaluation_reason=evaluation_reason,
         event_match_confidence=cluster.event_match_confidence,
         event_match_threshold=cluster.event_match_threshold,
+    )
+    _attach_viability_evidence(fixture)
+    return fixture
+
+
+def _attach_viability_evidence(
+    fixture: DiscoveredFixture,
+    inventory_rows: list[Any] | None = None,
+) -> None:
+    """Record event vs market evidence without starting provider work."""
+
+    discovered: list[str] = []
+    registered: list[str] = []
+    structural: list[str] = []
+    for row in inventory_rows or []:
+        canonical = getattr(row, "canonical", None)
+        family = getattr(canonical, "family", None)
+        if family is not None:
+            name = getattr(family, "value", None) or str(family)
+            if name not in discovered:
+                discovered.append(str(name))
+        relation = str(getattr(row, "relation", "") or getattr(row, "comparison_state", "") or "")
+        if relation and relation not in structural:
+            structural.append(relation)
+    coverage = fixture.catalogue_coverage
+    if coverage is not None:
+        for item in getattr(coverage, "rows", None) or []:
+            archetype = getattr(item, "archetype", None)
+            key = str(getattr(archetype, "value", archetype) or "")
+            if key and key not in registered:
+                registered.append(key)
+    venues = [
+        name
+        for name, present in (
+            ("matchbook", fixture.matchbook_matched),
+            ("kalshi", fixture.kalshi_matched),
+            ("polymarket", fixture.polymarket_matched),
+        )
+        if present
+    ]
+    final = fixture.market_evaluation_reason or fixture.no_comparison_reason
+    if fixture.matched_equivalent_count == 0 and not final:
+        final = "no_comparable_markets"
+    fixture.viability_evidence = build_viability_evidence(
+        fixture.canonical_event_id,
+        venues_present=venues,
+        final_reason=final,
+        discovered_archetypes=discovered,
+        registered_relationships=registered,
+        structural_rejections=structural,
     )
 
 

@@ -250,6 +250,35 @@ export type DiscoveredFixture = {
   opportunity_state?: string;
   market_evaluation_state?: string | null;
   market_evaluation_reason?: string | null;
+  viability_evidence?: {
+    canonical_event_id?: string;
+    venues_present?: string[];
+    event_viability?: Record<
+      string,
+      {
+        state?: string;
+        evidence_scope?: string;
+        evidence_reason?: string | null;
+        source_event_id?: string | null;
+      }
+    >;
+    source_event_viability?: Array<{
+      venue?: string;
+      source_event_id?: string;
+      state?: string;
+      evidence_scope?: string;
+      evidence_reason?: string;
+    }>;
+    market_gone?: Array<{
+      venue?: string;
+      native_market_id?: string;
+      state?: string;
+      evidence_scope?: string;
+      evidence_reason?: string;
+    }>;
+    provider_issues?: Record<string, string>;
+    final_reason?: string | null;
+  } | null;
   scan_lane?: string | null;
   last_scanned_at?: string | null;
   next_due_at?: string | null;

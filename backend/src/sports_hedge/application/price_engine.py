@@ -85,9 +85,10 @@ from sports_hedge.application.opportunity_viability import (
     CROSS_VENUE_UNAVAILABLE,
     NO_CROSS_VENUE_CANDIDATE,
     UPPER_BOUND_BELOW_MIN_NET,
-    VenueViability,
     assess_identity_viability,
+    build_viability_evidence,
     catalogue_ready_venues,
+    venue_blocked_for_identity,
     get_opportunity_viability_cache,
     reset_opportunity_viability_cache,
 )
@@ -789,8 +790,11 @@ class CataloguePriceEngine:
         return tuple(
             venue
             for venue in ready
-            if not self.viability_cache.is_blocked(
-                runtime.identity.canonical_event_id, venue
+            if not venue_blocked_for_identity(
+                self.viability_cache,
+                runtime.identity.canonical_event_id,
+                venue,
+                runtime.identity,
             )
         )
 
@@ -1594,27 +1598,46 @@ class CataloguePriceEngine:
                 runtime=runtime,
             )
         except MatchbookMarketGoneError:
-            self.viability_cache.mark_unavailable(
-                identity.canonical_event_id, VenueName.MATCHBOOK
+            self.viability_cache.mark_market_unavailable(
+                identity.canonical_event_id,
+                VenueName.MATCHBOOK,
+                str(identity.matchbook_market_id),
+                reason="market_gone",
             )
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
         if status is not None:
             if status is PriceEngineItemStatus.RETRY_WAIT:
                 runtime.last_error_stage = "get_market"
                 runtime.last_error_detail = f"get_market_timeout after {self._provider_timeout:g}s"
+                self.viability_cache.note_provider_issue(
+                    VenueName.MATCHBOOK, "get_market_timeout"
+                )
             return status
         market = extract_matchbook_market_payload(payload)
         if market is None or matchbook_payload_is_terminal(market):
-            state = (
-                VenueViability.TERMINAL
-                if market is not None and matchbook_payload_is_terminal(market)
-                else VenueViability.UNAVAILABLE
-            )
-            self.viability_cache.mark(identity.canonical_event_id, VenueName.MATCHBOOK, state)
+            if market is not None and matchbook_payload_is_terminal(market):
+                self.viability_cache.mark_market_terminal(
+                    identity.canonical_event_id,
+                    VenueName.MATCHBOOK,
+                    str(identity.matchbook_market_id),
+                    reason="market_terminal",
+                )
+            else:
+                self.viability_cache.mark_market_unavailable(
+                    identity.canonical_event_id,
+                    VenueName.MATCHBOOK,
+                    str(identity.matchbook_market_id),
+                    reason="market_payload_missing",
+                )
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
         if str(market.get("id") or "") != str(identity.matchbook_market_id):
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:identity")
-        self.viability_cache.mark_viable(identity.canonical_event_id, VenueName.MATCHBOOK)
+        self.viability_cache.clear_market(
+            identity.canonical_event_id,
+            VenueName.MATCHBOOK,
+            str(identity.matchbook_market_id),
+        )
+        self.viability_cache.clear_provider_issue(VenueName.MATCHBOOK)
         return RetrievedVenuePayload(payload=market, retrieved_at=self.now())
 
     async def _refresh_kalshi_constituents(
@@ -1684,7 +1707,10 @@ class CataloguePriceEngine:
                 runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
                 return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
             books[ticker] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
-            self.viability_cache.mark_viable(identity.canonical_event_id, VenueName.KALSHI)
+            self.viability_cache.clear_market(
+                identity.canonical_event_id, VenueName.KALSHI, ticker
+            )
+            self.viability_cache.clear_provider_issue(VenueName.KALSHI)
             outcome = _ticker_outcome(identity, ticker)
             implied = implied_from_kalshi_book(payload)
             if outcome and implied is not None:
@@ -1734,6 +1760,7 @@ class CataloguePriceEngine:
                 runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
                 return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
             books[token] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
+            self.viability_cache.clear_provider_issue(VenueName.POLYMARKET)
         return books
 
     async def _evaluate_complete_item(
@@ -2813,6 +2840,15 @@ class CataloguePriceEngine:
             polymarket_matched=bool(identity.polymarket_event_id),
             market_evaluation_state=evaluation_state,
             market_evaluation_reason=reason,
+            viability_evidence=build_viability_evidence(
+                identity.canonical_event_id,
+                cache=self.viability_cache,
+                venues_present=[
+                    venue.value for venue in catalogue_ready_venues(identity)
+                ],
+                final_reason=reason,
+                registered_relationships=[str(identity.register_canonical_key or "")],
+            ),
             no_comparison_reason=reason,
             opportunity_state="not_evaluated",
             solver_is_arbitrage=False,
