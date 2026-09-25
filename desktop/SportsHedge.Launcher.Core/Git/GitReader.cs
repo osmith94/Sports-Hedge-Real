@@ -56,6 +56,9 @@ public sealed class GitCli : IGitReader
         {
             UseShellExecute = false,
             CreateNoWindow = true,
+            // Never inherit the controller's stdin: on Windows a pending
+            // synchronous read on an inherited pipe blocks git's handle probing.
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
@@ -66,6 +69,7 @@ public sealed class GitCli : IGitReader
             psi.ArgumentList.Add(arg);
         }
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("git could not be started");
+        process.StandardInput.Close();
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         if (!process.WaitForExit((int)Timeout.TotalMilliseconds))
