@@ -27,3 +27,51 @@ jobs:
         run: python -m pytest -q
       - name: Static correctness
         run: python -m ruff check --select F src tests
+
+  windows-event-loop-liveness:
+    # Owner-live event-loop stalls (#517, #572) were observed on Windows /
+    # Python 3.12. Linux passes alone do not prove Windows liveness.
+    name: Windows event-loop liveness (Python 3.12)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Event-loop liveness regressions
+        run: >-
+          python -m pytest -q -rP -o faulthandler_timeout=300
+          tests/test_issue572_event_loop_stalls.py
+          tests/test_issue517_windows_event_loop_liveness.py
+          tests/test_issue496_event_loop_responsiveness.py
+
+  windows-full-suite:
+    # Informational: the full backend suite has no Windows baseline yet.
+    name: Windows full backend suite (informational)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Test
+        run: python -m pytest -q -o faulthandler_timeout=300

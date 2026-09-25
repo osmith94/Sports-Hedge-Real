@@ -18,10 +18,22 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from loop_liveness_harness import (
+    CallbackProfiler,
+    extreme_stress_liveness_failures,
+    extreme_stress_summary,
+    probe_gc_attributed_gaps,
+)
+from test_collector_scan_throughput import SyntheticUniverse, _collector, _scan
+from test_issue466_universe_indexed_clustering import _large_universe_items
 
 from sports_hedge.application.collector import (
     CLUSTER_COMPARISON_YIELD_EVERY,
     ReadOnlyCrossVenueCollector,
+)
+from sports_hedge.application.event_loop_activity import (
+    gc_pause_longest_seconds,
+    reset_loop_activity,
 )
 from sports_hedge.application.fixture_clusters import (
     ClusterPass,
@@ -37,9 +49,6 @@ from sports_hedge.application.universe_identity_shards import cluster_events_sha
 from sports_hedge.domain.football import CanonicalEvent
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.events import EventMatcher
-from test_collector_scan_throughput import SyntheticUniverse, _collector, _scan
-from test_issue466_universe_indexed_clustering import _large_universe_items
-
 
 KICKOFF = datetime(2026, 9, 21, 15, 0, tzinfo=UTC)
 COMPETITIONS = (
@@ -154,6 +163,12 @@ def _dense_universe(
 
 
 async def _probe_gaps(stop: asyncio.Event, *, interval: float = 0.01) -> list[float]:
+    """Round-trip ``sleep(0)`` gaps for #500 bounded-chunk progress.
+
+    Distinct from ``probe_gc_attributed_gaps``: #500 asserts ``max(gaps) < 1.0``
+    on this sleep(0) meaning and must not pick up the health-style timer probe.
+    """
+
     gaps: list[float] = []
     await asyncio.sleep(0)
     while not stop.is_set():
@@ -184,37 +199,55 @@ async def test_cooperative_index_matches_sync_and_yields() -> None:
 
 @pytest.mark.asyncio
 async def test_large_universe_identity_does_not_starve_event_loop() -> None:
-    """~1,600-fixture UNIVERSE identity + cancel/finalize must keep the loop alive."""
+    """~1,600-fixture UNIVERSE identity + cancel/finalize must keep the loop alive.
+
+    Extreme synthetic stress (about 6x the representative #572 workload). The
+    normal 0.25s SLA still applies to every non-GC slice and gap. Only a
+    scheduling gap that Python garbage collection explains may reach < 0.50s;
+    see ``extreme_stress_liveness_failures``.
+    """
 
     matchbook, polymarket, kalshi, _expected = _large_universe_items(1600)
+    reset_loop_activity()
     stop = asyncio.Event()
-    probe_task = asyncio.create_task(_probe_gaps(stop))
-    await asyncio.sleep(0)
+    with CallbackProfiler() as profiler:
+        probe_task = asyncio.create_task(probe_gc_attributed_gaps(stop))
+        await asyncio.sleep(0)
 
-    cluster_pass = ClusterPass(
-        matchbook=matchbook,
-        polymarket=polymarket,
-        kalshi=kalshi,
-        matcher=EventMatcher(),
-        max_event_pairs=10_000_000,
-        defer_candidate_build=True,
+        cluster_pass = ClusterPass(
+            matchbook=matchbook,
+            polymarket=polymarket,
+            kalshi=kalshi,
+            matcher=EventMatcher(),
+            max_event_pairs=10_000_000,
+            defer_candidate_build=True,
+        )
+        await cluster_pass.load_candidates_cooperative()
+        for index, (left, right) in enumerate(cluster_pass.pairs()):
+            if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+            cluster_pass.consider(left, right)
+        clusters, counts = await cluster_pass.finalize_cooperative()
+        stop.set()
+        gaps = await probe_task
+    longest_gc = gc_pause_longest_seconds()
+    summary = extreme_stress_summary(
+        "issue496_extreme_identity_1600",
+        gaps,
+        profiler.profile.slow,
+        longest_gc_pause_s=longest_gc,
     )
-    await cluster_pass.load_candidates_cooperative()
-    for index, (left, right) in enumerate(cluster_pass.pairs()):
-        if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
-            await asyncio.sleep(0)
-        cluster_pass.consider(left, right)
-    clusters, counts = await cluster_pass.finalize_cooperative()
-    stop.set()
-    gaps = await probe_task
+    print(summary)
 
     assert counts["matchbook_polymarket"] >= 40
     assert counts["matchbook_kalshi"] >= 40
     assert len(clusters) >= 40
     assert gaps, "event loop never resumed while identity work ran"
-    assert max(gaps) < 0.25, (
-        f"event loop starved for {max(gaps):.3f}s during 1600-fixture identity "
-        f"(probes={len(gaps)})"
+    failures = extreme_stress_liveness_failures(
+        gaps, profiler.profile.slow, longest_gc_pause_s=longest_gc
+    )
+    assert failures == [], (
+        f"1600-fixture identity liveness: {failures}\n{summary}\n{profiler.profile.report()}"
     )
 
 
@@ -226,32 +259,53 @@ def cluster_canonical_ids(clusters) -> frozenset[str]:
 
 @pytest.mark.asyncio
 async def test_cancel_finalize_of_dense_unresolved_universe_keeps_loop_alive() -> None:
-    matchbook, polymarket, kalshi = _dense_universe(400, unresolved_pm=True)
-    stop = asyncio.Event()
-    probe_task = asyncio.create_task(_probe_gaps(stop))
-    await asyncio.sleep(0)
+    """Dense unresolved identity is extreme synthetic stress, not the 275-fixture SLA.
 
-    cluster_pass = ClusterPass(
-        matchbook=matchbook,
-        polymarket=polymarket,
-        kalshi=kalshi,
-        matcher=EventMatcher(),
-        max_event_pairs=10_000_000,
-        defer_candidate_build=True,
+    Non-GC work must stay under 0.25s. A gap >= 0.25s may pass only when GC
+    explains it, and never at >= 0.50s.
+    """
+
+    matchbook, polymarket, kalshi = _dense_universe(400, unresolved_pm=True)
+    reset_loop_activity()
+    stop = asyncio.Event()
+    with CallbackProfiler() as profiler:
+        probe_task = asyncio.create_task(probe_gc_attributed_gaps(stop))
+        await asyncio.sleep(0)
+
+        cluster_pass = ClusterPass(
+            matchbook=matchbook,
+            polymarket=polymarket,
+            kalshi=kalshi,
+            matcher=EventMatcher(),
+            max_event_pairs=10_000_000,
+            defer_candidate_build=True,
+        )
+        await cluster_pass.load_candidates_cooperative(yield_every=256)
+        for index, (left, right) in enumerate(cluster_pass.pairs()):
+            cluster_pass.consider(left, right)
+            if index >= 200:
+                break
+            if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+        snapshot, _counts = await cluster_pass.finalize_cooperative()
+        stop.set()
+        gaps = await probe_task
+    longest_gc = gc_pause_longest_seconds()
+    summary = extreme_stress_summary(
+        "issue496_dense_finalize_400",
+        gaps,
+        profiler.profile.slow,
+        longest_gc_pause_s=longest_gc,
     )
-    await cluster_pass.load_candidates_cooperative(yield_every=256)
-    for index, (left, right) in enumerate(cluster_pass.pairs()):
-        cluster_pass.consider(left, right)
-        if index >= 200:
-            break
-        if index % CLUSTER_COMPARISON_YIELD_EVERY == 0:
-            await asyncio.sleep(0)
-    snapshot, _counts = await cluster_pass.finalize_cooperative()
-    stop.set()
-    gaps = await probe_task
+    print(summary)
     assert snapshot
-    assert gaps
-    assert max(gaps) < 0.25, f"event loop starved for {max(gaps):.3f}s during dense finalize"
+    assert gaps, "event loop never resumed during dense finalize"
+    failures = extreme_stress_liveness_failures(
+        gaps, profiler.profile.slow, longest_gc_pause_s=longest_gc
+    )
+    assert failures == [], (
+        f"dense finalize liveness: {failures}\n{summary}\n{profiler.profile.report()}"
+    )
 
 
 @pytest.mark.asyncio

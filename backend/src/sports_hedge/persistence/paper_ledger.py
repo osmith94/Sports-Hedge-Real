@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import threading
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -19,6 +18,7 @@ from sports_hedge.accounting.paper_journal import (
     PaperJournalEntry,
 )
 from sports_hedge.accounting.strategy_books import DimensionedPosting
+from sports_hedge.application.event_loop_activity import TimedRLock
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.paper.models import FxRateSnapshot
@@ -508,7 +508,7 @@ class SqlitePaperLedger:
         from sports_hedge.treasury.service import PaperTreasuryService
 
         self._tx_depth = 0
-        self._lock = threading.RLock()
+        self._lock = TimedRLock("paper_ledger")
         self._connection = sqlite3.connect(
             str(database),
             check_same_thread=False,

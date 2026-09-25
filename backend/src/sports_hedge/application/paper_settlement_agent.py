@@ -122,13 +122,12 @@ class PaperSettlementAgent:
         )
 
         mark_loop_phase(lane="active_trade", phase="paper_settlement")
-        trades = [
-            trade
-            for trade in self.operations.list_active_trades()
-            if auto_settle_eligible(trade.state)
-        ]
-        result.examined = len(trades)
         close_loop_slice()
+        # Ledger reads/writes share one RLock-serialized SQLite connection (5s
+        # busy timeout) with API threadpool handlers and accounting jobs. They
+        # must not wait on the event loop thread.
+        trades = await asyncio.to_thread(self._auto_settle_candidates)
+        result.examined = len(trades)
         for trade in trades:
             try:
                 item = await self.reconcile_trade(trade, now=when)
@@ -137,7 +136,8 @@ class PaperSettlementAgent:
                 item = PaperSettlementTradeResult(
                     trade_id=trade.trade_id, blocker="settlement_cycle_error"
                 )
-                self._record_blocker(
+                await asyncio.to_thread(
+                    self._record_blocker,
                     trade,
                     "settlement_cycle_error",
                     SettlementResolution(
@@ -156,13 +156,35 @@ class PaperSettlementAgent:
                 result.skipped += 1
         return result
 
+    def _auto_settle_candidates(self) -> list[PaperTrade]:
+        return [
+            trade
+            for trade in self.operations.list_active_trades()
+            if auto_settle_eligible(trade.state)
+        ]
+
     async def reconcile_trade(
         self,
         trade: PaperTrade,
         *,
         now: datetime | None = None,
     ) -> PaperSettlementTradeResult:
+        """Persisted-state work runs off the event loop; provider evidence stays on it.
+
+        Provider calls keep using the shared provider-access layer. Each trade's
+        steps run strictly in order: prepare, fetch evidence, then resolve.
+        """
+
         when = now or self.now()
+        prepared = await asyncio.to_thread(self._prepare_trade, trade, when)
+        if isinstance(prepared, PaperSettlementTradeResult):
+            return prepared
+        evidence = await self._fetch_evidence(prepared)
+        return await asyncio.to_thread(self._resolve_with_evidence, prepared, evidence, when)
+
+    def _prepare_trade(
+        self, trade: PaperTrade, when: datetime
+    ) -> PaperTrade | PaperSettlementTradeResult:
         if not auto_settle_eligible(trade.state) and trade.state is not PaperTradeState.CLOSED:
             return PaperSettlementTradeResult(
                 trade_id=trade.trade_id, blocker="illegal_auto_settle_state"
@@ -184,7 +206,14 @@ class PaperSettlementAgent:
                 self.operations.trades.save(trade)
             except Exception:
                 LOGGER.exception("failed to persist recovered provider identity for %s", trade.trade_id)
-        evidence = await self._fetch_evidence(trade)
+        return trade
+
+    def _resolve_with_evidence(
+        self,
+        trade: PaperTrade,
+        evidence: _FetchedSettlementEvidence,
+        when: datetime,
+    ) -> PaperSettlementTradeResult:
         matchbook_market = evidence.matchbook_market
         matchbook_event = evidence.matchbook_event
         kalshi_markets = evidence.kalshi_markets

@@ -23,8 +23,11 @@ from sports_hedge.application.active_trade_lane import (
 )
 from sports_hedge.application.event_loop_activity import (
     LOOP_ACTIVITY,
+    TimedRLock,
     close_loop_slice,
+    install_gc_pause_monitor,
     mark_loop_phase,
+    sync_subphase,
 )
 from sports_hedge.application.hot_market_relationships import HotMarketRelationship
 from sports_hedge.application.collector import (
@@ -60,7 +63,6 @@ from sports_hedge.application.universe_checkpoint import (
     UniverseCheckpointTooLarge,
     UniverseGenerationCheckpoint,
     checkpoint_from_payload,
-    collection_report_snapshot,
     discovery_event_snapshot,
     merge_series_reports,
     series_work_key,
@@ -453,7 +455,7 @@ class _CountedRLock:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
+        self._lock = TimedRLock("coordinator_state")
         self._depth = 0
         self._owner: int | None = None
 
@@ -578,7 +580,6 @@ class LiveRefreshCoordinator:
         self._universe_budget_paused = False
         self._universe_retry_at: datetime | None = None
         self._universe_provider_failures = 0
-        self._universe_last_report_snapshot: dict[str, Any] | None = None
         self._universe_matching_evidence: dict[str, Any] | None = None
         self._universe_sweep_id: str | None = None
         self._universe_discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
@@ -1348,7 +1349,6 @@ class LiveRefreshCoordinator:
         self._universe_budget_paused = False
         self._universe_retry_at = None
         self._universe_provider_failures = 0
-        self._universe_last_report_snapshot = None
         self._universe_matching_evidence = None
         self._universe_sweep_id = None
         self._universe_discovery_snapshot = None
@@ -2109,7 +2109,6 @@ class LiveRefreshCoordinator:
             self._universe_budget_paused = False
             self._universe_retry_at = None
             self._universe_provider_failures = 0
-            self._universe_last_report_snapshot = None
             self._universe_matching_evidence = None
             self._universe_sweep_id = None
             self._universe_discovery_snapshot = None
@@ -3130,7 +3129,6 @@ class LiveRefreshCoordinator:
                     hours=get_settings().paper_hot_post_kickoff_current_radar_ceiling_hours
                 ),
             )
-        inventory = self._fixture_state.inventory(report.completed_at)
         _hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
         with self._state_lock:
             if lane is ScanLane.HOT:
@@ -3221,7 +3219,6 @@ class LiveRefreshCoordinator:
                         self.status.hot.venue_health,
                         self.status.universe.venue_health,
                     ),
-                    "discovered_fixtures": inventory,
                     "last_error": None,
                     "interval_seconds": self.status.hot.cadence_seconds,
                     "provider_access": get_shared_provider_access().snapshot().as_dict(),
@@ -3332,7 +3329,6 @@ class LiveRefreshCoordinator:
             self._universe_cursor = newly_evaluated[-1]
         self._universe_provider_failures = 0
         self._universe_retry_at = None
-        self._universe_last_report_snapshot = collection_report_snapshot(report)
         if report.series_results:
             self._universe_series_results = merge_series_reports(
                 self._universe_series_results, report.series_results
@@ -3657,8 +3653,7 @@ class LiveRefreshCoordinator:
                 )
                 return
             generation_id = self._ensure_store_universe_generation(scanned)
-            before_hot, _before_universe = self._fixture_state.membership_counts(scanned)
-            self._fixture_state.upsert_evaluated_fixture(
+            before_hot, after_hot = self._fixture_state.upsert_evaluated_fixture_counting_hot(
                 fixture,
                 markets=inventory,
                 decisions=decisions,
@@ -3670,9 +3665,7 @@ class LiveRefreshCoordinator:
             )
             if rehydrating:
                 self._clear_universe_rehydration_unlocked(canonical_id)
-            after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
             promoted_now = after_hot > before_hot
-            inventory_now = self._fixture_state.inventory(scanned)
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(scanned)
             previous = self._universe_work.get(canonical_id)
@@ -3719,9 +3712,11 @@ class LiveRefreshCoordinator:
                 self.status.universe.venue_health,
                 retryable=counts["canonical_retryable"] + counts["series_retryable"],
             )
+            # discovered_fixtures is rebuilt by public_status() on every read. A
+            # full-store inventory per streamed fixture made the sweep O(N^2)
+            # on the event loop.
             self.status = self.status.model_copy(
                 update={
-                    "discovered_fixtures": inventory_now,
                     "venue_health": _merge_top_level_venue_health(
                         self.status.hot.venue_health,
                         venue_health,
@@ -4186,14 +4181,15 @@ class LiveRefreshCoordinator:
             decisions: list[Any],
             inventory: list[Any],
         ) -> None:
-            self.record_universe_fixture_progress(
-                cluster,
-                fixture,
-                decisions,
-                inventory,
-                chunk_epoch=epoch,
-                apply_epoch=apply_epoch,
-            )
+            with sync_subphase("universe", "fixture_progress", candidates=len(inventory)):
+                self.record_universe_fixture_progress(
+                    cluster,
+                    fixture,
+                    decisions,
+                    inventory,
+                    chunk_epoch=epoch,
+                    apply_epoch=apply_epoch,
+                )
 
         def on_work(
             canonical_ids: list[str],
@@ -4900,7 +4896,6 @@ class LiveRefreshCoordinator:
         self._universe_budget_paused = False
         self._universe_retry_at = None
         self._universe_provider_failures = 0
-        self._universe_last_report_snapshot = None
         self._universe_generation_superseded = False
         if pending:
             self._next_universe_due = finished
@@ -5422,6 +5417,13 @@ class LiveRefreshCoordinator:
             if self._price_engine is not None
             else empty_price_engine_status()
         )
+        # SQLite reads stay outside _state_lock. This runs in the API threadpool
+        # and every scanner worker needs that lock on the event loop.
+        saved_universe_scope = resolve_operator_universe_scope(
+            self._resolved_universe_scope_store()
+        )
+        active_trade_locked_gbp = self._active_trade_locked_gbp()
+        active_trade_timeline = self._recent_active_trade_timeline()
         with self._state_lock:
             hot_update = {
                 "fixture_count": unique or hot_count,
@@ -5516,9 +5518,7 @@ class LiveRefreshCoordinator:
                     ),
                     "operator_settings": self.status.operator_settings
                     or env_operator_scanner_settings(),
-                    "universe_scope": self._decorate_universe_scope(
-                        resolve_operator_universe_scope(self._resolved_universe_scope_store())
-                    ),
+                    "universe_scope": self._decorate_universe_scope(saved_universe_scope),
                     "interval_seconds": int(self.status.interval_seconds),
                 }
             )
@@ -5541,9 +5541,9 @@ class LiveRefreshCoordinator:
                     "system_load": system_load_from_status(
                         self.status,
                         universe_work_used_s=self._status_universe_work_used(),
-                        active_trade_locked_gbp=self._active_trade_locked_gbp(),
+                        active_trade_locked_gbp=active_trade_locked_gbp,
                     ),
-                    "active_trade_timeline": self._recent_active_trade_timeline(),
+                    "active_trade_timeline": active_trade_timeline,
                 }
             )
             return self.status
@@ -5612,6 +5612,7 @@ class LiveRefreshCoordinator:
         self.arm_startup_pricing_barrier()
         if self._hot_task is not None and not self._hot_task.done():
             return
+        install_gc_pause_monitor()
         self._stop = asyncio.Event()
         self._control = asyncio.Event()
         self._hot_task = asyncio.create_task(self._hot_loop(tick), name="hot-worker")
@@ -5951,9 +5952,6 @@ class LiveRefreshCoordinator:
         HOT/BACKGROUND/UNIVERSE pricing.
         """
 
-        from sports_hedge.api.paper import get_paper_operations_service
-        from sports_hedge.api.priority_alerts import get_priority_alert_service
-        from sports_hedge.api.watchlist import get_watchlist_service
         from sports_hedge.application.paper_settlement_agent import PaperSettlementAgent
 
         now = self.now()
@@ -5966,21 +5964,16 @@ class LiveRefreshCoordinator:
                 return
             self._settlement_in_progress = True
         try:
-            operations = get_paper_operations_service(
-                get_watchlist_service(), get_priority_alert_service()
-            )
+            close_loop_slice()
+            operations, catalogue = await asyncio.to_thread(_paper_settlement_dependencies)
             engine = self._price_engine
-            from sports_hedge.persistence.approved_market_catalogue import (
-                get_approved_market_catalogue_store,
-            )
-
             agent = PaperSettlementAgent(
                 operations=operations,
                 matchbook=None if engine is None else engine.matchbook,
                 kalshi=None if engine is None else engine.kalshi,
                 polymarket=None if engine is None else engine.polymarket,
                 clock=self.now,
-                catalogue=get_approved_market_catalogue_store(),
+                catalogue=catalogue,
             )
             await agent.run_cycle(now=now)
         except Exception:
@@ -6477,6 +6470,22 @@ def _collection_task_result(task: asyncio.Task[Any]) -> CollectionReport:
         return task.result()
     except asyncio.CancelledError as exc:
         raise TimeoutError from exc
+
+
+def _paper_settlement_dependencies() -> tuple[Any, Any]:
+    """Ledger-backed services. First use opens the SQLite ledger and catalogue."""
+
+    from sports_hedge.api.paper import get_paper_operations_service
+    from sports_hedge.api.priority_alerts import get_priority_alert_service
+    from sports_hedge.api.watchlist import get_watchlist_service
+    from sports_hedge.persistence.approved_market_catalogue import (
+        get_approved_market_catalogue_store,
+    )
+
+    operations = get_paper_operations_service(
+        get_watchlist_service(), get_priority_alert_service()
+    )
+    return operations, get_approved_market_catalogue_store()
 
 
 async def _await_collection_runner(runner, timeout: float | None) -> CollectionReport:
