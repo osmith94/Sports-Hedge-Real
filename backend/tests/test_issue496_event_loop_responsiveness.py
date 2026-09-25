@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -159,6 +160,26 @@ def _dense_universe(
             )
         )
     return matchbook, polymarket, kalshi
+
+
+async def _probe_gaps(stop: asyncio.Event, *, interval: float = 0.01) -> list[float]:
+    """Round-trip ``sleep(0)`` gaps for #500 bounded-chunk progress.
+
+    Distinct from ``probe_gc_attributed_gaps``: #500 asserts ``max(gaps) < 1.0``
+    on this sleep(0) meaning and must not pick up the health-style timer probe.
+    """
+
+    gaps: list[float] = []
+    await asyncio.sleep(0)
+    while not stop.is_set():
+        started = time.perf_counter()
+        await asyncio.sleep(0)
+        gaps.append(time.perf_counter() - started)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            continue
+    return gaps
 
 
 @pytest.mark.asyncio

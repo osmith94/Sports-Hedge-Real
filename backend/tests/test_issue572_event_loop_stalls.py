@@ -98,24 +98,6 @@ def _isolated_loop_state():
     reset_loop_activity()
 
 
-@pytest.fixture
-def isolated_heap():
-    """Measure the workload's own allocations, not gen-2 GC over the suite's heap.
-
-    Test-only: objects left behind by thousands of earlier tests in the same
-    pytest process are frozen for the duration. The deferred full-heap
-    collection is paid in teardown, outside every measured window.
-    """
-
-    gc.collect()
-    gc.freeze()
-    try:
-        yield
-    finally:
-        gc.unfreeze()
-        gc.collect()
-
-
 def _coordinator() -> LiveRefreshCoordinator:
     return LiveRefreshCoordinator(
         operator_settings_store=SqliteOperatorScannerSettingsStore(":memory:"),
@@ -564,7 +546,6 @@ async def test_paper_settlement_builds_ledger_services_off_the_event_loop(
 @pytest.mark.asyncio
 async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
     monkeypatch: pytest.MonkeyPatch,
-    isolated_heap: None,
 ) -> None:
     """~275-cluster UNIVERSE with HOT / BACKGROUND / ACTIVE scheduled alongside it.
 
@@ -629,6 +610,12 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         await asyncio.sleep(0.005)
 
     heartbeat = HeartbeatProbe()
+    # Measure this workload's slices, not gen-2 GC over objects left behind by
+    # earlier tests. Freeze after the unprofiled reference sweep so the 275
+    # fixture graphs are already allocated. Pay full-heap collection in
+    # teardown, outside the measured window.
+    gc.collect()
+    gc.freeze()
     try:
         with CallbackProfiler() as profiler:
             heartbeat.start()
@@ -638,6 +625,8 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
             await heartbeat.stop()
     finally:
         await coordinator.stop_server_loop()
+        gc.unfreeze()
+        gc.collect()
         repository.close()
         get_settings.cache_clear()
 
