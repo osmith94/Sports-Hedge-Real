@@ -43,7 +43,16 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from loop_liveness_harness import CallbackProfiler, HeartbeatProbe, RealisticUniverse
+from loop_liveness_harness import (
+    CallbackProfiler,
+    HeartbeatProbe,
+    RealisticUniverse,
+    SchedulingGap,
+    SlowCallback,
+    extreme_stress_liveness_failures,
+    extreme_stress_summary,
+    probe_gc_attributed_gaps,
+)
 
 from sports_hedge.application import fixture_current_state as current_state_module
 from sports_hedge.application.collector import (
@@ -610,8 +619,11 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
             await asyncio.sleep(0.6)
             await heartbeat.stop()
     finally:
-        gc.unfreeze()
         await coordinator.stop_server_loop()
+        gc.unfreeze()
+        # Pay the full-heap collection here, outside every measured window,
+        # instead of inside whichever liveness test runs next.
+        gc.collect()
         repository.close()
         get_settings.cache_clear()
 
@@ -628,6 +640,8 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         f"fixtures={REPRESENTATIVE_FIXTURES} callbacks={profiler.profile.callbacks} "
         f"busy_s={profiler.profile.total_s:.2f} "
         f"longest_callback_ms={int(profiler.profile.longest_s * 1000)} "
+        f"longest_non_gc_callback_ms={int(profiler.profile.longest_non_gc_s * 1000)} "
+        f"longest_iteration_ms={int(profiler.profile.longest_iteration_s * 1000)} "
         f"heartbeat_worst_ms={int(heartbeat.worst_s * 1000)} "
         f"callbacks_over_250ms={len(over)}"
     )
@@ -654,3 +668,61 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         "BACKGROUND did not resume after UNIVERSE completed"
     )
     assert coordinator._universe_in_progress is False
+
+
+def _callback(elapsed_s: float, gc_s: float) -> SlowCallback:
+    return SlowCallback(elapsed_s, "task:synthetic", "universe", "market_evaluation", gc_s=gc_s)
+
+
+@pytest.mark.parametrize(
+    "gaps,callbacks,longest_gc,expected",
+    [
+        pytest.param([SchedulingGap(0.12, 0.0)], [], 0.0, [], id="normal"),
+        pytest.param([SchedulingGap(0.30, 0.0)], [], 0.0, ["non-GC scheduling gap"], id="non_gc_gap"),
+        pytest.param([SchedulingGap(0.30, 0.10)], [], 0.10, [], id="gc_explains_gap"),
+        pytest.param([SchedulingGap(0.40, 0.12)], [], 0.12, ["non-GC scheduling gap"], id="gc_too_small"),
+        pytest.param([SchedulingGap(0.52, 0.45)], [], 0.45, ["scheduling gap"], id="gap_over_500"),
+        pytest.param([SchedulingGap(0.10, 0.0)], [], 0.51, ["GC pause"], id="gc_pause_over_500"),
+        pytest.param([], [_callback(0.30, 0.04)], 0.04, ["non-GC callback"], id="non_gc_callback"),
+        pytest.param([], [_callback(0.30, 0.20)], 0.20, [], id="gc_callback"),
+    ],
+)
+def test_extreme_stress_policy_excuses_only_garbage_collection(
+    gaps, callbacks, longest_gc, expected
+) -> None:
+    failures = extreme_stress_liveness_failures(gaps, callbacks, longest_gc_pause_s=longest_gc)
+    assert len(failures) == len(expected), failures
+    assert all(item.startswith(prefix) for item, prefix in zip(failures, expected)), failures
+    summary = extreme_stress_summary("synthetic", gaps, callbacks, longest_gc_pause_s=longest_gc)
+    over = [gap for gap in gaps if gap.gap_s >= LIVENESS_BOUND_S]
+    assert f"excursions_over_250ms={len(over)}" in summary
+
+
+@pytest.mark.asyncio
+async def test_extreme_stress_policy_still_fails_a_real_application_stall() -> None:
+    """A 0.3s synchronous stretch with no GC must fail the extreme-stress policy."""
+
+    reset_loop_activity()
+    stop = asyncio.Event()
+    with CallbackProfiler() as profiler:
+        probe = asyncio.create_task(probe_gc_attributed_gaps(stop))
+        await asyncio.sleep(0.05)
+        loop = asyncio.get_running_loop()
+        stalled = loop.create_future()
+
+        def blocking_application_code() -> None:
+            time.sleep(0.3)
+            stalled.set_result(None)
+
+        loop.call_soon(blocking_application_code)
+        await stalled
+        await asyncio.sleep(0.05)
+        stop.set()
+        gaps = await probe
+    failures = extreme_stress_liveness_failures(
+        gaps, profiler.profile.slow, longest_gc_pause_s=0.0
+    )
+    assert any(item.startswith("non-GC scheduling gap") for item in failures), failures
+    assert any(item.startswith("non-GC callback") for item in failures), failures
+    summary = extreme_stress_summary("stall", gaps, profiler.profile.slow, longest_gc_pause_s=0.0)
+    assert "non_gc_excursions=1" in summary, summary

@@ -8,7 +8,20 @@ whichever lane marked last.
 
 A sampler thread records the loop thread's Python stack while one callback has
 been running for longer than ``sample_after_s``. The deepest repository frames
-of those samples name the exact blocking call.
+of those samples name the exact blocking call. Each slow callback also carries
+the GC time spent inside it, and ``longest_iteration_s`` is the busiest single
+loop iteration (all callbacks that ran between two selector waits), which is
+what a health request queued behind them actually waits for.
+
+Liveness SLA (see ``extreme_stress_liveness_failures``):
+
+- Normal scanner SLA, every workload: no non-GC synchronous slice >= 0.25s.
+- Representative ~275-fixture workload: no callback >= 0.25s including GC,
+  heartbeat < 0.25s. The 0.25s bound is not relaxed there.
+- Extreme synthetic stress only (for example 1,600-fixture identity): a
+  scheduling gap may reach < 0.50s only when the part of it that is not
+  Python garbage collection stays < 0.25s, and no single GC pause reaches
+  0.50s.
 
 ``RealisticUniverse`` is a synthetic owner-shaped workload: N distinct football
 fixtures across three registry competitions, each listed on Matchbook, Kalshi
@@ -53,10 +66,15 @@ class CallbackProfile:
     slow: list[SlowCallback] = field(default_factory=list)
     samples: Counter = field(default_factory=Counter)
     leaf_samples: Counter = field(default_factory=Counter)
+    longest_iteration_s: float = 0.0
 
     @property
     def longest_s(self) -> float:
         return max((item.elapsed_s for item in self.slow), default=0.0)
+
+    @property
+    def longest_non_gc_s(self) -> float:
+        return max((item.elapsed_s - item.gc_s for item in self.slow), default=0.0)
 
     def over(self, bound_s: float) -> list[SlowCallback]:
         return [item for item in self.slow if item.elapsed_s >= bound_s]
@@ -64,7 +82,9 @@ class CallbackProfile:
     def report(self, *, top: int = 12) -> str:
         header = (
             f"callbacks={self.callbacks} busy_s={self.total_s:.3f} "
-            f"longest_ms={int(self.longest_s * 1000)}"
+            f"longest_ms={int(self.longest_s * 1000)} "
+            f"longest_non_gc_ms={int(self.longest_non_gc_s * 1000)} "
+            f"longest_iteration_ms={int(self.longest_iteration_s * 1000)}"
         )
         lines = [header]
         for item in sorted(self.slow, key=lambda s: s.elapsed_s, reverse=True)[:top]:
@@ -112,6 +132,8 @@ class CallbackProfiler:
         self._sampler: threading.Thread | None = None
         self._gc_total_s = 0.0
         self._gc_started: float | None = None
+        self._original_run_once = None
+        self._iteration_busy_s = 0.0
 
     def _gc_callback(self, phase: str, _info: dict[str, Any]) -> None:
         if threading.get_ident() != self._loop_thread:
@@ -130,6 +152,20 @@ class CallbackProfiler:
         self._original = original
         profiler = self
         gc.callbacks.append(self._gc_callback)
+        original_run_once = asyncio.base_events.BaseEventLoop._run_once
+        self._original_run_once = original_run_once
+
+        def timed_run_once(loop: asyncio.AbstractEventLoop) -> None:
+            if threading.get_ident() != profiler._loop_thread:
+                return original_run_once(loop)
+            profiler._iteration_busy_s = 0.0
+            try:
+                return original_run_once(loop)
+            finally:
+                profile = profiler.profile
+                profile.longest_iteration_s = max(
+                    profile.longest_iteration_s, profiler._iteration_busy_s
+                )
 
         def timed_run(handle: asyncio.Handle) -> None:
             if threading.get_ident() != profiler._loop_thread:
@@ -147,6 +183,7 @@ class CallbackProfiler:
                 profile = profiler.profile
                 profile.callbacks += 1
                 profile.total_s += elapsed
+                profiler._iteration_busy_s += elapsed
                 if elapsed >= profiler.record_over_s:
                     profile.slow.append(
                         SlowCallback(
@@ -159,6 +196,7 @@ class CallbackProfiler:
                     )
 
         asyncio.events.Handle._run = timed_run  # type: ignore[method-assign]
+        asyncio.base_events.BaseEventLoop._run_once = timed_run_once  # type: ignore[method-assign]
         self._sampler = threading.Thread(target=self._sample, daemon=True)
         self._sampler.start()
         return self
@@ -171,6 +209,8 @@ class CallbackProfiler:
             gc.callbacks.remove(self._gc_callback)
         if self._original is not None:
             asyncio.events.Handle._run = self._original  # type: ignore[method-assign]
+        if self._original_run_once is not None:
+            asyncio.base_events.BaseEventLoop._run_once = self._original_run_once  # type: ignore[method-assign]
 
     def _sample(self) -> None:
         while not self._stop.wait(self.sample_interval_s):
@@ -221,6 +261,125 @@ class HeartbeatProbe:
     @property
     def worst_s(self) -> float:
         return max(self.lateness, default=0.0)
+
+
+NORMAL_LIVENESS_SLA_S = 0.25
+EXTREME_STRESS_GC_ALLOWANCE_S = 0.50
+
+
+@dataclass(frozen=True)
+class SchedulingGap:
+    """One ``await asyncio.sleep(0)`` round trip and the loop-thread GC inside it."""
+
+    gap_s: float
+    gc_s: float
+
+    @property
+    def non_gc_s(self) -> float:
+        return max(0.0, self.gap_s - self.gc_s)
+
+
+async def probe_gc_attributed_gaps(
+    stop: asyncio.Event, *, interval_s: float = 0.01
+) -> list[SchedulingGap]:
+    """Scheduling gaps with the exact GC time recorded inside each one.
+
+    Uses the production GC monitor's monotonic total, so attribution is a
+    subtraction, not a timestamp match. Reads are ordered so any GC between a
+    counter read and a clock read is charged to the gap, never to GC.
+    """
+
+    from sports_hedge.application.event_loop_activity import (
+        gc_pause_total_seconds,
+        install_gc_pause_monitor,
+    )
+
+    install_gc_pause_monitor()
+    gaps: list[SchedulingGap] = []
+    await asyncio.sleep(0)
+    while not stop.is_set():
+        gc_before = gc_pause_total_seconds()
+        started = time.perf_counter()
+        await asyncio.sleep(0)
+        gc_after = gc_pause_total_seconds()
+        ended = time.perf_counter()
+        gaps.append(SchedulingGap(ended - started, max(0.0, gc_after - gc_before)))
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+    return gaps
+
+
+def extreme_stress_liveness_failures(
+    gaps: list[SchedulingGap],
+    callbacks: list[SlowCallback],
+    *,
+    longest_gc_pause_s: float,
+) -> list[str]:
+    """Extreme synthetic stress policy. Application code keeps the normal 0.25s SLA.
+
+    - any gap whose non-GC part is >= 0.25s fails;
+    - any callback whose non-GC time is >= 0.25s fails;
+    - any gap >= 0.50s fails, GC or not;
+    - any single GC pause >= 0.50s fails.
+    A gap >= 0.25s passes only when GC explains everything above 0.25s.
+    """
+
+    failures: list[str] = []
+    for gap in gaps:
+        if gap.non_gc_s >= NORMAL_LIVENESS_SLA_S:
+            failures.append(
+                f"non-GC scheduling gap {int(gap.non_gc_s * 1000)}ms "
+                f"(gap {int(gap.gap_s * 1000)}ms, gc {int(gap.gc_s * 1000)}ms)"
+            )
+        if gap.gap_s >= EXTREME_STRESS_GC_ALLOWANCE_S:
+            failures.append(
+                f"scheduling gap {int(gap.gap_s * 1000)}ms >= "
+                f"{int(EXTREME_STRESS_GC_ALLOWANCE_S * 1000)}ms (gc {int(gap.gc_s * 1000)}ms)"
+            )
+    for item in callbacks:
+        non_gc = item.elapsed_s - item.gc_s
+        if non_gc >= NORMAL_LIVENESS_SLA_S:
+            failures.append(
+                f"non-GC callback {int(non_gc * 1000)}ms "
+                f"(callback {int(item.elapsed_s * 1000)}ms, gc {int(item.gc_s * 1000)}ms) "
+                f"lane={item.lane} phase={item.phase} {item.label}"
+            )
+    if longest_gc_pause_s >= EXTREME_STRESS_GC_ALLOWANCE_S:
+        failures.append(
+            f"GC pause {int(longest_gc_pause_s * 1000)}ms >= "
+            f"{int(EXTREME_STRESS_GC_ALLOWANCE_S * 1000)}ms"
+        )
+    return failures
+
+
+def extreme_stress_summary(
+    label: str,
+    gaps: list[SchedulingGap],
+    callbacks: list[SlowCallback],
+    *,
+    longest_gc_pause_s: float,
+) -> str:
+    """One line stating whether any >=0.25s excursion was GC-attributed."""
+
+    excursions = [gap for gap in gaps if gap.gap_s >= NORMAL_LIVENESS_SLA_S]
+    gc_attributed = [gap for gap in excursions if gap.non_gc_s < NORMAL_LIVENESS_SLA_S]
+    worst = max(gaps, key=lambda gap: gap.gap_s, default=SchedulingGap(0.0, 0.0))
+    worst_non_gc_gap = max((gap.non_gc_s for gap in gaps), default=0.0)
+    worst_non_gc_callback = max(
+        (item.elapsed_s - item.gc_s for item in callbacks), default=0.0
+    )
+    return (
+        f"{label} probes={len(gaps)} worst_gap_ms={int(worst.gap_s * 1000)} "
+        f"worst_gap_gc_ms={int(worst.gc_s * 1000)} "
+        f"worst_non_gc_gap_ms={int(worst_non_gc_gap * 1000)} "
+        f"worst_non_gc_callback_ms={int(worst_non_gc_callback * 1000)} "
+        f"longest_gc_pause_ms={int(longest_gc_pause_s * 1000)} "
+        f"excursions_over_250ms={len(excursions)} "
+        f"gc_attributed_excursions={len(gc_attributed)} "
+        f"non_gc_excursions={len(excursions) - len(gc_attributed)}"
+    )
 
 
 # ---------------------------------------------------------------------------

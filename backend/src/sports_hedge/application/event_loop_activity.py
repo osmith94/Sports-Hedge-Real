@@ -234,6 +234,16 @@ def install_gc_pause_monitor() -> None:
         gc.callbacks.append(LOOP_ACTIVITY.on_gc)
 
 
+def gc_pause_total_seconds() -> float:
+    """Monotonic event-loop-thread GC time since the last reset (all generations)."""
+
+    return sum(stat.total_s for stat in LOOP_ACTIVITY.gc_pauses.values())
+
+
+def gc_pause_longest_seconds() -> float:
+    return max((stat.max_s for stat in LOOP_ACTIVITY.gc_pauses.values()), default=0.0)
+
+
 @contextmanager
 def sync_subphase(
     lane: str,
