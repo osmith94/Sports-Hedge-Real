@@ -129,13 +129,13 @@ function Get-RepoGitIdentity {
 
 function Get-DemoStartAction {
     param(
-        [bool]$HealthOk,
+        [bool]$PortListening,
         $Identity,
         $Live,
         [string]$CurrentGitHead,
         [string]$CurrentRepoRoot
     )
-    if (-not $HealthOk) {
+    if (-not $PortListening) {
         return "start"
     }
     if ([string]::IsNullOrWhiteSpace($CurrentGitHead) -or [string]::IsNullOrWhiteSpace($CurrentRepoRoot)) {
