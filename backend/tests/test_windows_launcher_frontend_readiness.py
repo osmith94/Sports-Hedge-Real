@@ -82,12 +82,16 @@ def test_powershell_occupancy_is_port_based_not_homepage_based() -> None:
         'Invoke-DemoOwnedService -Label "backend" -Port 8000 '
         "-PidFile $BackendPidFile"
     ) in script
-    assert "$portListening = Test-DemoPortListening -Port $Port" in script
+    assert "$listenerPids = @(Get-DemoPortListenerPids -Port $Port)" in script
     assert (
-        "Get-DemoStartAction -PortListening $portListening "
+        "Test-DemoListenerOwned -Identity $identity -Label $Label -ListenerPids $listenerPids"
+    ) in script
+    assert (
+        "Get-DemoStartAction -PortListening $portListening -ListenerOwned $listenerOwned "
         "-Identity $identity -Live $live"
     ) in script
     assert "[bool]$PortListening" in identity
+    assert "OwningProcess" in identity
     assert "[bool]$HealthOk" not in identity
     assert "$healthOk = Test-HttpOk $HealthUrl" not in script
     assert "$FrontendHealth" not in script

@@ -8,7 +8,9 @@
 # trading credentials.
 # Canonical local dotenv is repository-root .env. backend\.env is ignored.
 # Reuses a listening backend/frontend only when the launcher-owned PID identity,
-# command, repo root, and Git HEAD match this checkout. HTTP health/readiness is
+# command, repo root, and Git HEAD match this checkout and the port listener is
+# that PID or a verified descendant. An owned current-HEAD process that has not
+# bound its port yet is awaited, not duplicated. HTTP health/readiness is
 # checked separately after start/reuse. A different HEAD restarts that owned
 # process. An unrelated occupant of 8000/3000 is refused rather than killed.
 
@@ -138,16 +140,16 @@ if (Test-Path $LegacyBackendDotEnv) {
     Write-Host "WARNING: ignoring leftover $LegacyBackendDotEnv. Use $CanonicalDotEnv and remove the leftover file so it is not mistaken for active configuration." -ForegroundColor Yellow
 }
 
-function Invoke-DemoOwnedService {
+function Get-DemoServiceDecision {
     param(
         [string]$Label,
         [int]$Port,
-        [string]$PidFile,
-        [scriptblock]$Starter
+        [string]$PidFile
     )
     # Occupancy and identity are deliberately separate from HTTP readiness.
     # A slow Sports Hedge page must never make an occupied port look empty.
-    $portListening = Test-DemoPortListening -Port $Port
+    $listenerPids = @(Get-DemoPortListenerPids -Port $Port)
+    $portListening = $listenerPids.Count -gt 0
     $identity = $null
     if (Test-Path $PidFile) {
         $identity = ConvertTo-DemoIdentity -Raw (Get-Content $PidFile -Raw -ErrorAction SilentlyContinue)
@@ -156,13 +158,49 @@ function Invoke-DemoOwnedService {
     if ($null -ne $identity -and $null -ne $identity.pid) {
         $live = Get-DemoLiveProcess -ProcId $identity.pid
     }
-    $action = Get-DemoStartAction -PortListening $portListening -Identity $identity -Live $live -CurrentGitHead $Git.sha -CurrentRepoRoot $Root
+    $listenerOwned = $false
+    if ($portListening -and $null -ne $identity) {
+        $listenerOwned = Test-DemoListenerOwned -Identity $identity -Label $Label -ListenerPids $listenerPids
+    }
+    $action = Get-DemoStartAction -PortListening $portListening -ListenerOwned $listenerOwned -Identity $identity -Live $live -CurrentGitHead $Git.sha -CurrentRepoRoot $Root
+    return @{
+        action = $action
+        identity = $identity
+        listener_pids = $listenerPids
+    }
+}
+
+function Invoke-DemoOwnedService {
+    param(
+        [string]$Label,
+        [int]$Port,
+        [string]$PidFile,
+        [scriptblock]$Starter,
+        [int]$AwaitSeconds = 90
+    )
+    $decision = Get-DemoServiceDecision -Label $Label -Port $Port -PidFile $PidFile
+    if ($decision.action -eq "await") {
+        $ownedPid = $decision.identity.pid
+        Write-Host "${Label}: owned Sports Hedge PID $ownedPid for SHA $($Git.sha) is still starting; waiting for port $Port instead of launching a second copy"
+        for ($i = 0; $i -lt $AwaitSeconds -and $decision.action -eq "await"; $i++) {
+            Start-Sleep -Seconds 1
+            $decision = Get-DemoServiceDecision -Label $Label -Port $Port -PidFile $PidFile
+        }
+        if ($decision.action -eq "await") {
+            Show-StartupError "$Label PID $ownedPid is a Sports Hedge launcher process for this checkout but has not bound port $Port within $AwaitSeconds seconds. Refusing to start a second copy. Inspect logs under logs\, or run Stop-SportsHedge-Demo.bat and retry."
+        }
+        if ($decision.action -eq "start") {
+            Write-Host "${Label}: owned PID $ownedPid exited before binding port $Port; port $Port confirmed free"
+        }
+    }
+    $action = $decision.action
+    $identity = $decision.identity
     if ($action -eq "reuse") {
         Write-Host "${Label}: reused existing Sports Hedge process for SHA $($Git.sha)"
         return
     }
     if ($action -eq "conflict") {
-        Show-StartupError "$Label port $Port is already in use but is not a Sports Hedge launcher process for this checkout (SHA $($Git.sha)). Refusing to reuse or kill the unrelated process occupying the port."
+        Show-StartupError "$Label port $Port is already in use (listener PID $(@($decision.listener_pids) -join ', ')) but is not a Sports Hedge launcher process for this checkout (SHA $($Git.sha)). Refusing to reuse or kill the unrelated process occupying the port."
     }
     if ($action -eq "restart") {
         Write-Host "${Label}: restart required; recorded SHA $($identity.git_head) != current $($Git.sha)"

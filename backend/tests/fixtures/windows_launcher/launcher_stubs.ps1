@@ -19,6 +19,9 @@ function Get-StubProcess {
     }
     foreach ($proc in @($script:StubScenario.processes)) {
         if ([int]$proc.pid -eq $ProcId) {
+            if ($null -ne $proc.exits_after_checks -and $script:StubTotalChecks -ge [int]$proc.exits_after_checks) {
+                return $null
+            }
             return $proc
         }
     }
@@ -30,23 +33,31 @@ function Get-RepoGitIdentity {
     return @{ sha = [string]$script:StubScenario.git_sha; branch = "stub-branch"; repo_root = $RepoRoot }
 }
 
-function Test-DemoPortListening {
+# Port spec: listener_pids (PIDs owning the listener), listen_after_checks
+# (listener appears only from the Nth check of that port), takeover_pids
+# (listener once every listener_pids process is gone).
+# Process spec: exits_after_checks (process gone from the Nth port check).
+$script:StubPortChecks = @{}
+$script:StubTotalChecks = 0
+
+function Get-DemoPortListenerPids {
     param([int]$Port)
     Write-StubEvent "PORTCHECK" ([string]$Port)
-    $spec = $script:StubScenario.ports.([string]$Port)
-    if ($null -eq $spec -or -not [bool]$spec.listening) {
-        return $false
+    $key = [string]$Port
+    $script:StubPortChecks[$key] = 1 + [int]$script:StubPortChecks[$key]
+    $script:StubTotalChecks += 1
+    $spec = $script:StubScenario.ports.$key
+    if ($null -eq $spec) {
+        return @()
     }
-    $releasedBy = @($spec.released_by | Where-Object { $null -ne $_ })
-    if ($releasedBy.Count -eq 0) {
-        return $true
+    if ($null -ne $spec.listen_after_checks -and $script:StubPortChecks[$key] -lt [int]$spec.listen_after_checks) {
+        return @()
     }
-    foreach ($procId in $releasedBy) {
-        if (-not $script:StubStopped.Contains([int]$procId)) {
-            return $true
-        }
+    $alive = @(@($spec.listener_pids) | Where-Object { $null -ne $_ -and $null -ne (Get-StubProcess -ProcId ([int]$_)) } | ForEach-Object { [int]$_ })
+    if ($alive.Count -gt 0) {
+        return $alive
     }
-    return $false
+    return @(@($spec.takeover_pids) | Where-Object { $null -ne $_ } | ForEach-Object { [int]$_ })
 }
 
 function Get-DemoLiveProcess {
@@ -66,7 +77,7 @@ function Get-DemoLiveProcess {
 function Get-DemoCimProcessSnapshot {
     $rows = @()
     foreach ($proc in @($script:StubScenario.processes)) {
-        if ($script:StubStopped.Contains([int]$proc.pid)) {
+        if ($null -eq (Get-StubProcess -ProcId ([int]$proc.pid))) {
             continue
         }
         $rows += [pscustomobject]@{ ProcessId = [int]$proc.pid; ParentProcessId = [int]$proc.parent_pid }
