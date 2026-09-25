@@ -623,6 +623,14 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
     ]
     over = profiler.profile.over(LIVENESS_BOUND_S)
     detail = f"{profiler.profile.report()}\nsubphases={loop_subphase_snapshot()}"
+    print(
+        "issue572_representative "
+        f"fixtures={REPRESENTATIVE_FIXTURES} callbacks={profiler.profile.callbacks} "
+        f"busy_s={profiler.profile.total_s:.2f} "
+        f"longest_callback_ms={int(profiler.profile.longest_s * 1000)} "
+        f"heartbeat_worst_ms={int(heartbeat.worst_s * 1000)} "
+        f"callbacks_over_250ms={len(over)}"
+    )
 
     assert len(report.discovered_fixtures) == REPRESENTATIVE_FIXTURES
     assert len(evaluated) == REPRESENTATIVE_FIXTURES
