@@ -1,0 +1,126 @@
+name: Windows Launcher CI
+
+on:
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "scripts/windows/**"
+      - "backend/src/sports_hedge/api/desktop_*.py"
+      - "backend/src/sports_hedge/api/main.py"
+      - "frontend/app/api/desktop/**"
+      - "frontend/lib/desktop-*"
+      - "frontend/components/exit-sports-hedge*"
+      - "frontend/components/sidebar.tsx"
+      - ".github/workflows/windows-launcher-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "scripts/windows/**"
+      - "backend/src/sports_hedge/api/desktop_*.py"
+      - "backend/src/sports_hedge/api/main.py"
+      - "frontend/app/api/desktop/**"
+      - "frontend/lib/desktop-*"
+      - "frontend/components/exit-sports-hedge*"
+      - "frontend/components/sidebar.tsx"
+      - ".github/workflows/windows-launcher-ci.yml"
+  workflow_dispatch:
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  launcher:
+    name: Build, test and publish SportsHedge.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Parse Windows PowerShell scripts (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem scripts/windows/*.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $failed = $true; Write-Host "$($file.Name):"; $errors | ForEach-Object { Write-Host "  $_" } }
+          }
+          if ($failed) { exit 1 }
+      - name: Restore
+        run: dotnet restore desktop/SportsHedge.Desktop.sln
+      - name: Build
+        run: dotnet build desktop/SportsHedge.Desktop.sln -c Release --no-restore
+      - name: Unit + Windows Job Object integration tests
+        run: dotnet test desktop/SportsHedge.Desktop.sln -c Release --no-build --logger "console;verbosity=normal" --logger "trx;LogFileName=launcher-tests.trx"
+      - name: Publish win-x64 (self-contained, single file)
+        run: dotnet publish desktop/SportsHedge.Launcher/SportsHedge.Launcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/windows
+      - name: Verify SportsHedge.exe
+        shell: pwsh
+        run: |
+          $exe = Get-Item dist/windows/SportsHedge.exe -ErrorAction Stop
+          $version = $exe.VersionInfo
+          Write-Host "SportsHedge.exe $([math]::Round($exe.Length / 1MB, 1)) MB, product=$($version.ProductName) file=$($version.FileVersion)"
+          $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 0x5C)
+          if ($subsystem -ne 2) { throw "SportsHedge.exe is not a GUI (WinExe) subsystem binary (subsystem=$subsystem)" }
+          Write-Host "PE subsystem=2 (Windows GUI, no console)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SportsHedge-win-x64-${{ github.sha }}
+          path: dist/windows/SportsHedge.exe
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launcher-test-results
+          path: desktop/**/TestResults/*.trx
+          if-no-files-found: ignore
+
+  end-to-end:
+    name: End-to-end controller lifecycle (real backend + production Next.js)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Backend venv (backend\.venv, same layout operators use)
+        shell: pwsh
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/Scripts/python.exe -m pip install --upgrade pip
+          backend/.venv/Scripts/python.exe -m pip install -e "backend[dev]"
+      - name: Frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Build launcher solution
+        run: dotnet build desktop/SportsHedge.Desktop.sln -c Release
+      - name: End-to-end scenarios
+        env:
+          SPORTS_HEDGE_E2E_REPO: ${{ github.workspace }}
+        run: dotnet test desktop/SportsHedge.Launcher.Tests/SportsHedge.Launcher.Tests.csproj -c Release --no-build --filter "FullyQualifiedName~EndToEndTests" --logger "console;verbosity=detailed"
+      - name: Checkout not mutated by the controller
+        shell: pwsh
+        run: |
+          $status = git status --porcelain --untracked-files=no
+          if ($status) { Write-Host $status; throw "tracked files changed during end-to-end run" }
+          Write-Host "No tracked files changed."
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-logs
+          path: logs/
+          if-no-files-found: ignore
