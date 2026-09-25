@@ -139,8 +139,8 @@ public sealed class ServiceSpecFactory : IServiceSpecFactory
     // `npm ci` never rewrites package-lock.json, so the checkout is not mutated.
     public ProcessSpec FrontendInstall(GitIdentity git) => Npm(
         "frontend-install",
-        new[] { "ci", "--no-audit", "--no-fund" },
-        ChildEnvironment.Build(ChildRole.FrontendBuild, _parentEnvironment, _secrets, git, _layout),
+        new[] { "ci", "--include=dev", "--no-audit", "--no-fund" },
+        ChildEnvironment.Build(ChildRole.FrontendInstall, _parentEnvironment, _secrets, git, _layout),
         _layout.FrontendBuildOutLog,
         _layout.FrontendBuildErrLog);
 

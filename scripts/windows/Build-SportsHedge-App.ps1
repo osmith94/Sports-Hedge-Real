@@ -4,7 +4,8 @@
 #
 # 1. Validates prerequisites (git, Node/npm, .NET 8 SDK) and locates the repo root.
 # 2. Reports the Git SHA / branch being built.
-# 3. Frontend: npm ci (if node_modules missing), typecheck, tests, production
+# 3. Frontend: npm ci when node_modules is missing or its recorded
+#    package-lock.json SHA-256 differs, typecheck, tests, production
 #    `npm run build`, then writes frontend\.next\sports-hedge-build.json
 #    (schema sports-hedge-frontend-build/v1: git_sha, git_branch,
 #    build_timestamp, next_build_id, frontend_dirty, builder).
@@ -47,6 +48,19 @@ function Invoke-Step {
     }
 }
 
+function Get-ManifestFingerprint {
+    return (@("package.json", "package-lock.json") | ForEach-Object {
+        (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $FrontendDir $_)).Hash
+    }) -join ","
+}
+
+function Assert-ManifestUnchanged {
+    param([string]$Label)
+    if ((Get-ManifestFingerprint) -ne $ManifestFingerprint) {
+        Fail "$Label modified frontend\package.json or frontend\package-lock.json. Inspect with 'git diff frontend'; nothing was reverted."
+    }
+}
+
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 foreach ($required in @(".git", "backend\pyproject.toml", "backend\src\sports_hedge\api\desktop_host.py", "frontend\package.json", "desktop\SportsHedge.Desktop.sln")) {
     if (-not (Test-Path (Join-Path $Root $required))) {
@@ -62,6 +76,13 @@ $ExePath = Join-Path $DistDir "SportsHedge.exe"
 $NextDir = Join-Path $FrontendDir ".next"
 $MarkerPath = Join-Path $NextDir "sports-hedge-build.json"
 $BuildIdPath = Join-Path $NextDir "BUILD_ID"
+$PackageLockPath = Join-Path $FrontendDir "package-lock.json"
+$NodeModulesDir = Join-Path $FrontendDir "node_modules"
+$DepsMarkerPath = Join-Path $NodeModulesDir ".sports-hedge-deps.json"
+if (-not (Test-Path $PackageLockPath)) {
+    Fail "frontend\package-lock.json is missing; npm ci requires the committed lockfile."
+}
+$ManifestFingerprint = Get-ManifestFingerprint
 
 foreach ($tool in @("git", "node", "npm.cmd", "dotnet")) {
     if ($null -eq (Get-Command $tool -ErrorAction SilentlyContinue)) {
@@ -99,8 +120,41 @@ if (Test-Path $ExePath) {
 # ---- Frontend (production Next.js) ----
 Push-Location $FrontendDir
 try {
-    if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
-        Invoke-Step "npm ci (frontend dependencies)" { & npm.cmd ci --no-audit --no-fund }
+    # Same contract as SportsHedge.exe: npm ci (never npm install) when
+    # node_modules is missing or was not installed from this exact lockfile.
+    $lockHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PackageLockPath).Hash.ToLowerInvariant()
+    $recordedHash = $null
+    if (Test-Path $DepsMarkerPath) {
+        try {
+            $depsMarker = Get-Content -Raw $DepsMarkerPath | ConvertFrom-Json
+            if ($depsMarker.schema -eq "sports-hedge-frontend-deps/v1") {
+                $recordedHash = [string]$depsMarker.package_lock_sha256
+            }
+        } catch {
+            $recordedHash = $null
+        }
+    }
+    if (-not (Test-Path $NodeModulesDir) -or $recordedHash -ne $lockHash) {
+        Write-Host "Frontend dependencies: package-lock.json sha256 $lockHash; node_modules installed from $(if ($recordedHash) { $recordedHash } else { '(unknown)' })"
+        if (Test-Path $DepsMarkerPath) {
+            Remove-Item -LiteralPath $DepsMarkerPath -Force
+        }
+        # NODE_ENV=production would make npm ci omit devDependencies, and
+        # `next build` would then npm-install them itself, rewriting package.json.
+        Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue
+        Remove-Item Env:NPM_CONFIG_PRODUCTION -ErrorAction SilentlyContinue
+        Remove-Item Env:NPM_CONFIG_OMIT -ErrorAction SilentlyContinue
+        Invoke-Step "npm ci (frontend dependencies)" { & npm.cmd ci --include=dev --no-audit --no-fund }
+        Assert-ManifestUnchanged "npm ci"
+        $depsRecord = [ordered]@{
+            schema = "sports-hedge-frontend-deps/v1"
+            package_lock_sha256 = $lockHash
+            installed_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            installer = "Build-SportsHedge-App.ps1"
+        }
+        ($depsRecord | ConvertTo-Json) | Set-Content -Path $DepsMarkerPath -Encoding utf8
+    } else {
+        Write-Host "Frontend dependencies match package-lock.json ($lockHash); skipping npm ci."
     }
     if (-not $SkipFrontendChecks) {
         Invoke-Step "Frontend typecheck" { & npm.cmd run typecheck }
@@ -120,6 +174,7 @@ try {
         Remove-Item -LiteralPath $MarkerPath -Force
     }
     Invoke-Step "Production frontend build (npm run build)" { & npm.cmd run build }
+    Assert-ManifestUnchanged "npm run build"
 } finally {
     Pop-Location
 }

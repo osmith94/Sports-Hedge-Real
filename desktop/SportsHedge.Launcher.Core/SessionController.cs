@@ -122,13 +122,17 @@ public sealed class SessionController
                 return await FailStartupAsync(component, preflight.Message!).ConfigureAwait(false);
             }
 
-            component = "Frontend build";
-            State.Progress("Checking frontend build…");
+            component = "Frontend dependencies";
+            State.Progress("Checking interface dependencies…");
             var deps = await _deps.FrontendBuilder.EnsureDependenciesAsync(Git, token).ConfigureAwait(false);
             if (!deps.Success)
             {
-                return await FailStartupAsync(component, deps.Detail).ConfigureAwait(false);
+                return await FailStartupAsync(component,
+                    $"{deps.Detail}\nThe interface was NOT built or started. Sports Hedge remains stopped.").ConfigureAwait(false);
             }
+
+            component = "Frontend build";
+            State.Progress("Checking frontend build…");
             var dirty = _deps.Git.IsPathDirty(_layout.RepoRoot, "frontend");
             var decision = EvaluateBuild(dirty);
             _log.Info($"frontend_build_decision {decision.Describe()} frontend_dirty={dirty}");

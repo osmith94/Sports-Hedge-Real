@@ -200,6 +200,10 @@ public sealed class FakeRoot : IRootProcess
 
     public void Exit(int code)
     {
+        if (_exited.Task.IsCompleted)
+        {
+            return;
+        }
         ExitCode = code;
         _exited.TrySetResult();
     }
@@ -296,11 +300,17 @@ public sealed class FakeBuilder : IFrontendBuilder
     }
 
     public bool Fail { get; set; }
+    public bool FailDependencies { get; set; }
     public int Builds { get; private set; }
     public TaskCompletionSource? Gate { get; set; }
 
-    public Task<FrontendBuildResult> EnsureDependenciesAsync(GitIdentity git, CancellationToken cancellationToken) =>
-        Task.FromResult(new FrontendBuildResult(true, "present"));
+    public Task<FrontendBuildResult> EnsureDependenciesAsync(GitIdentity git, CancellationToken cancellationToken)
+    {
+        _journal.Add("dependencies");
+        return Task.FromResult(FailDependencies
+            ? new FrontendBuildResult(false, "npm ci failed with exit code 1.")
+            : new FrontendBuildResult(true, "present"));
+    }
 
     public async Task<FrontendBuildResult> BuildAsync(GitIdentity git, bool frontendDirty, CancellationToken cancellationToken)
     {

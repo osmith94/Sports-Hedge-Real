@@ -9,6 +9,7 @@ public enum ChildRole
     Backend,
     Frontend,
     FrontendBuild,
+    FrontendInstall,
 }
 
 /// <summary>
@@ -86,6 +87,17 @@ public static class ChildEnvironment
                 // `next build` inlines NEXT_PUBLIC_* only; no desktop identity
                 // or secret is present while building.
                 env["NODE_ENV"] = "production";
+                break;
+            case ChildRole.FrontendInstall:
+                // NODE_ENV=production makes `npm ci` omit devDependencies
+                // (typescript, @types/*); `next build` would then run
+                // `npm install` itself and rewrite package.json/package-lock.json.
+                foreach (var key in env.Keys.Where(k => k.Equals("NODE_ENV", StringComparison.OrdinalIgnoreCase)
+                                                        || k.Equals("NPM_CONFIG_PRODUCTION", StringComparison.OrdinalIgnoreCase)
+                                                        || k.Equals("NPM_CONFIG_OMIT", StringComparison.OrdinalIgnoreCase)).ToList())
+                {
+                    env.Remove(key);
+                }
                 break;
         }
 

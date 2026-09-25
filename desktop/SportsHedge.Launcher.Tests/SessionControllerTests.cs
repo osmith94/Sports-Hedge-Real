@@ -20,7 +20,7 @@ public sealed class SessionControllerTests
         Assert.True(result.Success, result.Reason);
         Assert.Equal(ControllerState.Running, h.Controller.State.State);
         Assert.Equal(0, h.Builder.Builds);
-        Assert.Equal(new[] { "start:backend", "start:frontend" }, h.Journal.Events);
+        Assert.Equal(new[] { "dependencies", "start:backend", "start:frontend" }, h.Journal.Events);
         Assert.True(h.Log.Contains("rebuild=False reason=Match"));
         Assert.NotNull(h.Ipc.Handler);
     }
@@ -69,6 +69,24 @@ public sealed class SessionControllerTests
         Assert.False(File.Exists(h.Layout.FrontendBuildMarkerPath));
         var report = await h.Controller.Completion.WaitAsync(Wait);
         Assert.True(report.Failed);
+    }
+
+    [Fact]
+    public async Task Npm_ci_failure_refuses_startup_before_any_build_or_service()
+    {
+        var h = new Harness(markerMatches: false);
+        h.Builder.FailDependencies = true;
+
+        var result = await h.Controller.StartAsync();
+
+        Assert.False(result.Success);
+        Assert.Equal("Frontend dependencies", result.FailedComponent);
+        Assert.Contains("npm ci failed", result.Reason);
+        Assert.Contains("NOT built or started", result.Reason);
+        Assert.Equal(0, h.Builder.Builds);
+        Assert.Empty(h.Launcher.Started);
+        Assert.Equal(ControllerState.Failed, h.Controller.State.State);
+        Assert.True((await h.Controller.Completion.WaitAsync(Wait)).Failed);
     }
 
     [Fact]

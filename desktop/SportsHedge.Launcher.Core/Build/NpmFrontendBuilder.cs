@@ -37,14 +37,42 @@ public sealed class NpmFrontendBuilder : IFrontendBuilder
 
     public async Task<FrontendBuildResult> EnsureDependenciesAsync(GitIdentity git, CancellationToken cancellationToken)
     {
-        if (Directory.Exists(_layout.NodeModulesDir))
+        var fingerprint = FrontendDependencyMarkerStore.Fingerprint(_layout.PackageLockPath);
+        if (fingerprint is null)
         {
-            return new FrontendBuildResult(true, "frontend node_modules present");
+            return new FrontendBuildResult(false, $"{_layout.PackageLockPath} is missing; `npm ci` requires the committed lockfile.");
         }
-        _log.Info("frontend_install_start command=\"npm ci\" reason=node_modules_missing");
+        var decision = FrontendDependencyDecision.Evaluate(
+            Directory.Exists(_layout.NodeModulesDir),
+            FrontendDependencyMarkerStore.Read(_layout.FrontendDependencyMarkerPath),
+            fingerprint);
+        _log.Info($"frontend_dependencies_decision {decision.Describe()}");
+        if (!decision.InstallRequired)
+        {
+            return new FrontendBuildResult(true, "frontend node_modules match package-lock.json");
+        }
+
+        FrontendDependencyMarkerStore.Delete(_layout.FrontendDependencyMarkerPath);
+        _log.Info($"frontend_install_start command=\"npm ci\" reason={decision.Reason}");
         var result = await RunAsync(_specs.FrontendInstall(git), "npm ci", cancellationToken).ConfigureAwait(false);
-        _log.Info($"frontend_install_result success={result.Success} detail={result.Detail}");
-        return result;
+        _log.Info($"frontend_install_result success={result.Success} detail=\"{result.Detail.Replace('\n', ' ')}\"");
+        if (!result.Success)
+        {
+            return result;
+        }
+        var after = FrontendDependencyMarkerStore.Fingerprint(_layout.PackageLockPath);
+        if (after != fingerprint)
+        {
+            return new FrontendBuildResult(false, "package-lock.json changed while `npm ci` was running; dependencies were not recorded.");
+        }
+        Directory.CreateDirectory(_layout.NodeModulesDir);
+        FrontendDependencyMarkerStore.Write(_layout.FrontendDependencyMarkerPath, new FrontendDependencyMarker
+        {
+            PackageLockSha256 = fingerprint,
+            InstalledAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture),
+            Installer = "SportsHedge.exe",
+        });
+        return new FrontendBuildResult(true, $"npm ci succeeded for package-lock.json {fingerprint[..12]}");
     }
 
     public async Task<FrontendBuildResult> BuildAsync(GitIdentity git, bool frontendDirty, CancellationToken cancellationToken)
@@ -72,7 +100,27 @@ public sealed class NpmFrontendBuilder : IFrontendBuilder
         return new FrontendBuildResult(true, $"production build {buildId} recorded for {git.Sha}");
     }
 
+    /// <summary>
+    /// npm or Next.js must never rewrite the tracked manifest or lockfile. If
+    /// they do, fail loudly and leave the change for the operator to inspect.
+    /// </summary>
     private async Task<FrontendBuildResult> RunAsync(ProcessSpec spec, string label, CancellationToken cancellationToken)
+    {
+        var manifestBefore = FrontendDependencyMarkerStore.Fingerprint(_layout.PackageJsonPath);
+        var lockBefore = FrontendDependencyMarkerStore.Fingerprint(_layout.PackageLockPath);
+        var result = await RunProcessAsync(spec, label, cancellationToken).ConfigureAwait(false);
+        if (FrontendDependencyMarkerStore.Fingerprint(_layout.PackageJsonPath) != manifestBefore
+            || FrontendDependencyMarkerStore.Fingerprint(_layout.PackageLockPath) != lockBefore)
+        {
+            _log.Error($"checkout_mutated command=\"{label}\" files=frontend/package.json,frontend/package-lock.json");
+            return new FrontendBuildResult(false,
+                $"{label} modified frontend\\package.json or frontend\\package-lock.json. Sports Hedge does not change the checkout; " +
+                "the change was left in place for inspection (git diff frontend) and startup was refused.");
+        }
+        return result;
+    }
+
+    private async Task<FrontendBuildResult> RunProcessAsync(ProcessSpec spec, string label, CancellationToken cancellationToken)
     {
         LogFiles.RollToPrevious(spec.StdoutLog);
         LogFiles.RollToPrevious(spec.StderrLog);

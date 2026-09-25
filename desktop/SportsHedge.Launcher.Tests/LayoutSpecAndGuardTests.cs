@@ -119,7 +119,7 @@ public sealed class ServiceSpecTests
             Assert.DoesNotContain(" dev", command);
             var build = Factory(layout).FrontendBuild(_git).DisplayCommand;
             Assert.Contains("run build", build);
-            Assert.Contains("ci --no-audit --no-fund", Factory(layout).FrontendInstall(_git).DisplayCommand);
+            Assert.Contains("ci --include=dev --no-audit --no-fund", Factory(layout).FrontendInstall(_git).DisplayCommand);
         }
         var windows = Factory(_layout with { IsWindows = true }).Frontend(_git);
         Assert.Equal("/d /s /c \"\"C:\\Program Files\\nodejs\\npm.cmd\" run start -- -H 127.0.0.1 -p 3000\"", windows.RawArguments);

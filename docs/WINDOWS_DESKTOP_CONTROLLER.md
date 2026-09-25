@@ -18,7 +18,7 @@ It is not an installer. Python, Node and the application source are not bundled:
 
 Tray states: `Sports Hedge — Starting`, `Sports Hedge — PAPER MODE — Running`, `Sports Hedge — Degraded`, `Sports Hedge — Stopping`.
 
-A small progress window shows `Starting Sports Hedge…`, `Checking frontend build…`, `Building interface…` (only when needed), `Starting backend…`, `Waiting for backend…`, `Starting interface…`, `Waiting for interface…`. On failure a dialog names the failed component, the reason, the log directory and the Git SHA/branch, after cleaning up anything the controller started.
+A small progress window shows `Starting Sports Hedge…`, `Checking interface dependencies…`, `Checking frontend build…`, `Building interface…` (only when needed), `Starting backend…`, `Waiting for backend…`, `Starting interface…`, `Waiting for interface…`. On failure a dialog names the failed component, the reason, the log directory and the Git SHA/branch, after cleaning up anything the controller started.
 
 ## Build
 
@@ -27,7 +27,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Build-
 # optional: -CreateDesktopShortcut  -SkipFrontendChecks  -SkipDotnetTests
 ```
 
-Requires Git, Node.js 22 (npm), the .NET 8 SDK and, at runtime, `backend\.venv`. On Windows the venv also needs `tzdata` (`backend\.venv\Scripts\python -m pip install tzdata`): Windows CPython has no IANA time-zone database and the backend imports `ZoneInfo("Europe/London")` at startup. This is a pre-existing requirement of the backend on Windows (it is not declared in `backend/pyproject.toml`); without it the controller's failure dialog shows `ZoneInfoNotFoundError` from `logs\desktop-backend.err.log`. Output: `dist\windows\SportsHedge.exe` (self-contained, single-file, win-x64) and `dist\windows\SportsHedge.launcher.json` (records the repo root so a moved `dist\windows` folder still finds the checkout). `dist/`, `bin/`, `obj/` and `.next/` are gitignored; CI publishes the exe as a GitHub Actions artifact instead of committing it.
+Requires Git, Node.js 22 (npm), the .NET 8 SDK and, at runtime, `backend\.venv`. The standard `pip install -e ".[dev]"` is sufficient: on Windows it also installs `tzdata` (declared in `backend/pyproject.toml` as `sys_platform == 'win32'`), because Windows CPython has no IANA time-zone database and the backend imports `ZoneInfo("Europe/London")` at startup. A venv created before that dependency existed only needs the same install command re-run. Output: `dist\windows\SportsHedge.exe` (self-contained, single-file, win-x64) and `dist\windows\SportsHedge.launcher.json` (records the repo root so a moved `dist\windows` folder still finds the checkout). `dist/`, `bin/`, `obj/` and `.next/` are gitignored; CI publishes the exe as a GitHub Actions artifact instead of committing it.
 
 ## Updates: application code vs controller code
 
@@ -59,7 +59,24 @@ The interface is rebuilt (`npm run build`) when the marker is missing or invalid
 - The marker is deleted before every build and written only after a successful one. A failed build therefore never leaves an old `.next` looking current: startup is refused, a dialog explains why, and Sports Hedge stays stopped.
 - The marker lives inside `.next\`. `next dev` (the PowerShell demo launcher) and `Refresh-SportsHedge-Demo.ps1` both wipe `.next`, which also removes the marker and forces a rebuild next time.
 - A separate `distDir` was rejected because Next.js rewrites the tracked `next-env.d.ts` and `tsconfig.json` for any non-default `distDir`, which would mutate the checkout.
-- Missing `frontend\node_modules` is installed with `npm ci` (never rewrites `package-lock.json`).
+### Frontend dependency freshness
+
+Before the build check, the controller compares the SHA-256 of `frontend\package-lock.json` with `frontend\node_modules\.sports-hedge-deps.json`:
+
+```json
+{
+  "schema": "sports-hedge-frontend-deps/v1",
+  "package_lock_sha256": "…",
+  "installed_at": "2026-09-25T13:00:00Z",
+  "installer": "SportsHedge.exe | Build-SportsHedge-App.ps1"
+}
+```
+
+- `npm ci --include=dev` runs when `node_modules` is missing, the marker is missing or invalid, or the recorded fingerprint differs (for example after a `git pull` that changed the lockfile). A matching fingerprint skips it, so normal launches stay fast.
+- Only `npm ci` is used, never `npm install`. It runs without `NODE_ENV=production`, so devDependencies such as TypeScript are always installed. Otherwise `next build` would install them itself and rewrite `package.json` and `package-lock.json`.
+- The marker is deleted before `npm ci` and written only after it succeeds. A failed `npm ci` refuses startup before any build or service starts.
+- As a backstop, if `npm ci` or `npm run build` ever changes `frontend\package.json` or `package-lock.json`, startup is refused and the change is left in place for inspection. The controller never reverts or edits checkout files.
+- The marker lives inside `node_modules`, so deleting `node_modules` (or `npm ci` itself) removes it. A `node_modules` installed by hand has no marker, so the next launch runs `npm ci` once to record it.
 
 ## Architecture
 

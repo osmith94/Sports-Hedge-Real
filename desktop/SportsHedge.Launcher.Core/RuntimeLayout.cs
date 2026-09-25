@@ -9,6 +9,11 @@ public sealed record RuntimeLayout(string RepoRoot, bool IsWindows)
     public string FrontendDir => Path.Combine(RepoRoot, "frontend");
     public string LogsDir => Path.Combine(RepoRoot, "logs");
     public string NodeModulesDir => Path.Combine(FrontendDir, "node_modules");
+    public string PackageJsonPath => Path.Combine(FrontendDir, "package.json");
+    public string PackageLockPath => Path.Combine(FrontendDir, "package-lock.json");
+
+    // Inside node_modules (gitignored); `npm ci` and deleting node_modules both remove it.
+    public string FrontendDependencyMarkerPath => Path.Combine(NodeModulesDir, ".sports-hedge-deps.json");
 
     // Production Next.js output. `next dev` and the Refresh script both wipe
     // this directory, which also removes the marker below.

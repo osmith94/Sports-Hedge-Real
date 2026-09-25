@@ -44,6 +44,8 @@ public sealed class EndToEndTests
         }
         await using var host = HostRun.Start(Repo, NewMutex(), _output);
         var running = await host.WaitForLineAsync("RUNNING", StartupTimeout);
+        Assert.True(host.Saw("frontend_install_result success=True") || host.Saw("install=False reason=Match"),
+            "frontend dependency freshness was not established");
         Assert.True(host.Saw("rebuild=True"), "stale build SHA did not trigger a rebuild");
         Assert.True(host.Saw("frontend_rebuild_result success=True"));
         var pids = HostRun.ParsePids(running);
@@ -86,6 +88,8 @@ public sealed class EndToEndTests
         await using var host = HostRun.Start(Repo, mutex, _output);
         var running = await host.WaitForLineAsync("RUNNING", StartupTimeout);
         Assert.True(host.Saw("rebuild=False reason=Match"), "matching build SHA was rebuilt");
+        Assert.True(host.Saw("install=False reason=Match"), "matching package-lock fingerprint re-ran npm ci");
+        Assert.False(host.Saw("frontend_install_start"));
         var pids = HostRun.ParsePids(running);
 
         // Scenario G: a second launcher never starts duplicate children.

@@ -16,6 +16,8 @@ public sealed class ChildEnvironmentTests
     private static readonly Dictionary<string, string> HostileParent = new()
     {
         ["PATH"] = "/usr/bin",
+        ["NODE_ENV"] = "production",
+        ["npm_config_omit"] = "dev",
         ["SPORTS_HEDGE_MODE"] = "live",
         ["SPORTS_HEDGE_EXECUTION_ENABLED"] = "true",
         ["PAPER_AUTOFILL_ENABLED"] = "false",
@@ -31,6 +33,7 @@ public sealed class ChildEnvironmentTests
     [InlineData(ChildRole.Backend)]
     [InlineData(ChildRole.Frontend)]
     [InlineData(ChildRole.FrontendBuild)]
+    [InlineData(ChildRole.FrontendInstall)]
     public void Paper_only_safety_is_forced_over_parent_environment(ChildRole role)
     {
         var env = Build(role);
@@ -72,6 +75,16 @@ public sealed class ChildEnvironmentTests
             Assert.DoesNotContain(_secrets.PipeName, value);
             Assert.DoesNotContain("CONTROLLER", key, StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    [Fact]
+    public void Npm_ci_environment_never_omits_dev_dependencies()
+    {
+        var env = Build(ChildRole.FrontendInstall);
+        Assert.DoesNotContain(env.Keys, k => k.Equals("NODE_ENV", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(env.Keys, k => k.Equals("npm_config_omit", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(_secrets.ControllerToken, env.Values);
+        Assert.DoesNotContain(_secrets.BackendShutdownToken, env.Values);
     }
 
     [Fact]
