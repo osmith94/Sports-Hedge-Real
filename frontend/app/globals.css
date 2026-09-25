@@ -40,6 +40,21 @@ button, input, select { font: inherit; }
 .paper-pill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid rgba(124, 242, 176, .2); color: var(--accent); background: var(--accent-soft); padding: 7px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: .1em; }
 .paper-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px rgba(124, 242, 176, .6); }
 .sidebar-note { color: var(--muted-2); font-size: 10px; line-height: 1.45; margin: 10px 1px 0; }
+.desktop-exit-button { margin-top: 12px; width: 100%; background: transparent; border: 1px solid var(--line-strong); color: var(--muted); border-radius: 9px; padding: 7px 9px; font-size: 11px; font-weight: 700; cursor: pointer; text-align: left; }
+.desktop-exit-button:hover { color: var(--text); border-color: rgba(240, 130, 130, .45); }
+.desktop-exit-backdrop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; background: rgba(4, 8, 7, .72); }
+.desktop-exit-dialog { width: min(420px, calc(100vw - 32px)); background: var(--panel-raised); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 20px; box-shadow: 0 24px 60px rgba(0, 0, 0, .45); }
+.desktop-exit-dialog h2 { margin: 0 0 8px; font-size: 16px; }
+.desktop-exit-dialog p { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.desktop-exit-dialog .desktop-exit-error { color: var(--red); }
+.desktop-exit-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.desktop-exit-actions button { border-radius: 9px; padding: 8px 12px; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid var(--line-strong); background: var(--panel); color: var(--text); }
+.desktop-exit-actions .desktop-exit-confirm { border-color: rgba(240, 130, 130, .5); color: var(--red); }
+.desktop-exit-actions button:disabled { opacity: .6; cursor: default; }
+.desktop-exit-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: var(--bg); }
+.desktop-exit-overlay-card { text-align: center; max-width: 460px; padding: 24px; }
+.desktop-exit-overlay-card h1 { margin: 18px 0 8px; font-size: 22px; }
+.desktop-exit-overlay-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 
 .content { min-width: 0; }
 .topbar { min-height: 44px; padding: 6px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; background: rgba(8, 16, 15, .88); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 20; }

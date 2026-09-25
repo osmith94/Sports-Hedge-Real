@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { ExitSportsHedge } from "./exit-sports-hedge";
+
 const navGroups = [
   {
     title: "Arbitrage",
@@ -76,6 +78,7 @@ export function Sidebar() {
         <div className="sidebar-note">
           Research and simulation only. Live execution is disabled at the application boundary.
         </div>
+        <ExitSportsHedge />
       </div>
     </aside>
   );
