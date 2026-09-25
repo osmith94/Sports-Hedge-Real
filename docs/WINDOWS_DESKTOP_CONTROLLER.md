@@ -163,6 +163,7 @@ These mirror `Start-SportsHedge-Demo.ps1`. No venue write, order, wallet-signing
 - Running `next dev` against the same checkout while `SportsHedge.exe` is running on another port would wipe `.next` underneath the production server.
 - Any change to `frontend\` while uncommitted forces a rebuild on every launch (correctness over speed).
 - The exe is unsigned; SmartScreen may warn on first run.
+- CI exercises the controller core headlessly (Job Objects, pipe ACL, end-to-end lifecycle on `windows-latest`) and verifies the published exe, but the WinForms tray surface itself (tray menu, balloon tips, progress window, failure dialog, activation of a running instance by a second `SportsHedge.exe`) needs a manual check on an interactive Windows desktop.
 
 ## Remaining work before a fully portable installed app
 
