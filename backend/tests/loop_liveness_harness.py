@@ -269,7 +269,7 @@ EXTREME_STRESS_GC_ALLOWANCE_S = 0.50
 
 @dataclass(frozen=True)
 class SchedulingGap:
-    """One ``await asyncio.sleep(0)`` round trip and the loop-thread GC inside it."""
+    """Lateness of one short timer wake-up and the loop-thread GC inside that cycle."""
 
     gap_s: float
     gc_s: float
@@ -280,13 +280,16 @@ class SchedulingGap:
 
 
 async def probe_gc_attributed_gaps(
-    stop: asyncio.Event, *, interval_s: float = 0.01
+    stop: asyncio.Event, *, interval_s: float = 0.005
 ) -> list[SchedulingGap]:
-    """Scheduling gaps with the exact GC time recorded inside each one.
+    """Health-style wake-up lateness with the exact GC time recorded in each cycle.
 
-    Uses the production GC monitor's monotonic total, so attribution is a
-    subtraction, not a timestamp match. Reads are ordered so any GC between a
-    counter read and a clock read is charged to the gap, never to GC.
+    The probe always has a pending wake-up, so every loop stall delays some
+    sample. GC comes from the production GC monitor's monotonic total, so
+    attribution is a subtraction, not a timestamp match. Read order charges any
+    GC between a clock read and a counter read to the gap, not to GC; GC that
+    finished before the wake-up was due can be over-credited by at most
+    ``interval_s``.
     """
 
     from sports_hedge.application.event_loop_activity import (
@@ -295,19 +298,15 @@ async def probe_gc_attributed_gaps(
     )
 
     install_gc_pause_monitor()
+    loop = asyncio.get_running_loop()
     gaps: list[SchedulingGap] = []
-    await asyncio.sleep(0)
     while not stop.is_set():
+        due = loop.time() + interval_s
         gc_before = gc_pause_total_seconds()
-        started = time.perf_counter()
-        await asyncio.sleep(0)
+        await asyncio.sleep(interval_s)
         gc_after = gc_pause_total_seconds()
-        ended = time.perf_counter()
-        gaps.append(SchedulingGap(ended - started, max(0.0, gc_after - gc_before)))
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval_s)
-        except TimeoutError:
-            continue
+        woke = loop.time()
+        gaps.append(SchedulingGap(max(0.0, woke - due), max(0.0, gc_after - gc_before)))
     return gaps
 
 
