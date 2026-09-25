@@ -39,7 +39,9 @@ from sports_hedge.matching.learned_rules import SECRET_KEY_FRAGMENTS, squad_cate
 # Bump when fingerprint fields or reuse rules change. Matcher threshold,
 # kickoff window, assignment margin, competition registry, alias catalog, and
 # learned-rule versions are hashed separately into the semantic version.
-IDENTITY_CACHE_SEMANTIC_VERSION = 1
+# 2: MLB scheduled-game identity uses ordinals plus kickoff tolerance, not
+# exact minute-key equality. Stale negative pair cache must not survive.
+IDENTITY_CACHE_SEMANTIC_VERSION = 2
 
 
 def event_cache_key(item: Any) -> tuple[str, str]:

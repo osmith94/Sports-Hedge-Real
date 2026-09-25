@@ -54,17 +54,14 @@ def known_target_competition_mismatch(left: str | None, right: str | None) -> bo
 
 
 def _mlb_game_keys_compatible(left: CanonicalEvent, right: CanonicalEvent) -> tuple[bool, str | None]:
-    """Both keys must be present and equal. A one-sided key is ambiguous."""
+    """Ordinal safety. A one-minute key difference is not a different game."""
 
-    from sports_hedge.mlb.constants import MLB_GAME_IDENTITY_AMBIGUOUS, MLB_GAME_IDENTITY_MISMATCH
+    from sports_hedge.mlb.identity import mlb_scheduled_games_compatible
 
-    left_key = str(getattr(left, "scheduled_game_key", None) or "").strip()
-    right_key = str(getattr(right, "scheduled_game_key", None) or "").strip()
-    if not left_key or not right_key:
-        return False, MLB_GAME_IDENTITY_AMBIGUOUS
-    if left_key != right_key:
-        return False, MLB_GAME_IDENTITY_MISMATCH
-    return True, None
+    return mlb_scheduled_games_compatible(
+        getattr(left, "scheduled_game_key", None),
+        getattr(right, "scheduled_game_key", None),
+    )
 
 
 def paper_event_matcher(
@@ -431,8 +428,6 @@ class EventMatcher:
         keys when the clocks are more than 14 days apart.
         """
 
-        from datetime import timedelta
-
         from sports_hedge.tennis.constants import (
             TENNIS_EVENT_SINGLES,
             TENNIS_EVENT_TYPE_NOT_SINGLES,
@@ -444,6 +439,7 @@ class EventMatcher:
             TENNIS_SCHEDULE_DRIFT,
             TENNIS_SCHEDULE_OUTSIDE_SUPPORTING_WINDOW,
             TENNIS_SPORT,
+            TENNIS_SUPPORTING_KICKOFF_WINDOW_SECONDS,
             TENNIS_TOUR_MISMATCH,
             TENNIS_TOURNAMENT_MISMATCH,
             TENNIS_TOURNAMENT_NOT_ADMITTED,
@@ -480,7 +476,7 @@ class EventMatcher:
         if not same_player_pair(left_home, left_away, right_home, right_away):
             return False, [TENNIS_PLAYER_MISMATCH]
         kickoff_delta = abs(left.kickoff_utc - right.kickoff_utc)
-        if kickoff_delta > timedelta(days=14):
+        if kickoff_delta.total_seconds() > TENNIS_SUPPORTING_KICKOFF_WINDOW_SECONDS:
             return False, [TENNIS_SCHEDULE_OUTSIDE_SUPPORTING_WINDOW]
         reasons: list[str] = []
         if (left.home_team, left.away_team) != (right.home_team, right.away_team):
@@ -577,14 +573,12 @@ class EventMatcher:
         """Exact MLB prefilter, or None when neither event is baseball.
 
         Same clubs and the same calendar date are not identity. Game 1 and
-        Game 2 stay distinct, and missing game keys fail closed.
+        Game 2 stay distinct, and a one-sided or missing game key fails closed.
 
-        The scheduled game key is minute-precision UTC start, plus an explicit
-        game number when the provider states one. The shared 5-minute
-        EventMatcher tolerance still applies after that key matches. It does
-        not widen identity: unequal minute keys fail closed even when the
-        kickoffs are inside five minutes. The tolerance stays so MLB does not
-        drop the collector clock veto used by the other sports.
+        ``scheduled_game_key`` may still embed a minute. That minute does not
+        override ``kickoff_tolerance``. No ordinal on either side, or the same
+        explicit ordinal on both, is compatible inside the inclusive window.
+        Conflicting ordinals are not.
         """
 
         from sports_hedge.mlb.constants import MLB_SPORT

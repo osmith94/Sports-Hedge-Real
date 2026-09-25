@@ -206,9 +206,13 @@ def same_hot_scheduling_unit(left: Any, right: Any) -> bool:
     if _fixture_is_mlb(left) or _fixture_is_mlb(right):
         if not (_fixture_is_mlb(left) and _fixture_is_mlb(right)):
             return False
-        left_key = str(getattr(left, "scheduled_game_key", None) or "").strip()
-        right_key = str(getattr(right, "scheduled_game_key", None) or "").strip()
-        if not left_key or not right_key or left_key != right_key:
+        from sports_hedge.mlb.identity import mlb_scheduled_games_compatible
+
+        compatible, _reason = mlb_scheduled_games_compatible(
+            getattr(left, "scheduled_game_key", None),
+            getattr(right, "scheduled_game_key", None),
+        )
+        if not compatible:
             return False
     return abs(left_kickoff - right_kickoff) <= HOT_KICKOFF_TOLERANCE
 

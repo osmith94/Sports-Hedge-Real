@@ -20,6 +20,10 @@ TENNIS_EVENT_TYPE_NOT_SINGLES = "tennis_event_type_not_singles"
 TENNIS_PLAYER_IDENTITY_AMBIGUOUS = "tennis_player_identity_ambiguous"
 TENNIS_PLAYER_IDENTITY_UNRESOLVED = "tennis_player_identity_unresolved"
 TENNIS_PLAYER_MISMATCH = "tennis_player_mismatch"
+# Supporting clock only. Tour, tournament, round and player pair stay authoritative.
+# Candidate generation must use at least this window and must not inherit the
+# 5-minute scheduled-team tolerance.
+TENNIS_SUPPORTING_KICKOFF_WINDOW_SECONDS = 14 * 24 * 60 * 60
 TENNIS_SCHEDULE_OUTSIDE_SUPPORTING_WINDOW = "tennis_schedule_outside_supporting_window"
 TENNIS_PARTICIPANT_ORDER_REVERSED = "participant_order_reversed"
 TENNIS_SCHEDULE_DRIFT = "schedule_drift_within_supporting_window"
