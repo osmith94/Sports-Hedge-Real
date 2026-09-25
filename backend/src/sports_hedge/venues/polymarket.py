@@ -39,8 +39,6 @@ class PolymarketClient(ReadOnlyVenue):
         self._cooldown = cooldown
         self.last_series_report: list[dict[str, Any]] = []
         self.last_pages_attempted: int = 0
-        self._discovery_page_index = 0
-        self._discovery_page_budget: int | None = None
         self._client = client or httpx.AsyncClient(
             timeout=market_data_http_timeout(),
             headers={
@@ -77,9 +75,19 @@ class PolymarketClient(ReadOnlyVenue):
             return await self._get_event_page(params)
 
         if caller_series is not None:
-            self._discovery_page_index = page_index
-            self._discovery_page_budget = max_pages
-            return await self._list_series_events(str(caller_series), params)
+            progress = {"pages_attempted": 0}
+            try:
+                page_items, _pages, _cap_reached = await self._list_series_events(
+                    str(caller_series),
+                    params,
+                    page_index=page_index,
+                    page_budget=max_pages,
+                    progress=progress,
+                )
+            finally:
+                # Diagnostic only. Pagination never reads this value back.
+                self.last_pages_attempted = progress["pages_attempted"]
+            return page_items
 
         if requested_series_ids is _SERIES_IDS_UNSET:
             series_ids = self.settings.resolved_polymarket_series_ids()
@@ -97,11 +105,15 @@ class PolymarketClient(ReadOnlyVenue):
         series_results: list[dict[str, Any]] = []
         first_total_error: Exception | None = None
         for series_id in series_ids:
+            progress = {"pages_attempted": 0}
             try:
-                self._discovery_page_index = page_index
-                self._discovery_page_budget = max_pages
-                page_items = await self._list_series_events(series_id, params)
-                pages_attempted = self.last_pages_attempted
+                page_items, pages_attempted, cap_reached = await self._list_series_events(
+                    series_id,
+                    params,
+                    page_index=page_index,
+                    page_budget=max_pages,
+                    progress=progress,
+                )
             except Exception as exc:
                 status, retryable = _series_failure_kind(exc)
                 series_results.append(
@@ -110,7 +122,7 @@ class PolymarketClient(ReadOnlyVenue):
                         "status": status,
                         "retryable": retryable,
                         "event_count": 0,
-                        "pages_attempted": self.last_pages_attempted,
+                        "pages_attempted": progress["pages_attempted"],
                         "http_attempted": True,
                         "reason": str(exc),
                     }
@@ -136,9 +148,11 @@ class PolymarketClient(ReadOnlyVenue):
                     "pages_attempted": pages_attempted,
                     "http_attempted": True,
                     "empty": retained == 0,
+                    "pagination_cap_reached": cap_reached,
                     "reason": None,
                 }
             )
+            self.last_pages_attempted = pages_attempted
         self.last_series_report = series_results
         if not events and series_results and all(item["status"] != "ok" for item in series_results):
             if first_total_error is not None:
@@ -149,29 +163,45 @@ class PolymarketClient(ReadOnlyVenue):
         self,
         series_id: str,
         base_params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+        *,
+        page_index: int = 0,
+        page_budget: int | None = None,
+        progress: dict[str, int] | None = None,
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """Read one series page window. Returns events, pages read, cap reached.
+
+        The window is request-local because one client serves overlapping
+        calls. ``cap_reached`` is true when the last allowed page was full, so
+        more provider pages may exist.
+        """
+
         events: list[dict[str, Any]] = []
         page_limit = int(base_params.get("limit") or self.settings.polymarket_gamma_page_limit)
-        page_index = int(getattr(self, "_discovery_page_index", 0) or 0)
-        max_pages = getattr(self, "_discovery_page_budget", None)
-        page_budget = (
-            self.settings.polymarket_gamma_max_pages_per_series if max_pages is None else max_pages
+        budget = (
+            self.settings.polymarket_gamma_max_pages_per_series
+            if page_budget is None
+            else page_budget
         )
-        self.last_pages_attempted = 0
-        for step in range(max(0, int(page_budget))):
+        pages_attempted = 0
+        cap_reached = False
+        for step in range(max(0, int(budget))):
             page = page_index + step
-            self.last_pages_attempted = step + 1
+            pages_attempted = step + 1
             params = {
                 **base_params,
                 "series_id": series_id,
                 "limit": page_limit,
                 "offset": page * page_limit,
             }
+            if progress is not None:
+                progress["pages_attempted"] = pages_attempted
             page_items = await self._get_event_page(params)
             events.extend(page_items)
             if len(page_items) < page_limit:
                 break
-        return events
+        else:
+            cap_reached = pages_attempted > 0
+        return events, pages_attempted, cap_reached
 
     async def _get_event_page(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         if self._cooldown is not None:

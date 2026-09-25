@@ -101,6 +101,8 @@ from sports_hedge.application.polymarket_fixture_discovery import (
     SERIES_DEFERRED_REASON,
     SERIES_INCOMPLETE,
     SERIES_NOT_STARTED,
+    SERIES_PAGINATION_CAP_REASON,
+    SERIES_PAGINATION_CAPPED,
     blank_series_row,
     empty_discovery_stats,
     merge_discovery_stats,
@@ -395,6 +397,10 @@ _RETRYABLE_SERIES_STATUSES = frozenset(
         "deferred",
         "incomplete",
     }
+)
+# Evidence that is incomplete but must not be retried in the same generation.
+_NON_AUTHORITATIVE_SERIES_STATUSES = _RETRYABLE_SERIES_STATUSES | frozenset(
+    {SERIES_PAGINATION_CAPPED}
 )
 DEFAULT_MAX_EVENT_PAIRS = 60
 # Keep ~4s of the 45s operator cycle for leftover assembly before coordinator grace.
@@ -2188,6 +2194,12 @@ class ReadOnlyCrossVenueCollector:
         reaches them, so NFL, NBA, NCAAB, MLB, ATP and WTA paging stays the
         previous per-series behaviour. The stale fixture horizon applies only
         to football fixture series.
+
+        A football series whose last allowed page is full ends as
+        ``pagination_capped``: its fixtures are kept, but more provider pages
+        may exist, so the work set is not authoritative. It is not retried in
+        the same generation because a retry would re-read the same capped
+        window.
         """
 
         venue = VenueName.POLYMARKET
@@ -2196,59 +2208,38 @@ class ReadOnlyCrossVenueCollector:
         extra: dict[str, Any] = {}
         page_limit, max_pages = _polymarket_page_bounds(client)
         states = {
-            series_id: {
-                "football": polymarket_series_is_football_fixture(series_id),
-                "pages_attempted": 0,
-                "http_attempted": False,
-                "status": "ok",
-                "retryable": False,
-                "reason": None,
-                "finished": False,
-                "stats": empty_discovery_stats(),
-            }
+            series_id: _FairSeriesState(
+                football=polymarket_series_is_football_fixture(series_id)
+            )
             for series_id in series_ids
         }
         active = list(series_ids)
         series_results: list[dict[str, Any]] = []
 
-        def _defer(series_id: str) -> None:
-            state = states[series_id]
-            if state["finished"]:
-                return
-            state["finished"] = True
-            state["retryable"] = True
-            if state["pages_attempted"] == 0 and not state["http_attempted"]:
-                state["status"] = SERIES_NOT_STARTED
-                state["reason"] = SERIES_DEFERRED_REASON
-            else:
-                state["status"] = SERIES_INCOMPLETE
-                state["reason"] = SERIES_DEFERRED_REASON
+        def _defer_unfinished() -> None:
+            for state in states.values():
+                if not state.finished:
+                    state.defer()
 
         try:
             for page_index in range(max_pages):
                 if not active:
                     break
                 next_active: list[str] = []
-                budget_stopped = False
-                for index, series_id in enumerate(active):
+                for series_id in active:
                     await yield_event_loop()
                     state = states[series_id]
                     timeout = self._discovery_timeout_budget(self._op_venue_timeout)
                     if timeout <= 0:
-                        for rest_id in active[index:]:
-                            _defer(rest_id)
-                        for rest_id in next_active:
-                            _defer(rest_id)
-                        budget_stopped = True
                         break
                     series_filters = dict(filters)
                     series_filters["series_id"] = series_id
-                    if state["football"]:
+                    if state.football:
                         series_filters["discovery_page_index"] = page_index
                         series_filters["discovery_max_pages"] = 1
-                    started = monotonic()
-                    if hasattr(client, "last_pages_attempted"):
+                    elif hasattr(client, "last_pages_attempted"):
                         client.last_pages_attempted = 0
+                    started = monotonic()
                     try:
                         async with self._provider_capacity(venue, stage="list_events") as lease:
                             payload, timed_out = await self._await_bounded_with_capacity(
@@ -2263,32 +2254,20 @@ class ReadOnlyCrossVenueCollector:
                             elapsed_ms=max(0, int((monotonic() - started) * 1000)),
                             timed_out=timed_out,
                         )
-                        reported_pages = int(getattr(client, "last_pages_attempted", 0) or 0)
-                        state["pages_attempted"] += reported_pages if reported_pages > 0 else 1
-                        state["http_attempted"] = True
+                        state.record_request(client)
                         if timed_out:
-                            state["finished"] = True
-                            state["status"] = HEALTH_DISCOVERY_TIMEOUT
-                            state["reason"] = "discovery_timeout"
-                            state["retryable"] = True
+                            state.finish(
+                                HEALTH_DISCOVERY_TIMEOUT,
+                                reason="discovery_timeout",
+                                retryable=True,
+                            )
                             continue
                     except asyncio.CancelledError:
-                        _defer(series_id)
-                        for rest_id in active[index + 1 :]:
-                            _defer(rest_id)
-                        for rest_id in next_active:
-                            _defer(rest_id)
-                        self._discovery_cancelled[venue.value] = True
                         raise
                     except Exception as exc:
                         status, retryable = _collector_series_failure_kind(exc)
-                        reported_pages = int(getattr(client, "last_pages_attempted", 0) or 0)
-                        state["pages_attempted"] += reported_pages if reported_pages > 0 else 1
-                        state["http_attempted"] = True
-                        state["finished"] = True
-                        state["status"] = status
-                        state["reason"] = str(exc)
-                        state["retryable"] = retryable
+                        state.record_request(client)
+                        state.finish(status, reason=str(exc), retryable=retryable)
                         issues.append(
                             CollectorIssue(
                                 stage="list_events",
@@ -2306,112 +2285,31 @@ class ReadOnlyCrossVenueCollector:
                         seen=seen,
                         now=self._polymarket_discovery_clock(),
                         event_id=lambda item: _discovery_event_id(item, venue),
-                        apply_football_horizon=bool(state["football"]),
+                        apply_football_horizon=state.football,
                     )
-                    merge_discovery_stats(state["stats"], stats)
+                    merge_discovery_stats(state.stats, stats)
                     events.extend(retained_events)
                     # Non-football stays one whole-series read. Football continues
                     # only when this page was full, so later series get page 1 first.
-                    if state["football"] and len(page_events) >= page_limit:
+                    if state.football and len(page_events) >= page_limit:
                         next_active.append(series_id)
                     else:
-                        state["finished"] = True
-                        state["status"] = "ok"
-                        state["retryable"] = False
-                        state["reason"] = None
-                if budget_stopped:
-                    break
-                active = next_active
+                        state.finish("ok")
+                else:
+                    active = next_active
+                    continue
+                break
             else:
                 for series_id in active:
-                    state = states[series_id]
-                    if state["finished"]:
-                        continue
-                    state["finished"] = True
-                    state["status"] = "ok"
-                    state["retryable"] = False
-            for series_id in series_ids:
-                state = states[series_id]
-                if not state["finished"]:
-                    state["finished"] = True
-                    state["status"] = "ok"
-                    state["retryable"] = False
-                if state["status"] == "ok":
-                    series_results.append(
-                        _polymarket_series_ok_row(
-                            series_id,
-                            state["stats"],
-                            pages_attempted=int(state["pages_attempted"]),
-                        )
-                    )
-                else:
-                    retained = int(state["stats"].get("retained_event_count") or 0)
-                    row = blank_series_row(
-                        series_id,
-                        status=str(state["status"]),
-                        reason=state["reason"],
-                        http_attempted=bool(state["http_attempted"]),
-                        retryable=bool(state["retryable"]),
-                        pages_attempted=int(state["pages_attempted"]),
-                    )
-                    row.update(state["stats"])
-                    row["event_count"] = retained
-                    row["empty"] = False
-                    row["status"] = state["status"]
-                    row["retryable"] = bool(state["retryable"])
-                    row["http_attempted"] = bool(state["http_attempted"])
-                    row["pages_attempted"] = int(state["pages_attempted"])
-                    row["reason"] = state["reason"]
-                    series_results.append(row)
+                    states[series_id].cap(next_page_index=max_pages)
         except asyncio.CancelledError:
             self._discovery_cancelled[venue.value] = True
-            if not series_results:
-                for series_id in series_ids:
-                    state = states[series_id]
-                    if not state["finished"]:
-                        _defer(series_id)
-                    retained = int(state["stats"].get("retained_event_count") or 0)
-                    row = blank_series_row(
-                        series_id,
-                        status=str(state["status"]),
-                        reason=state["reason"],
-                        http_attempted=bool(state["http_attempted"]),
-                        retryable=bool(state["retryable"]),
-                        pages_attempted=int(state["pages_attempted"]),
-                    )
-                    row.update(state["stats"])
-                    row["event_count"] = retained
-                    row["empty"] = False
-                    series_results.append(row)
             raise
         finally:
-            if not series_results:
-                for series_id in series_ids:
-                    state = states[series_id]
-                    if not state["finished"]:
-                        _defer(series_id)
-                    if state["status"] == "ok" and state["finished"]:
-                        series_results.append(
-                            _polymarket_series_ok_row(
-                                series_id,
-                                state["stats"],
-                                pages_attempted=int(state["pages_attempted"]),
-                            )
-                        )
-                    else:
-                        retained = int(state["stats"].get("retained_event_count") or 0)
-                        row = blank_series_row(
-                            series_id,
-                            status=str(state["status"] or SERIES_NOT_STARTED),
-                            reason=state["reason"] or SERIES_DEFERRED_REASON,
-                            http_attempted=bool(state["http_attempted"]),
-                            retryable=True,
-                            pages_attempted=int(state["pages_attempted"]),
-                        )
-                        row.update(state["stats"])
-                        row["event_count"] = retained
-                        row["empty"] = False
-                        series_results.append(row)
+            _defer_unfinished()
+            series_results = [
+                states[series_id].row(series_id) for series_id in series_ids
+            ]
             self._op_series_results[venue.value] = list(series_results)
             self._discovery_partial_events[venue.value] = list(events)
             extra["series_results"] = series_results
@@ -7179,6 +7077,73 @@ def _polymarket_series_ok_row(
     return row
 
 
+class _FairSeriesState:
+    """Request-local progress for one Polymarket series in a fair sweep."""
+
+    def __init__(self, *, football: bool) -> None:
+        self.football = football
+        self.pages_attempted = 0
+        self.http_attempted = False
+        self.status = "ok"
+        self.retryable = False
+        self.reason: str | None = None
+        self.finished = False
+        self.next_page_index: int | None = None
+        self.stats = empty_discovery_stats()
+
+    def record_request(self, client: Any) -> None:
+        self.http_attempted = True
+        if self.football:
+            self.pages_attempted += 1
+            return
+        reported = int(getattr(client, "last_pages_attempted", 0) or 0)
+        self.pages_attempted += reported if reported > 0 else 1
+
+    def finish(self, status: str, *, reason: str | None = None, retryable: bool = False) -> None:
+        self.finished = True
+        self.status = status
+        self.reason = reason
+        self.retryable = retryable
+
+    def cap(self, *, next_page_index: int) -> None:
+        self.finish(SERIES_PAGINATION_CAPPED, reason=SERIES_PAGINATION_CAP_REASON)
+        self.next_page_index = next_page_index
+
+    def defer(self) -> None:
+        status = SERIES_NOT_STARTED if not self.http_attempted else SERIES_INCOMPLETE
+        self.finish(status, reason=SERIES_DEFERRED_REASON, retryable=True)
+
+    def row(self, series_id: str) -> dict[str, Any]:
+        if self.status == "ok":
+            row = _polymarket_series_ok_row(
+                series_id,
+                self.stats,
+                pages_attempted=self.pages_attempted,
+            )
+            row["pagination_cap_reached"] = False
+            return row
+        row = blank_series_row(
+            series_id,
+            status=self.status,
+            reason=self.reason,
+            http_attempted=self.http_attempted,
+            retryable=self.retryable,
+            pages_attempted=self.pages_attempted,
+        )
+        row.update(self.stats)
+        row["event_count"] = int(self.stats.get("retained_event_count") or 0)
+        row["empty"] = False
+        row["status"] = self.status
+        row["retryable"] = self.retryable
+        row["reason"] = self.reason
+        row["http_attempted"] = self.http_attempted
+        row["pages_attempted"] = self.pages_attempted
+        row["pagination_cap_reached"] = self.status == SERIES_PAGINATION_CAPPED
+        if self.next_page_index is not None:
+            row["next_page_index"] = self.next_page_index
+        return row
+
+
 def _polymarket_page_bounds(client: Any) -> tuple[int, int]:
     settings = getattr(client, "settings", None)
     page_limit = int(getattr(settings, "polymarket_gamma_page_limit", 100) or 100)
@@ -7218,7 +7183,8 @@ def _apply_series_venue_health(
     elif any(item.get("status") == HEALTH_DISCOVERY_TIMEOUT for item in series_results):
         venue_health[venue.value] = HEALTH_DISCOVERY_TIMEOUT
     elif any(
-        item.get("status") in {SERIES_NOT_STARTED, SERIES_INCOMPLETE} for item in series_results
+        item.get("status") in {SERIES_NOT_STARTED, SERIES_INCOMPLETE, SERIES_PAGINATION_CAPPED}
+        for item in series_results
     ):
         venue_health[venue.value] = "degraded"
     elif series_results:
@@ -7234,7 +7200,7 @@ def _series_results_incomplete(rows: list[dict[str, Any]] | None) -> bool:
         if not isinstance(row, dict):
             continue
         status = str(row.get("status") or "").strip()
-        if bool(row.get("retryable")) or status in _RETRYABLE_SERIES_STATUSES:
+        if bool(row.get("retryable")) or status in _NON_AUTHORITATIVE_SERIES_STATUSES:
             return True
     return False
 
@@ -7519,7 +7485,7 @@ def canonical_work_set_authority(
             if not isinstance(row, dict):
                 continue
             status = str(row.get("status") or "").strip()
-            if bool(row.get("retryable")) or status in _RETRYABLE_SERIES_STATUSES:
+            if bool(row.get("retryable")) or status in _NON_AUTHORITATIVE_SERIES_STATUSES:
                 return False, "retry_series_partial"
     return True, None
 

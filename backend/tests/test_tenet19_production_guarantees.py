@@ -440,11 +440,13 @@ async def test_polymarket_series_failure_is_isolated() -> None:
     http = httpx.AsyncClient()
     client = PolymarketClient(settings, client=http)  # type: ignore[arg-type]
 
-    async def fake_series(series_id: str, base_params: dict[str, Any]) -> list[dict[str, Any]]:
+    async def fake_series(
+        series_id: str, base_params: dict[str, Any], **_window: Any
+    ) -> tuple[list[dict[str, Any]], int, bool]:
         del base_params
         if series_id == "202":
             raise TimeoutError("timed out")
-        return [{"id": f"pm-{series_id}", "title": "Real Betis vs Getafe"}]
+        return [{"id": f"pm-{series_id}", "title": "Real Betis vs Getafe"}], 1, False
 
     client._list_series_events = fake_series  # type: ignore[method-assign]
     events = await client.list_events()

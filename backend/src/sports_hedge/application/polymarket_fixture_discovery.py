@@ -40,6 +40,8 @@ from sports_hedge.normalization.venues import (
 
 SERIES_NOT_STARTED = "not_started"
 SERIES_INCOMPLETE = "incomplete"
+SERIES_PAGINATION_CAPPED = "pagination_capped"
+SERIES_PAGINATION_CAP_REASON = "pagination_cap_reached"
 SERIES_DEFERRED_REASON = "discovery_deferred"
 STALE_FIXTURE_OUTSIDE_DISCOVERY_HORIZON = "stale_fixture_outside_discovery_horizon"
 STALE_FIXTURE_SAMPLE_LIMIT = 3

@@ -82,6 +82,7 @@ async def test_explicit_series_ids_query_nations_league_absent_from_settings_def
             "pages_attempted": 1,
             "http_attempted": True,
             "empty": False,
+            "pagination_cap_reached": False,
             "reason": None,
         }
     ]

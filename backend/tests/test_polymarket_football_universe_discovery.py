@@ -10,10 +10,15 @@ from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any
 
+import httpx
 import pytest
 
 from sports_hedge.api import paper as paper_api
-from sports_hedge.application.collector import ReadOnlyCrossVenueCollector, _merge_series_rows
+from sports_hedge.application.collector import (
+    ReadOnlyCrossVenueCollector,
+    _merge_series_rows,
+    canonical_work_set_authority,
+)
 from sports_hedge.application.live_refresh import LiveRefreshCoordinator
 from sports_hedge.application.opportunity_viability import get_opportunity_viability_cache
 from sports_hedge.application.paper_scan import PaperScanService
@@ -25,9 +30,13 @@ from sports_hedge.application.target_competitions import (
     competition_by_code,
     polymarket_series_ids_for_codes,
 )
+from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.application.universe_checkpoint import series_work_key
+from sports_hedge.lifecycle.universe import SWEEP_FINAL_FAILED, SWEEP_RETRY_WAIT
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.venues.polymarket import PolymarketClient
 from sports_hedge.venues.rate_limit import ProviderRateLimitedError
 
 NOW = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
@@ -600,3 +609,190 @@ async def test_football_series_share_the_first_page_before_later_pages(monkeypat
     assert fa_row["empty"] is False
     assert report.scan_diagnostics["canonical_work_set_authoritative"] is False
     assert report.raw_polymarket_events == 7
+
+
+@pytest.mark.asyncio
+async def test_overlapping_list_events_keep_their_own_page_windows() -> None:
+    settings = Settings()
+    page_limit = settings.polymarket_gamma_page_limit
+    seen: list[httpx.Request] = []
+    second_request_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        series = request.url.params.get("series_id")
+        offset = int(request.url.params.get("offset") or 0)
+        if series == EPL and offset == 0:
+            # Hold the first request open until the overlapping call has started.
+            await asyncio.wait_for(second_request_started.wait(), timeout=2)
+        if series == LALIGA:
+            second_request_started.set()
+        items = [{"id": f"{series}-{offset}-{index}"} for index in range(page_limit)]
+        return httpx.Response(200, json=items)
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.polymarket_gamma_base_url,
+    )
+    client = PolymarketClient(settings, client=http)
+    async with http:
+        first, second = await asyncio.gather(
+            client.list_events(series_id=EPL, discovery_page_index=0, discovery_max_pages=2),
+            client.list_events(series_id=LALIGA, discovery_page_index=3, discovery_max_pages=1),
+        )
+    offsets: dict[str, list[int]] = {}
+    for request in seen:
+        series = str(request.url.params.get("series_id"))
+        offsets.setdefault(series, []).append(int(request.url.params.get("offset") or 0))
+        assert "discovery_page_index" not in request.url.params
+        assert "discovery_max_pages" not in request.url.params
+        assert "series_ids" not in request.url.params
+    assert offsets[EPL] == [0, page_limit]
+    assert offsets[LALIGA] == [3 * page_limit]
+    assert len(first) == 2 * page_limit
+    assert {item["id"].split("-")[1] for item in first} == {"0", str(page_limit)}
+    assert {item["id"].split("-")[1] for item in second} == {str(3 * page_limit)}
+    assert not hasattr(client, "_discovery_page_index")
+    assert not hasattr(client, "_discovery_page_budget")
+
+
+def _full_pages(
+    prefix: str,
+    *,
+    count: int,
+    starts: list[datetime],
+    short_last: int | None = None,
+) -> list[list[dict[str, Any]]]:
+    pages: list[list[dict[str, Any]]] = []
+    for page in range(count):
+        size = short_last if short_last is not None and page == count - 1 else 100
+        pages.append(
+            [
+                _event(
+                    f"{prefix}-{page}-{index}",
+                    "Arsenal vs Chelsea",
+                    starts[(page * 100 + index) % len(starts)],
+                )
+                for index in range(size)
+            ]
+        )
+    return pages
+
+
+async def _paged_scan(
+    pages: dict[str, list[list[dict[str, Any]]]],
+    codes: tuple[str, ...],
+) -> tuple[FairPagedPolymarket, Any]:
+    client = FairPagedPolymarket(pages, clock={"now": None}, simulated_seconds=0.0)
+    report = await _scan(client, codes)  # type: ignore[arg-type]
+    return client, report
+
+
+@pytest.mark.asyncio
+async def test_four_full_pages_and_short_fifth_page_is_exhausted_ok() -> None:
+    kick = NOW + timedelta(days=1)
+    pages = {
+        EPL: _full_pages("epl", count=5, starts=[kick], short_last=40),
+        LALIGA: [[_event("laliga-1", "Real Madrid vs Barcelona", kick)]],
+    }
+    client, report = await _paged_scan(pages, ("premier_league", "la_liga"))
+    assert [page for series, page in client.calls if series == EPL] == [0, 1, 2, 3, 4]
+    rows = _rows(report)
+    assert rows[EPL]["status"] == "ok"
+    assert rows[EPL]["retryable"] is False
+    assert rows[EPL]["pages_attempted"] == 5
+    assert rows[EPL]["pagination_cap_reached"] is False
+    assert rows[EPL]["retained_event_count"] == 440
+    assert rows[LALIGA]["status"] == "ok"
+    assert report.venue_health["polymarket"] == "ok"
+    assert report.raw_polymarket_events == 441
+
+
+@pytest.mark.asyncio
+async def test_five_full_pages_is_pagination_capped_not_exhaustive_success() -> None:
+    kick = NOW + timedelta(days=1)
+    live = NOW - timedelta(hours=1)
+    stale = NOW - timedelta(days=30)
+    pages = {
+        EPL: _full_pages("epl", count=5, starts=[kick, live, stale, stale]),
+        LALIGA: [[_event("laliga-1", "Real Madrid vs Barcelona", kick)]],
+        BUNDESLIGA: [[_event("bundes-1", "Bayern Munich vs Dortmund", kick)]],
+    }
+    client, report = await _paged_scan(pages, SELECTED)
+    epl_pages = [page for series, page in client.calls if series == EPL]
+    assert epl_pages == [0, 1, 2, 3, 4]
+    assert client.calls[:3] == [(EPL, 0), (LALIGA, 0), (BUNDESLIGA, 0)]
+    rows = _rows(report)
+    epl = rows[EPL]
+    assert epl["status"] == "pagination_capped"
+    assert epl["reason"] == "pagination_cap_reached"
+    assert epl["pagination_cap_reached"] is True
+    assert epl["next_page_index"] == 5
+    assert epl["retryable"] is False
+    assert epl["empty"] is False
+    assert epl["pages_attempted"] == 5
+    assert epl["raw_event_count"] == 500
+    assert epl["stale_fixture_rejections"] == 250
+    assert epl["future_fixture_count"] == 125
+    assert epl["current_fixture_count"] == 125
+    assert epl["retained_event_count"] == 250
+    assert rows[LALIGA]["status"] == "ok" and rows[LALIGA]["retained_event_count"] == 1
+    assert rows[BUNDESLIGA]["status"] == "ok" and rows[BUNDESLIGA]["retained_event_count"] == 1
+    assert report.raw_polymarket_events == 252
+    assert report.venue_health["polymarket"] == "degraded"
+    assert report.scan_diagnostics["canonical_work_set_authoritative"] is False
+
+
+def test_pagination_cap_evidence_cannot_make_work_set_authoritative() -> None:
+    capped = {
+        "series": EPL,
+        "status": "pagination_capped",
+        "retryable": False,
+        "event_count": 250,
+        "pagination_cap_reached": True,
+    }
+    authoritative, reason = canonical_work_set_authority(
+        cluster_ids=["a"],
+        clustering_truncated=False,
+        retry_series=None,
+        venue_health={"polymarket": "ok"},
+        enabled=frozenset({VenueName.POLYMARKET}),
+        issues=[],
+        series_results={"polymarket": [capped]},
+        provider_cancels=0,
+    )
+    assert authoritative is False
+    assert reason == "retry_series_partial"
+    healed = _merge_series_rows(
+        [capped],
+        [{"series": EPL, "status": "ok", "retryable": False, "event_count": 260}],
+    )
+    assert healed[0]["status"] == "ok"
+
+
+def test_pagination_capped_series_is_terminal_for_the_generation_and_clear_resets() -> None:
+    coordinator = LiveRefreshCoordinator()
+    coordinator._universe_generation_id = 4
+    coordinator._universe_generation_started_at = NOW
+    capped = {
+        "series": EPL,
+        "status": "pagination_capped",
+        "reason": "pagination_cap_reached",
+        "retryable": False,
+        "event_count": 250,
+    }
+    coordinator._apply_series_reports_unlocked({"polymarket": [capped]}, scanned=NOW)
+    unit = coordinator._universe_series_work[series_work_key("polymarket", EPL)]
+    assert unit.state == SWEEP_FINAL_FAILED
+    assert unit.state != SWEEP_RETRY_WAIT
+    assert unit.next_retry_at is None
+    assert unit.reason == "pagination_cap_reached"
+    assert coordinator._due_retry_series_unlocked(NOW + timedelta(hours=6)) == {}
+    coordinator._universe_discovery_snapshot = {"polymarket": [{"id": "epl-0-0"}]}
+    coordinator._universe_series_results = {"polymarket": [capped]}
+    audit = coordinator.clear_universe_working_set(run_after=True)
+    assert coordinator._universe_series_work == {}
+    assert coordinator._universe_series_results == {}
+    assert coordinator._universe_discovery_snapshot is None
+    assert audit["reuse_discovery"] is False
+    assert audit["generation_resume"] is False
