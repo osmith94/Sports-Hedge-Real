@@ -185,5 +185,7 @@ public sealed class ControllerPipeServerTests
         var allows = rules.Where(r => r.AccessControlType == System.Security.AccessControl.AccessControlType.Allow).ToList();
         Assert.NotEmpty(allows);
         Assert.All(allows, r => Assert.Equal(user, r.IdentityReference));
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        Assert.Equal(identity.Owner ?? user, server.GetAccessControl().GetOwner(typeof(System.Security.Principal.SecurityIdentifier)));
     }
 }

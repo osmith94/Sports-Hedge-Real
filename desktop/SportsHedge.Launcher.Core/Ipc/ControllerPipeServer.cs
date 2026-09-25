@@ -50,10 +50,13 @@ public sealed class ControllerPipeServer : IAsyncDisposable
     [SupportedOSPlatform("windows")]
     private static NamedPipeServerStream CreateWindowsServerStream(string pipeName)
     {
-        var user = WindowsIdentity.GetCurrent().User
+        using var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User
             ?? throw new InvalidOperationException("Could not resolve the current Windows user SID");
         var security = new PipeSecurity();
-        security.SetOwner(user);
+        // Token default owner (Administrators when elevated): what .NET
+        // CurrentUserOnly clients verify. Access is still granted only to `user`.
+        security.SetOwner(identity.Owner ?? user);
         security.AddAccessRule(new PipeAccessRule(user, PipeAccessRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(
             new SecurityIdentifier(WellKnownSidType.NetworkSid, null), PipeAccessRights.FullControl, AccessControlType.Deny));
