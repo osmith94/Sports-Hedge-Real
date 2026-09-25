@@ -27,7 +27,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Build-
 # optional: -CreateDesktopShortcut  -SkipFrontendChecks  -SkipDotnetTests
 ```
 
-Requires Git, Node.js 22 (npm), the .NET 8 SDK and, at runtime, `backend\.venv`. Output: `dist\windows\SportsHedge.exe` (self-contained, single-file, win-x64) and `dist\windows\SportsHedge.launcher.json` (records the repo root so a moved `dist\windows` folder still finds the checkout). `dist/`, `bin/`, `obj/` and `.next/` are gitignored; CI publishes the exe as a GitHub Actions artifact instead of committing it.
+Requires Git, Node.js 22 (npm), the .NET 8 SDK and, at runtime, `backend\.venv`. On Windows the venv also needs `tzdata` (`backend\.venv\Scripts\python -m pip install tzdata`): Windows CPython has no IANA time-zone database and the backend imports `ZoneInfo("Europe/London")` at startup. This is a pre-existing requirement of the backend on Windows (it is not declared in `backend/pyproject.toml`); without it the controller's failure dialog shows `ZoneInfoNotFoundError` from `logs\desktop-backend.err.log`. Output: `dist\windows\SportsHedge.exe` (self-contained, single-file, win-x64) and `dist\windows\SportsHedge.launcher.json` (records the repo root so a moved `dist\windows` folder still finds the checkout). `dist/`, `bin/`, `obj/` and `.next/` are gitignored; CI publishes the exe as a GitHub Actions artifact instead of committing it.
 
 ## Updates: application code vs controller code
 
