@@ -62,7 +62,6 @@ from sports_hedge.application.universe_checkpoint import (
     UniverseCheckpointTooLarge,
     UniverseGenerationCheckpoint,
     checkpoint_from_payload,
-    collection_report_snapshot,
     discovery_event_snapshot,
     merge_series_reports,
     series_work_key,
@@ -580,7 +579,6 @@ class LiveRefreshCoordinator:
         self._universe_budget_paused = False
         self._universe_retry_at: datetime | None = None
         self._universe_provider_failures = 0
-        self._universe_last_report_snapshot: dict[str, Any] | None = None
         self._universe_matching_evidence: dict[str, Any] | None = None
         self._universe_sweep_id: str | None = None
         self._universe_discovery_snapshot: dict[str, list[dict[str, Any]]] | None = None
@@ -1350,7 +1348,6 @@ class LiveRefreshCoordinator:
         self._universe_budget_paused = False
         self._universe_retry_at = None
         self._universe_provider_failures = 0
-        self._universe_last_report_snapshot = None
         self._universe_matching_evidence = None
         self._universe_sweep_id = None
         self._universe_discovery_snapshot = None
@@ -2111,7 +2108,6 @@ class LiveRefreshCoordinator:
             self._universe_budget_paused = False
             self._universe_retry_at = None
             self._universe_provider_failures = 0
-            self._universe_last_report_snapshot = None
             self._universe_matching_evidence = None
             self._universe_sweep_id = None
             self._universe_discovery_snapshot = None
@@ -3132,7 +3128,6 @@ class LiveRefreshCoordinator:
                     hours=get_settings().paper_hot_post_kickoff_current_radar_ceiling_hours
                 ),
             )
-        inventory = self._fixture_state.inventory(report.completed_at)
         _hot_count, universe_count = self._fixture_state.membership_counts(report.completed_at)
         with self._state_lock:
             if lane is ScanLane.HOT:
@@ -3223,7 +3218,6 @@ class LiveRefreshCoordinator:
                         self.status.hot.venue_health,
                         self.status.universe.venue_health,
                     ),
-                    "discovered_fixtures": inventory,
                     "last_error": None,
                     "interval_seconds": self.status.hot.cadence_seconds,
                     "provider_access": get_shared_provider_access().snapshot().as_dict(),
@@ -3334,7 +3328,6 @@ class LiveRefreshCoordinator:
             self._universe_cursor = newly_evaluated[-1]
         self._universe_provider_failures = 0
         self._universe_retry_at = None
-        self._universe_last_report_snapshot = collection_report_snapshot(report)
         if report.series_results:
             self._universe_series_results = merge_series_reports(
                 self._universe_series_results, report.series_results
@@ -3674,7 +3667,6 @@ class LiveRefreshCoordinator:
                 self._clear_universe_rehydration_unlocked(canonical_id)
             after_hot, _after_universe = self._fixture_state.membership_counts(scanned)
             promoted_now = after_hot > before_hot
-            inventory_now = self._fixture_state.inventory(scanned)
             if self._universe_generation_started_at is None:
                 self._ensure_universe_generation(scanned)
             previous = self._universe_work.get(canonical_id)
@@ -3721,9 +3713,11 @@ class LiveRefreshCoordinator:
                 self.status.universe.venue_health,
                 retryable=counts["canonical_retryable"] + counts["series_retryable"],
             )
+            # discovered_fixtures is rebuilt by public_status() on every read. A
+            # full-store inventory per streamed fixture made the sweep O(N^2)
+            # on the event loop.
             self.status = self.status.model_copy(
                 update={
-                    "discovered_fixtures": inventory_now,
                     "venue_health": _merge_top_level_venue_health(
                         self.status.hot.venue_health,
                         venue_health,
@@ -4903,7 +4897,6 @@ class LiveRefreshCoordinator:
         self._universe_budget_paused = False
         self._universe_retry_at = None
         self._universe_provider_failures = 0
-        self._universe_last_report_snapshot = None
         self._universe_generation_superseded = False
         if pending:
             self._next_universe_due = finished

@@ -224,7 +224,7 @@ class FixtureCurrentStateStore:
                 # Open PAPER / keep IDs stay ACTIVE-managed even when the UNIVERSE
                 # radar row is dropped. Lifecycle HOT and HOT-lane observations stay.
                 _open_paper = canonical_id in keep or bool(keep & aliases)
-                fixture = record.status_fixture(evaluated)
+                fixture = record.lifecycle_fixture()
                 lifecycle_hot = False
                 if fixture is not None:
                     lifecycle_hot = (
@@ -385,9 +385,10 @@ class FixtureCurrentStateStore:
         paper_ids = _paper_market_ids_by_fixture(report)
         source_events = _source_events_from_report(report, fixtures)
         incoming_aliases = _aliases_from_report(report, fixtures)
+        aliases_by_canonical = _aliases_by_canonical(incoming_aliases)
         merge_map: dict[str, str] = {}
         for canonical_id, fixture in fixtures.items():
-            aliases = _aliases_for_canonical(canonical_id, incoming_aliases)
+            aliases = aliases_by_canonical.get(canonical_id, set()) | {canonical_id}
             if self._reject_or_tombstone_incoming(
                 canonical_id,
                 fixture,
@@ -821,17 +822,18 @@ class FixtureCurrentStateStore:
             fixtures: list[DiscoveredFixture] = []
             for record in list(self._rows.values()):
                 record.prune_markets(evaluated, **market_kwargs)
-                fixture = record.status_fixture(evaluated, **market_kwargs)
-                if fixture is None:
+                lifecycle = record.lifecycle_fixture()
+                if lifecycle is None:
                     continue
                 membership = self._identity_membership(
                     record,
-                    fixture,
+                    lifecycle,
                     evaluated,
                     classify_kwargs=classify_kwargs,
                     market_kwargs=market_kwargs,
                 )
                 if membership is ScanLane.HOT:
+                    fixture = record.status_fixture(evaluated, **market_kwargs) or lifecycle
                     if current_slots_prove_qualifying_opportunity(
                         record.live_market_slots(),
                         now=evaluated,
@@ -904,18 +906,18 @@ class FixtureCurrentStateStore:
             universe = 0
             for record in list(self._rows.values()):
                 record.prune_markets(now, **market_kwargs)
-                fixture = record.status_fixture(now, **market_kwargs)
-                if fixture is None:
+                lifecycle = record.lifecycle_fixture()
+                if lifecycle is None:
                     continue
                 membership = self._identity_membership(
                     record,
-                    fixture,
+                    lifecycle,
                     now,
                     classify_kwargs=classify_kwargs,
                     market_kwargs=market_kwargs,
                 )
                 if membership is ScanLane.HOT:
-                    hot_fixtures.append(fixture)
+                    hot_fixtures.append(record.status_fixture(now, **market_kwargs) or lifecycle)
                 elif membership is ScanLane.UNIVERSE:
                     universe += 1
             return len(unique_hot_scheduling_ids(hot_fixtures)), universe
@@ -933,20 +935,22 @@ class FixtureCurrentStateStore:
             promoted = 0
             for record in list(self._rows.values()):
                 record.prune_markets(now, **market_kwargs)
-                fixture = record.status_fixture(now, **market_kwargs)
-                if fixture is None:
+                lifecycle_fixture = record.lifecycle_fixture()
+                if lifecycle_fixture is None:
                     continue
                 membership = self._identity_membership(
                     record,
-                    fixture,
+                    lifecycle_fixture,
                     now,
                     classify_kwargs=classify_kwargs,
                     market_kwargs=market_kwargs,
                 )
                 if membership is not ScanLane.HOT:
                     continue
-                hot_fixtures.append(fixture)
-                classified = classify_scan_lane(fixture, now, **classify_kwargs)
+                hot_fixtures.append(
+                    record.status_fixture(now, **market_kwargs) or lifecycle_fixture
+                )
+                classified = classify_scan_lane(lifecycle_fixture, now, **classify_kwargs)
                 if classified is ScanLane.HOT:
                     lifecycle += 1
                 else:
@@ -1213,7 +1217,7 @@ class FixtureCurrentStateStore:
         evaluated = require_aware_instant(now, "now")
         for canonical_id, record in list(self._rows.items()):
             record.prune_markets(evaluated, **market_kwargs)
-            fixture = record.status_fixture(evaluated, **market_kwargs)
+            fixture = record.lifecycle_fixture()
             if fixture is None:
                 self._drop_identity(canonical_id)
                 continue
@@ -1228,7 +1232,7 @@ class FixtureCurrentStateStore:
                     aliases.add(canonical_id)
                     self._record_tombstone(
                         canonical_id,
-                        fixture,
+                        record.status_fixture(evaluated, **market_kwargs) or fixture,
                         aliases=aliases,
                         scanned_at=evaluated,
                     )
@@ -1507,6 +1511,18 @@ class _FixtureRecord:
             return ()
         return observation.paper_market_ids
 
+    def lifecycle_fixture(self) -> DiscoveredFixture | None:
+        """``status_fixture`` without the current-market projection.
+
+        ``apply_current_market_inventory`` rewrites market-derived fields only.
+        Identity, status, kickoff and in-running come from the observation
+        itself, so lane classification and eviction must not pay for stamping
+        every market row of every fixture.
+        """
+
+        observation = self.status_observation()
+        return None if observation is None else observation.fixture
+
     def status_fixture(self, now: datetime | None = None, **kwargs: Any) -> DiscoveredFixture | None:
         observation = self.status_observation()
         if observation is None:
@@ -1710,10 +1726,13 @@ def _alias_decision(
         aliases[decision_id] = decision_id
 
 
-def _aliases_for_canonical(canonical_id: str, aliases: dict[str, str]) -> set[str]:
-    found = {alias for alias, target in aliases.items() if target == canonical_id}
-    found.add(canonical_id)
-    return found
+def _aliases_by_canonical(aliases: dict[str, str]) -> dict[str, set[str]]:
+    """Inverse of ``aliases``; one pass instead of a full scan per fixture."""
+
+    inverse: dict[str, set[str]] = {}
+    for alias, target in aliases.items():
+        inverse.setdefault(target, set()).add(alias)
+    return inverse
 
 
 def _classify_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:

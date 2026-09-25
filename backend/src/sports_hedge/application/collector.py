@@ -3444,32 +3444,36 @@ class ReadOnlyCrossVenueCollector:
                         ),
                     )
                     return
-                accept(
-                    index,
+                row = await self._scan_cluster(
                     cluster,
-                    await self._scan_cluster(
-                        cluster,
-                        seen_at=seen_at,
-                        polymarket_events=polymarket_events,
-                        queried_series_ids=queried_series_ids,
-                        matchbook_market_filters=matchbook_market_filters,
-                        polymarket_market_filters=polymarket_market_filters,
-                        max_market_pairs_per_event=max_market_pairs_per_event,
-                        scan_kwargs=scan_kwargs,
-                        issues=issues,
-                    ),
+                    seen_at=seen_at,
+                    polymarket_events=polymarket_events,
+                    queried_series_ids=queried_series_ids,
+                    matchbook_market_filters=matchbook_market_filters,
+                    polymarket_market_filters=polymarket_market_filters,
+                    max_market_pairs_per_event=max_market_pairs_per_event,
+                    scan_kwargs=scan_kwargs,
+                    issues=issues,
                 )
+                # Evaluation tail and current-state publication are separate
+                # synchronous blocks. A completed row is still published if
+                # cancellation lands on this yield.
+                try:
+                    await asyncio.sleep(0)
+                finally:
+                    accept(index, cluster, row)
             except asyncio.CancelledError:
-                accept(
-                    index,
-                    cluster,
-                    self._leftover_cluster_result(
+                if results[index] is None:
+                    accept(
+                        index,
                         cluster,
-                        seen_at=seen_at,
-                        polymarket_events=polymarket_events,
-                        queried_series_ids=queried_series_ids,
-                    ),
-                )
+                        self._leftover_cluster_result(
+                            cluster,
+                            seen_at=seen_at,
+                            polymarket_events=polymarket_events,
+                            queried_series_ids=queried_series_ids,
+                        ),
+                    )
             except Exception as exc:
                 accept(
                     index,
