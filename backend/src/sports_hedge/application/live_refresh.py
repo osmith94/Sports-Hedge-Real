@@ -5952,9 +5952,6 @@ class LiveRefreshCoordinator:
         HOT/BACKGROUND/UNIVERSE pricing.
         """
 
-        from sports_hedge.api.paper import get_paper_operations_service
-        from sports_hedge.api.priority_alerts import get_priority_alert_service
-        from sports_hedge.api.watchlist import get_watchlist_service
         from sports_hedge.application.paper_settlement_agent import PaperSettlementAgent
 
         now = self.now()
@@ -5967,21 +5964,16 @@ class LiveRefreshCoordinator:
                 return
             self._settlement_in_progress = True
         try:
-            operations = get_paper_operations_service(
-                get_watchlist_service(), get_priority_alert_service()
-            )
+            close_loop_slice()
+            operations, catalogue = await asyncio.to_thread(_paper_settlement_dependencies)
             engine = self._price_engine
-            from sports_hedge.persistence.approved_market_catalogue import (
-                get_approved_market_catalogue_store,
-            )
-
             agent = PaperSettlementAgent(
                 operations=operations,
                 matchbook=None if engine is None else engine.matchbook,
                 kalshi=None if engine is None else engine.kalshi,
                 polymarket=None if engine is None else engine.polymarket,
                 clock=self.now,
-                catalogue=get_approved_market_catalogue_store(),
+                catalogue=catalogue,
             )
             await agent.run_cycle(now=now)
         except Exception:
@@ -6478,6 +6470,22 @@ def _collection_task_result(task: asyncio.Task[Any]) -> CollectionReport:
         return task.result()
     except asyncio.CancelledError as exc:
         raise TimeoutError from exc
+
+
+def _paper_settlement_dependencies() -> tuple[Any, Any]:
+    """Ledger-backed services. First use opens the SQLite ledger and catalogue."""
+
+    from sports_hedge.api.paper import get_paper_operations_service
+    from sports_hedge.api.priority_alerts import get_priority_alert_service
+    from sports_hedge.api.watchlist import get_watchlist_service
+    from sports_hedge.persistence.approved_market_catalogue import (
+        get_approved_market_catalogue_store,
+    )
+
+    operations = get_paper_operations_service(
+        get_watchlist_service(), get_priority_alert_service()
+    )
+    return operations, get_approved_market_catalogue_store()
 
 
 async def _await_collection_runner(runner, timeout: float | None) -> CollectionReport:

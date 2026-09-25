@@ -495,6 +495,46 @@ async def test_paper_settlement_does_not_wait_for_the_ledger_on_the_event_loop(
 
 
 @pytest.mark.asyncio
+async def test_paper_settlement_builds_ledger_services_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First settlement cycle opens the SQLite ledger / catalogue off the loop.
+
+    Windows CI evidence before this: the #517 startup probe starved 0.601s
+    with longest_phase=paper_settlement while those services were created.
+    """
+
+    from sports_hedge.application import live_refresh as live_refresh_module
+    from sports_hedge.application.event_loop_activity import _on_event_loop_thread
+
+    built_on_loop: list[bool] = []
+    build_s = 0.4
+
+    class _NoOpenTrades:
+        trades = None
+
+        def list_active_trades(self) -> list:
+            return []
+
+    def slow_first_use() -> tuple[object, object]:
+        built_on_loop.append(_on_event_loop_thread())
+        time.sleep(build_s)
+        return _NoOpenTrades(), None
+
+    monkeypatch.setattr(live_refresh_module, "_paper_settlement_dependencies", slow_first_use)
+    coordinator = _coordinator()
+    heartbeat = HeartbeatProbe().start()
+    await coordinator._maybe_run_paper_settlement()
+    await heartbeat.stop()
+
+    assert built_on_loop == [False]
+    assert coordinator._settlement_in_progress is False
+    assert coordinator._next_settlement_due is not None
+    assert heartbeat.worst_s < LIVENESS_BOUND_S, heartbeat.worst_s
+    assert LOOP_ACTIVITY.longest is None or LOOP_ACTIVITY.longest.elapsed_s < LIVENESS_BOUND_S
+
+
+@pytest.mark.asyncio
 async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
