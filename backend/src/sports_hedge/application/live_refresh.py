@@ -350,6 +350,9 @@ class LiveRefreshStatus(BaseModel):
     venue_health: dict[str, str] = Field(default_factory=dict)
     live_scores: str = "unavailable_unless_matchbook_payload_includes_scores"
     discovered_fixtures: list[DiscoveredFixture] = Field(default_factory=list)
+    # Classification instant for discovered_fixtures and the HOT/UNIVERSE counts
+    # derived from that board. Not a claim that lane heartbeats share this instant.
+    fixture_board_as_of: datetime | None = None
     hot: LaneRefreshStatus = Field(
         default_factory=lambda: LaneRefreshStatus(
             cadence_seconds=10,
@@ -5391,7 +5394,13 @@ class LiveRefreshCoordinator:
         return generation_id
 
     def public_status(self) -> LiveRefreshStatus:
-        """Current Discovery/Tracked inventory as of now, after lifecycle eviction."""
+        """Dashboard status from one fixture-board snapshot.
+
+        Lifecycle eviction still runs, briefly, under the fixture store lock.
+        Projecting the board happens after that lock is released so a poll does
+        not stall scanner publication. ``fixture_board_as_of`` is that snapshot's
+        classification time.
+        """
 
         now = self.now()
         horizon = self.radar_horizon_kwargs()
@@ -5400,7 +5409,7 @@ class LiveRefreshCoordinator:
             "post_kickoff_unknown_horizon": horizon["post_kickoff_unknown_horizon"],
             "post_kickoff_current_radar_ceiling": horizon["post_kickoff_current_radar_ceiling"],
         }
-        inventory = self._fixture_state.inventory(
+        board = self._fixture_state.operator_board(
             now,
             **classify,
             hot_interval_seconds=horizon["hot_interval_seconds"],
@@ -5408,10 +5417,9 @@ class LiveRefreshCoordinator:
             hot_ttl_seconds=horizon["hot_ttl_seconds"],
             universe_ttl_seconds=horizon["universe_ttl_seconds"],
         )
-        hot_count, universe_count = self._fixture_state.membership_counts(now, **classify)
-        unique, lifecycle, promoted = self._fixture_state.hot_membership_breakdown(
-            now, **classify
-        )
+        inventory = board.discovered
+        hot_count, universe_count = board.membership
+        unique, lifecycle, promoted = board.breakdown
         engine_status = (
             self._price_engine.public_status(now=now)
             if self._price_engine is not None
@@ -5481,6 +5489,7 @@ class LiveRefreshCoordinator:
             self.status = self.status.model_copy(
                 update={
                     "discovered_fixtures": inventory,
+                    "fixture_board_as_of": board.as_of,
                     "hot": hot,
                     "background": background,
                     "active_trade": active_trade,

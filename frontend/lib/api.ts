@@ -863,6 +863,8 @@ export type LiveRefreshStatus = {
   venue_health?: Record<string, string>;
   live_scores: string;
   discovered_fixtures: DiscoveredFixture[];
+  /** Classification instant for discovered_fixtures and the counts taken from that board. */
+  fixture_board_as_of?: string | null;
   hot?: LaneRefreshStatus;
   universe?: LaneRefreshStatus;
   background?: LaneRefreshStatus;

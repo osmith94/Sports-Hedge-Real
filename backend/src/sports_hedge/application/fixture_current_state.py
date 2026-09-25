@@ -78,6 +78,16 @@ class LaneObservation:
     universe_generation_id: int | None = None
 
 
+@dataclass(frozen=True)
+class OperatorBoard:
+    """Fixture board captured at ``as_of`` and projected without the store lock."""
+
+    as_of: datetime
+    discovered: list[DiscoveredFixture]
+    membership: tuple[int, int]
+    breakdown: tuple[int, int, int]
+
+
 @dataclass
 class FixtureRadarRow:
     canonical_event_id: str
@@ -559,104 +569,19 @@ class FixtureCurrentStateStore:
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
         max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     ) -> list[DiscoveredFixture]:
-        with self._lock:
-            market_kwargs = self._store_market_kwargs(
-                {
-                    "hot_ttl_seconds": hot_ttl_seconds,
-                    "universe_ttl_seconds": universe_ttl_seconds,
-                    "max_quote_age_ms": max_quote_age_ms,
-                }
-            )
-            self._evict_non_current(
-                now,
-                hot_horizon=hot_horizon,
-                post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
-                post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
-                **market_kwargs,
-            )
-            rows: list[DiscoveredFixture] = []
-            for record in list(self._rows.values()):
-                fixture = record.status_fixture(now, **market_kwargs)
-                if fixture is None:
-                    continue
-                classify_kwargs = {
-                    "hot_horizon": hot_horizon,
-                    "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
-                    "post_kickoff_current_radar_ceiling": post_kickoff_current_radar_ceiling,
-                }
-                membership = self._identity_membership(
-                    record,
-                    fixture,
-                    now,
-                    classify_kwargs=classify_kwargs,
-                    market_kwargs=market_kwargs,
-                )
-                if membership is ScanLane.DROP:
-                    continue
-                lane, scanned = record.scheduler_lane_scan(membership, fixture)
-                lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
-                qualifying_promotion = False
-                surveillance_promotion = False
-                net_proximity_promotion = False
-                execution_miss_promotion = False
-                net_proximity_distance_pp = None
-                if membership is ScanLane.HOT and lifecycle is ScanLane.UNIVERSE:
-                    qualifying_promotion = current_slots_prove_qualifying_opportunity(
-                        record.live_market_slots(),
-                        now=now,
-                        **market_kwargs,
-                    )
-                    net_proximity_distance_pp = current_slots_net_proximity_distance_pp(
-                        record.live_market_slots(),
-                        now=now,
-                        **market_kwargs,
-                    )
-                    net_proximity_promotion = (
-                        not qualifying_promotion and net_proximity_distance_pp is not None
-                    )
-                    surveillance_promotion = (
-                        not qualifying_promotion
-                        and not net_proximity_promotion
-                        and current_slots_prove_surveillance_opportunity(
-                            record.live_market_slots(),
-                            now=now,
-                            **market_kwargs,
-                        )
-                    )
-                    execution_miss_promotion = (
-                        not qualifying_promotion
-                        and not net_proximity_promotion
-                        and not surveillance_promotion
-                        and self._execution_miss_hot_active(fixture.canonical_event_id, now)
-                    )
-                rows.append(
-                    fixture.model_copy(
-                        update={
-                            "scan_lane": lane.value,
-                            "last_scanned_at": scanned,
-                            "next_due_at": next_due_at(
-                                scanned,
-                                lane,
-                                hot_interval_seconds=hot_interval_seconds,
-                                universe_interval_seconds=universe_interval_seconds,
-                            ),
-                            "hot_reasons": hot_reason_labels(
-                                fixture,
-                                now,
-                                membership=membership,
-                                lifecycle=lifecycle,
-                                qualifying_promotion=qualifying_promotion,
-                                surveillance_promotion=surveillance_promotion,
-                                net_proximity_promotion=net_proximity_promotion,
-                                net_proximity_distance_pp=net_proximity_distance_pp,
-                                execution_miss_promotion=execution_miss_promotion,
-                                hot_horizon=hot_horizon,
-                            ),
-                        }
-                    )
-                )
-            rows.sort(key=lambda item: (item.kickoff_utc, item.canonical_event_id))
-            return rows
+        """Projected fixture board. Evicts under the store lock, projects outside it."""
+
+        return self.operator_board(
+            now,
+            hot_horizon=hot_horizon,
+            post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+            post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
+            hot_interval_seconds=hot_interval_seconds,
+            universe_interval_seconds=universe_interval_seconds,
+            hot_ttl_seconds=hot_ttl_seconds,
+            universe_ttl_seconds=universe_ttl_seconds,
+            max_quote_age_ms=max_quote_age_ms,
+        ).discovered
 
     def current_radar_rows(
         self,
@@ -974,64 +899,229 @@ class FixtureCurrentStateStore:
             return None
         return record.status_fixture(now, **market_kwargs) or lifecycle
 
-    def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:
+    def operator_board(
+        self,
+        now: datetime,
+        *,
+        hot_horizon=DEFAULT_HOT_HORIZON,
+        post_kickoff_unknown_horizon=DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
+        post_kickoff_current_radar_ceiling=DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
+        hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
+        universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
+        hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
+        universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+        max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    ) -> OperatorBoard:
+        """One eviction, then inventory and HOT counts projected off the store lock.
+
+        ``as_of`` is the classification instant. A fixture published while the
+        projection runs appears on the next read; this board does not pretend
+        to be newer than ``as_of``.
+        """
+
+        views, classify_kwargs, market_kwargs = self._capture_status_views(
+            now,
+            hot_horizon=hot_horizon,
+            post_kickoff_unknown_horizon=post_kickoff_unknown_horizon,
+            post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
+            hot_ttl_seconds=hot_ttl_seconds,
+            universe_ttl_seconds=universe_ttl_seconds,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        return OperatorBoard(
+            as_of=require_aware_instant(now, "now"),
+            discovered=self._project_inventory(
+                views,
+                now,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
+                hot_horizon=hot_horizon,
+                hot_interval_seconds=hot_interval_seconds,
+                universe_interval_seconds=universe_interval_seconds,
+            ),
+            membership=self._project_membership(
+                views, now, classify_kwargs=classify_kwargs, market_kwargs=market_kwargs
+            ),
+            breakdown=self._project_hot_breakdown(
+                views, now, classify_kwargs=classify_kwargs, market_kwargs=market_kwargs
+            ),
+        )
+
+    def _capture_status_views(
+        self, now: datetime, **kwargs: Any
+    ) -> tuple[list[_StatusView], dict[str, Any], dict[str, Any]]:
+        """Evict and copy fixture inputs. Callers project after this returns."""
+
         with self._lock:
-            kwargs = self._store_market_kwargs(kwargs)
-            classify_kwargs = _classify_kwargs(kwargs)
-            market_kwargs = _market_ttl_kwargs(kwargs)
+            stored = self._store_market_kwargs(kwargs)
+            classify_kwargs = _classify_kwargs(stored)
+            market_kwargs = _market_ttl_kwargs(stored)
             self._evict_non_current(now, **classify_kwargs, **market_kwargs)
-            hot_fixtures: list[DiscoveredFixture] = []
-            universe = 0
-            for record in list(self._rows.values()):
-                lifecycle = record.lifecycle_fixture()
-                if lifecycle is None:
-                    continue
-                membership = self._identity_membership(
-                    record,
-                    lifecycle,
-                    now,
-                    classify_kwargs=classify_kwargs,
-                    market_kwargs=market_kwargs,
+            views = [_StatusView(record) for record in list(self._rows.values())]
+        return views, classify_kwargs, market_kwargs
+
+    def _project_inventory(
+        self,
+        views: list[_StatusView],
+        now: datetime,
+        *,
+        classify_kwargs: dict[str, Any],
+        market_kwargs: dict[str, Any],
+        hot_horizon,
+        hot_interval_seconds: int,
+        universe_interval_seconds: int,
+    ) -> list[DiscoveredFixture]:
+        rows: list[DiscoveredFixture] = []
+        for record in views:
+            fixture = record.status_fixture(now, **market_kwargs)
+            if fixture is None:
+                continue
+            membership = self._identity_membership(
+                record,
+                fixture,
+                now,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
+            )
+            if membership is ScanLane.DROP:
+                continue
+            lane, scanned = record.scheduler_lane_scan(membership, fixture)
+            lifecycle = classify_scan_lane(fixture, now, **classify_kwargs)
+            qualifying_promotion = False
+            surveillance_promotion = False
+            net_proximity_promotion = False
+            execution_miss_promotion = False
+            net_proximity_distance_pp = None
+            if membership is ScanLane.HOT and lifecycle is ScanLane.UNIVERSE:
+                qualifying_promotion = current_slots_prove_qualifying_opportunity(
+                    record.live_market_slots(),
+                    now=now,
+                    **market_kwargs,
                 )
-                if membership is ScanLane.HOT:
-                    hot_fixtures.append(record.status_fixture(now, **market_kwargs) or lifecycle)
-                elif membership is ScanLane.UNIVERSE:
-                    universe += 1
-            return len(unique_hot_scheduling_ids(hot_fixtures)), universe
+                net_proximity_distance_pp = current_slots_net_proximity_distance_pp(
+                    record.live_market_slots(),
+                    now=now,
+                    **market_kwargs,
+                )
+                net_proximity_promotion = (
+                    not qualifying_promotion and net_proximity_distance_pp is not None
+                )
+                surveillance_promotion = (
+                    not qualifying_promotion
+                    and not net_proximity_promotion
+                    and current_slots_prove_surveillance_opportunity(
+                        record.live_market_slots(),
+                        now=now,
+                        **market_kwargs,
+                    )
+                )
+                execution_miss_promotion = (
+                    not qualifying_promotion
+                    and not net_proximity_promotion
+                    and not surveillance_promotion
+                    and self._execution_miss_hot_active(fixture.canonical_event_id, now)
+                )
+            rows.append(
+                fixture.model_copy(
+                    update={
+                        "scan_lane": lane.value,
+                        "last_scanned_at": scanned,
+                        "next_due_at": next_due_at(
+                            scanned,
+                            lane,
+                            hot_interval_seconds=hot_interval_seconds,
+                            universe_interval_seconds=universe_interval_seconds,
+                        ),
+                        "hot_reasons": hot_reason_labels(
+                            fixture,
+                            now,
+                            membership=membership,
+                            lifecycle=lifecycle,
+                            qualifying_promotion=qualifying_promotion,
+                            surveillance_promotion=surveillance_promotion,
+                            net_proximity_promotion=net_proximity_promotion,
+                            net_proximity_distance_pp=net_proximity_distance_pp,
+                            execution_miss_promotion=execution_miss_promotion,
+                            hot_horizon=hot_horizon,
+                        ),
+                    }
+                )
+            )
+        rows.sort(key=lambda item: (item.kickoff_utc, item.canonical_event_id))
+        return rows
+
+    def _project_membership(
+        self,
+        views: list[_StatusView],
+        now: datetime,
+        *,
+        classify_kwargs: dict[str, Any],
+        market_kwargs: dict[str, Any],
+    ) -> tuple[int, int]:
+        hot_fixtures: list[DiscoveredFixture] = []
+        universe = 0
+        for record in views:
+            lifecycle = record.lifecycle_fixture()
+            if lifecycle is None:
+                continue
+            membership = self._identity_membership(
+                record,
+                lifecycle,
+                now,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
+            )
+            if membership is ScanLane.HOT:
+                hot_fixtures.append(record.status_fixture(now, **market_kwargs) or lifecycle)
+            elif membership is ScanLane.UNIVERSE:
+                universe += 1
+        return len(unique_hot_scheduling_ids(hot_fixtures)), universe
+
+    def _project_hot_breakdown(
+        self,
+        views: list[_StatusView],
+        now: datetime,
+        *,
+        classify_kwargs: dict[str, Any],
+        market_kwargs: dict[str, Any],
+    ) -> tuple[int, int, int]:
+        hot_fixtures: list[DiscoveredFixture] = []
+        lifecycle = 0
+        promoted = 0
+        for record in views:
+            lifecycle_fixture = record.lifecycle_fixture()
+            if lifecycle_fixture is None:
+                continue
+            membership = self._identity_membership(
+                record,
+                lifecycle_fixture,
+                now,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
+            )
+            if membership is not ScanLane.HOT:
+                continue
+            hot_fixtures.append(record.status_fixture(now, **market_kwargs) or lifecycle_fixture)
+            classified = classify_scan_lane(lifecycle_fixture, now, **classify_kwargs)
+            if classified is ScanLane.HOT:
+                lifecycle += 1
+            else:
+                promoted += 1
+        return len(unique_hot_scheduling_ids(hot_fixtures)), lifecycle, promoted
+
+    def membership_counts(self, now: datetime, **kwargs: Any) -> tuple[int, int]:
+        views, classify_kwargs, market_kwargs = self._capture_status_views(now, **kwargs)
+        return self._project_membership(
+            views, now, classify_kwargs=classify_kwargs, market_kwargs=market_kwargs
+        )
 
     def hot_membership_breakdown(self, now: datetime, **kwargs: Any) -> tuple[int, int, int]:
         """Return (unique HOT units, lifecycle HOT, promoted HOT)."""
 
-        with self._lock:
-            kwargs = self._store_market_kwargs(kwargs)
-            classify_kwargs = _classify_kwargs(kwargs)
-            market_kwargs = _market_ttl_kwargs(kwargs)
-            self._evict_non_current(now, **classify_kwargs, **market_kwargs)
-            hot_fixtures: list[DiscoveredFixture] = []
-            lifecycle = 0
-            promoted = 0
-            for record in list(self._rows.values()):
-                lifecycle_fixture = record.lifecycle_fixture()
-                if lifecycle_fixture is None:
-                    continue
-                membership = self._identity_membership(
-                    record,
-                    lifecycle_fixture,
-                    now,
-                    classify_kwargs=classify_kwargs,
-                    market_kwargs=market_kwargs,
-                )
-                if membership is not ScanLane.HOT:
-                    continue
-                hot_fixtures.append(
-                    record.status_fixture(now, **market_kwargs) or lifecycle_fixture
-                )
-                classified = classify_scan_lane(lifecycle_fixture, now, **classify_kwargs)
-                if classified is ScanLane.HOT:
-                    lifecycle += 1
-                else:
-                    promoted += 1
-            return len(unique_hot_scheduling_ids(hot_fixtures)), lifecycle, promoted
+        views, classify_kwargs, market_kwargs = self._capture_status_views(now, **kwargs)
+        return self._project_hot_breakdown(
+            views, now, classify_kwargs=classify_kwargs, market_kwargs=market_kwargs
+        )
 
     def _identity_membership(
         self,
@@ -1673,6 +1763,29 @@ class _FixtureRecord:
             if key not in merged:
                 merged[key] = event
         return tuple(merged.values())
+
+
+class _StatusView:
+    """Fixture inputs copied under the store lock so projection can run outside it.
+
+    Market slots are replaced, not mutated, so the copied dict stays stable if a
+    later write publishes a new slot map.
+    """
+
+    def __init__(self, record: _FixtureRecord) -> None:
+        self.hot = record.hot
+        self.universe = record.universe
+        self.leftover_this_pass = record.leftover_this_pass
+        self.extra_source_events = record.extra_source_events
+        self.markets = None if record.markets is None else dict(record.markets)
+
+    status_observation = _FixtureRecord.status_observation
+    lifecycle_fixture = _FixtureRecord.lifecycle_fixture
+    live_market_slots = _FixtureRecord.live_market_slots
+    lane_observation = _FixtureRecord.lane_observation
+    selected_observation = _FixtureRecord.selected_observation
+    scheduler_lane_scan = _FixtureRecord.scheduler_lane_scan
+    status_fixture = _FixtureRecord.status_fixture
 
 
 def _stamp_fixture(
