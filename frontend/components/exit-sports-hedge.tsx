@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 import {
   EXIT_CONFIRM_BODY,
@@ -33,6 +34,12 @@ type ViewProps = {
   onConfirm?: () => void;
 };
 
+// The sidebar is sticky (its own stacking context), so layers covering the
+// whole app must be mounted on <body> to sit above the sticky top bar.
+function atBodyLevel(layer: ReactNode): ReactNode {
+  return typeof document === "undefined" ? layer : createPortal(layer, document.body);
+}
+
 export function ExitSportsHedgeView({ state, onOpen, onCancel, onConfirm }: ViewProps) {
   const { phase, message } = state;
   if (phase === "checking" || phase === "unavailable") {
@@ -41,14 +48,14 @@ export function ExitSportsHedgeView({ state, onOpen, onCancel, onConfirm }: View
   if (phase === "stopping" || phase === "stopped" || phase === "stop_slow") {
     const title = phase === "stopped" ? STOPPED_TITLE : phase === "stop_slow" ? STOP_SLOW_TITLE : STOPPING_TITLE;
     const body = phase === "stopped" ? STOPPED_BODY : phase === "stop_slow" ? STOP_SLOW_BODY : STOPPING_BODY;
-    return (
+    return atBodyLevel(
       <div className="desktop-exit-overlay" role="status" aria-live="polite" data-phase={phase}>
         <div className="desktop-exit-overlay-card">
           <div className="paper-pill"><span className="paper-dot" /> PAPER MODE</div>
           <h1>{title}</h1>
           <p>{body}</p>
         </div>
-      </div>
+      </div>,
     );
   }
   return (
@@ -56,7 +63,7 @@ export function ExitSportsHedgeView({ state, onOpen, onCancel, onConfirm }: View
       <button type="button" className="desktop-exit-button" onClick={onOpen} data-phase={phase}>
         {EXIT_LABEL}
       </button>
-      {phase === "confirming" || phase === "requesting" || phase === "error" ? (
+      {phase === "confirming" || phase === "requesting" || phase === "error" ? atBodyLevel(
         <div className="desktop-exit-backdrop">
           <div className="desktop-exit-dialog" role="alertdialog" aria-modal="true" aria-labelledby="desktop-exit-title">
             <h2 id="desktop-exit-title">{EXIT_CONFIRM_TITLE}</h2>
@@ -73,7 +80,7 @@ export function ExitSportsHedgeView({ state, onOpen, onCancel, onConfirm }: View
               )}
             </div>
           </div>
-        </div>
+        </div>,
       ) : null}
     </>
   );

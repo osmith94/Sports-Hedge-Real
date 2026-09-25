@@ -58,6 +58,12 @@ describe("Exit Sports Hedge control", () => {
     assert.doesNotMatch(stopped, /desktop-exit-button/);
   });
 
+  it("mounts the dialog and stopped overlay on <body> so they cover the sticky top bar", () => {
+    assert.match(source, /createPortal\(layer, document\.body\)/);
+    assert.match(source, /return atBodyLevel\(\s*<div className="desktop-exit-overlay"/);
+    assert.match(source, /atBodyLevel\(\s*<div className="desktop-exit-backdrop"/);
+  });
+
   it("never handles the controller secret, closes windows, or reloads the page", () => {
     assert.match(source, /^"use client";/);
     assert.doesNotMatch(source, /SPORTS_HEDGE_CONTROLLER|process\.env|token/i);
