@@ -5418,6 +5418,13 @@ class LiveRefreshCoordinator:
             if self._price_engine is not None
             else empty_price_engine_status()
         )
+        # SQLite reads stay outside _state_lock. This runs in the API threadpool
+        # and every scanner worker needs that lock on the event loop.
+        saved_universe_scope = resolve_operator_universe_scope(
+            self._resolved_universe_scope_store()
+        )
+        active_trade_locked_gbp = self._active_trade_locked_gbp()
+        active_trade_timeline = self._recent_active_trade_timeline()
         with self._state_lock:
             hot_update = {
                 "fixture_count": unique or hot_count,
@@ -5512,9 +5519,7 @@ class LiveRefreshCoordinator:
                     ),
                     "operator_settings": self.status.operator_settings
                     or env_operator_scanner_settings(),
-                    "universe_scope": self._decorate_universe_scope(
-                        resolve_operator_universe_scope(self._resolved_universe_scope_store())
-                    ),
+                    "universe_scope": self._decorate_universe_scope(saved_universe_scope),
                     "interval_seconds": int(self.status.interval_seconds),
                 }
             )
@@ -5537,9 +5542,9 @@ class LiveRefreshCoordinator:
                     "system_load": system_load_from_status(
                         self.status,
                         universe_work_used_s=self._status_universe_work_used(),
-                        active_trade_locked_gbp=self._active_trade_locked_gbp(),
+                        active_trade_locked_gbp=active_trade_locked_gbp,
                     ),
-                    "active_trade_timeline": self._recent_active_trade_timeline(),
+                    "active_trade_timeline": active_trade_timeline,
                 }
             )
             return self.status
