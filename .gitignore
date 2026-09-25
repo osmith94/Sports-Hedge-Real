@@ -17,6 +17,13 @@ node_modules/
 .next/
 out/
 
+# Windows desktop controller build outputs (never commit binaries)
+dist/
+desktop/**/bin/
+desktop/**/obj/
+desktop/**/TestResults/
+*.user
+
 # IDE / OS
 .vscode/
 .idea/
