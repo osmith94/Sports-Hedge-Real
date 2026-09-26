@@ -1884,12 +1884,32 @@ def scheduled_paper_scan_service() -> PaperScanService:
     )
 
 
+def note_expired_qualifying_episodes_on_tick(coordinator) -> None:
+    """Close radar-expired qualifying episodes on the server tick.
+
+    No provider calls and no scanner-cadence change. Event time is the existing
+    lane TTL boundary. Safe to repeat: a closed episode is no longer open.
+    """
+
+    from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
+    from sports_hedge.arbitrage.watchlist.service import note_expired_qualifying_episodes
+
+    radar = coordinator.radar_horizon_kwargs()
+    note_expired_qualifying_episodes(
+        get_watchlist_service(get_watchlist_repository()),
+        coordinator.now(),
+        hot_ttl_seconds=int(radar["hot_ttl_seconds"]),
+        universe_ttl_seconds=int(radar["universe_ttl_seconds"]),
+    )
+
+
 async def server_owned_refresh_tick(plan=None) -> None:
     """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
 
     coordinator = get_live_refresh_coordinator()
     if coordinator.operator_scanner_stopped:
         return
+    note_expired_qualifying_episodes_on_tick(coordinator)
     if coordinator._catalogue_store is None:
         coordinator.bind_catalogue_store(get_approved_market_catalogue_store())
     resolved = plan if plan is not None else coordinator.plan_tick()

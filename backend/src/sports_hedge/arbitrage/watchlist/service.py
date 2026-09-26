@@ -688,7 +688,8 @@ class WatchlistService:
         Does not change opportunity status, classification, quote-freshness gates,
         or TTL values. Executable quote age alone stays `radar_current` inside the
         TTL and does not close the episode. Generic `expired` remains a separate
-        terminal status and is not written here.
+        terminal status and is not written here. ``occurred_at`` is the radar TTL
+        boundary (`last_seen_at` plus the existing lane TTL), not the caller clock.
         """
 
         from sports_hedge.application.scan_lanes import (
@@ -696,6 +697,7 @@ class WatchlistService:
             DEFAULT_UNIVERSE_TTL_SECONDS,
             FRESHNESS_EXPIRED,
             freshness_class,
+            observation_expires_at,
         )
 
         evaluated = require_aware_instant(now, "now")
@@ -704,27 +706,30 @@ class WatchlistService:
             DEFAULT_UNIVERSE_TTL_SECONDS if universe_ttl_seconds is None else universe_ttl_seconds
         )
         emitted: list[OpportunityLifecycleEvent] = []
-        for opportunity in self.repository.list_opportunities():
-            if opportunity.status is not OpportunityStatus.TRIGGERED:
+        for opportunity, pricing_lane in self.repository.list_open_qualifying_episodes():
+            lane = _radar_lane_for_pricing(pricing_lane)
+            if (
+                freshness_class(
+                    lane=lane,
+                    last_scanned_at=opportunity.last_seen_at,
+                    now=evaluated,
+                    quote_age_ms=opportunity.quote_age_ms,
+                    max_quote_age_ms=self.max_quote_age_ms,
+                    hot_ttl_seconds=hot_ttl,
+                    universe_ttl_seconds=universe_ttl,
+                )
+                != FRESHNESS_EXPIRED
+            ):
                 continue
-            if opportunity.data_kind == "demo_fixture_replay":
-                continue
-            boundary = self.repository.latest_qualifying_boundary(opportunity.opportunity_id)
-            if boundary is None or boundary[0] is not LifecycleEventType.QUALIFYING_DETECTED:
-                continue
-            lane = _radar_lane_for_pricing(boundary[1])
-            if freshness_class(
-                lane=lane,
-                last_scanned_at=opportunity.last_seen_at,
-                now=evaluated,
-                quote_age_ms=opportunity.quote_age_ms,
-                max_quote_age_ms=self.max_quote_age_ms,
+            # The durable time is the radar TTL boundary, not this maintenance call.
+            expires = observation_expires_at(
+                opportunity.last_seen_at,
+                lane,
                 hot_ttl_seconds=hot_ttl,
                 universe_ttl_seconds=universe_ttl,
-            ) != FRESHNESS_EXPIRED:
-                continue
+            )
             event = self._append_qualifying_radar_expiry(
-                opportunity, evaluated, pricing_lane=boundary[1]
+                opportunity, expires, pricing_lane=pricing_lane
             )
             if event is not None:
                 emitted.append(event)
@@ -1354,6 +1359,22 @@ def _episode_capture_eligible(
         and previous.capture_eligible
     )
     return sticky or observation.eligible_for_paper_simulation
+
+
+def note_expired_qualifying_episodes(
+    service: WatchlistService,
+    now: datetime,
+    *,
+    hot_ttl_seconds: int,
+    universe_ttl_seconds: int,
+) -> list[OpportunityLifecycleEvent]:
+    """Server-owned close of open qualifying episodes past the existing radar TTL."""
+
+    return service.note_qualifying_radar_expiry(
+        now,
+        hot_ttl_seconds=hot_ttl_seconds,
+        universe_ttl_seconds=universe_ttl_seconds,
+    )
 
 
 def _radar_lane_for_pricing(pricing_lane: str | None):

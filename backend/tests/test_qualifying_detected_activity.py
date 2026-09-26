@@ -13,9 +13,13 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
+import asyncio
+from unittest.mock import patch
+
 from sports_hedge.api.main import app
-from sports_hedge.api.paper import _persist_decision
+from sports_hedge.api.paper import _persist_decision, server_owned_refresh_tick
 from sports_hedge.api.watchlist import get_watchlist_service, tracked_markets
+from sports_hedge.application.live_refresh import DualCadencePlan, get_live_refresh_coordinator
 from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.scan_lanes import (
@@ -470,12 +474,133 @@ def test_radar_ttl_expiry_closes_qualifying_episode_without_a_new_observation() 
         )
         == []
     )
-    assert "note_qualifying_radar_expiry" in inspect.getsource(tracked_markets)
+    assert expiry.occurred_at == expired_at
+    tracked_source = inspect.getsource(tracked_markets)
+    assert "note_qualifying_radar_expiry" not in tracked_source
+    assert "note_expired_qualifying_episodes" not in tracked_source
+    tick_source = inspect.getsource(server_owned_refresh_tick)
+    note_at = tick_source.index("note_expired_qualifying_episodes_on_tick")
+    assert note_at < tick_source.index("run_price_engine_slice")
+    assert note_at < tick_source.index("_collect_report(")
+
+
+def test_server_owned_tick_persists_qualifying_expired_without_tracked_read() -> None:
+    """A-F: the refresh tick closes the episode. The tracked read is not involved."""
+
+    asyncio.run(_server_owned_tick_persists_qualifying_expired_without_tracked_read())
+
+
+async def _server_owned_tick_persists_qualifying_expired_without_tracked_read() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    watched = service.observe(_qualified(pricing_lane="hot", quote_age_ms=50_000))
+    plain = service.observe(
+        _qualified(
+            solver_is_arbitrage=False,
+            canonical_market_id="mkt-plain",
+            quote_age_ms=50_000,
+        )
+    )
+    coordinator = get_live_refresh_coordinator()
+    previous_clock = coordinator._clock
+    previous_store = coordinator._catalogue_store
+    previous_stopped = coordinator._operator_scanner_stopped
+    try:
+        coordinator._operator_scanner_stopped = False
+        coordinator._catalogue_store = object()
+        hot_ttl = int(coordinator.radar_horizon_kwargs()["hot_ttl_seconds"])
+        boundary = OBSERVED + timedelta(seconds=hot_ttl)
+
+        async def tick_at(when) -> None:
+            coordinator._clock = lambda: when
+            with (
+                patch(
+                    "sports_hedge.api.watchlist.get_watchlist_repository",
+                    lambda: service.repository,
+                ),
+                patch(
+                    "sports_hedge.api.watchlist.get_watchlist_service",
+                    lambda repository=None: service,
+                ),
+            ):
+                await server_owned_refresh_tick(DualCadencePlan(lane="idle", reason="waiting"))
+
+        await tick_at(OBSERVED + timedelta(seconds=10))
+        assert (
+            service.repository.count_events(
+                watched.opportunity_id, LifecycleEventType.QUALIFYING_EXPIRED
+            )
+            == 0
+        )
+
+        late = boundary + timedelta(seconds=15)
+        await tick_at(late)
+        closed = [
+            event
+            for event in service.activity(opportunity_id=watched.opportunity_id)
+            if event.event_type is LifecycleEventType.QUALIFYING_EXPIRED
+        ]
+        assert len(closed) == 1
+        assert closed[0].detail == "radar expired"
+        assert closed[0].status is OpportunityStatus.TRIGGERED
+        assert closed[0].occurred_at == boundary
+        assert service.repository.get(watched.opportunity_id).status is OpportunityStatus.TRIGGERED
+        assert LifecycleEventType.QUALIFYING_EXPIRED in {
+            event.event_type
+            for event in service.operator_activity(opportunity_id=watched.opportunity_id)
+        }
+
+        await tick_at(late + timedelta(seconds=1))
+        assert (
+            service.repository.count_events(
+                watched.opportunity_id, LifecycleEventType.QUALIFYING_EXPIRED
+            )
+            == 1
+        )
+
+        requalified_at = late + timedelta(seconds=5)
+        service.observe(_qualified(pricing_lane="hot", quote_age_ms=800, observed_at=requalified_at))
+        assert len(_qualifying_events(service, watched.opportunity_id)) == 2
+        await tick_at(late)
+        assert (
+            service.repository.count_events(
+                watched.opportunity_id, LifecycleEventType.QUALIFYING_EXPIRED
+            )
+            == 1
+        )
+        second_boundary = requalified_at + timedelta(seconds=hot_ttl)
+        await tick_at(second_boundary + timedelta(seconds=1))
+        expired = [
+            event
+            for event in service.activity(opportunity_id=watched.opportunity_id)
+            if event.event_type is LifecycleEventType.QUALIFYING_EXPIRED
+        ]
+        assert [event.occurred_at for event in reversed(expired)] == [boundary, second_boundary]
+        await tick_at(second_boundary + timedelta(seconds=30))
+        assert (
+            service.repository.count_events(
+                watched.opportunity_id, LifecycleEventType.QUALIFYING_EXPIRED
+            )
+            == 2
+        )
+
+        plain_types = {
+            event.event_type for event in service.activity(opportunity_id=plain.opportunity_id)
+        }
+        assert LifecycleEventType.QUALIFYING_EXPIRED not in plain_types
+        assert LifecycleEventType.EXPIRED not in plain_types
+        assert service.operator_activity(opportunity_id=plain.opportunity_id) == []
+        assert "note_qualifying_radar_expiry" not in inspect.getsource(tracked_markets)
+    finally:
+        coordinator._clock = previous_clock
+        coordinator._catalogue_store = previous_store
+        coordinator._operator_scanner_stopped = previous_stopped
 
 
 def test_generic_expired_stays_hidden_unless_it_closes_a_qualifying_episode() -> None:
     service = WatchlistService(SqliteWatchlistRepository())
-    watched = service.observe(_qualified(solver_is_arbitrage=False, market_id="mkt-plain"))
+    watched = service.observe(
+        _qualified(solver_is_arbitrage=False, canonical_market_id="mkt-plain")
+    )
     assert watched.status is not OpportunityStatus.TRIGGERED
     service.expire(watched.opportunity_id, occurred_at=OBSERVED, detail="watchlist expired")
     types = [event.event_type for event in service.activity(opportunity_id=watched.opportunity_id)]

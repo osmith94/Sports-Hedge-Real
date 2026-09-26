@@ -603,6 +603,54 @@ class SqliteWatchlistRepository:
             lane = row[1]
             return LifecycleEventType(row[0]), None if lane in (None, "") else str(lane)
 
+    def list_open_qualifying_episodes(self) -> list[tuple[NearOpportunity, str | None]]:
+        """TRIGGERED rows whose newest qualifying boundary is still detection.
+
+        Uses the status index, then one indexed latest-boundary lookup per
+        triggered row. It does not scan the lifecycle table.
+        """
+
+        types = (
+            LifecycleEventType.QUALIFYING_DETECTED.value,
+            LifecycleEventType.QUALIFYING_LOST.value,
+            LifecycleEventType.QUALIFYING_EXPIRED.value,
+        )
+        placeholders = ", ".join("?" for _ in types)
+        with self.exclusive():
+            rows = self._connection.execute(
+                f"""
+                SELECT opportunities.*, boundary.pricing_lane AS qualifying_pricing_lane
+                FROM watchlist_opportunities AS opportunities
+                JOIN watchlist_lifecycle_events AS boundary
+                  ON boundary.rowid = (
+                    SELECT events.rowid
+                    FROM watchlist_lifecycle_events AS events
+                    WHERE events.opportunity_id = opportunities.opportunity_id
+                      AND events.event_type IN ({placeholders})
+                    ORDER BY events.rowid DESC
+                    LIMIT 1
+                  )
+                WHERE opportunities.status = ?
+                  AND IFNULL(opportunities.data_kind, '') != 'demo_fixture_replay'
+                  AND boundary.event_type = ?
+                """,
+                (
+                    *types,
+                    OpportunityStatus.TRIGGERED.value,
+                    LifecycleEventType.QUALIFYING_DETECTED.value,
+                ),
+            ).fetchall()
+        opened: list[tuple[NearOpportunity, str | None]] = []
+        for row in rows:
+            lane = row["qualifying_pricing_lane"]
+            opened.append(
+                (
+                    _opportunity_from_row(row),
+                    None if lane in (None, "") else str(lane),
+                )
+            )
+        return opened
+
     def upsert_paper_fill_attempt(self, attempt: PaperFillAttempt) -> None:
         with self.exclusive():
             self._connection.execute(
