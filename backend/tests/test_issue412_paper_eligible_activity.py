@@ -67,7 +67,9 @@ def test_capture_ineligible_trigger_does_not_emit_paper_eligible() -> None:
     types = {event.event_type for event in service.activity(opportunity_id=triggered.opportunity_id)}
     assert LifecycleEventType.TRIGGER_CROSSED in types
     assert LifecycleEventType.PAPER_ELIGIBLE not in types
-    assert service.operator_activity() == []
+    assert [event.event_type for event in service.operator_activity()] == [
+        LifecycleEventType.QUALIFYING_DETECTED
+    ]
 
 
 def test_false_to_true_capture_eligibility_while_triggered_emits_once() -> None:
@@ -88,7 +90,8 @@ def test_false_to_true_capture_eligibility_while_triggered_emits_once() -> None:
     assert eligible[0].occurred_at == OBSERVED + timedelta(seconds=2)
     assert eligible[0].canonical_market_id == "mkt-signal"
     assert [event.event_type for event in service.operator_activity()] == [
-        LifecycleEventType.PAPER_ELIGIBLE
+        LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
     ]
 
 
@@ -143,7 +146,10 @@ def test_operator_activity_includes_paper_eligible_and_hides_trigger_crossed() -
     service = WatchlistService(SqliteWatchlistRepository())
     triggered = service.observe(_observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED))
     operator = service.operator_activity()
-    assert [event.event_type for event in operator] == [LifecycleEventType.PAPER_ELIGIBLE]
+    assert [event.event_type for event in operator] == [
+        LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
+    ]
     assert LifecycleEventType.PAPER_ELIGIBLE in OPERATOR_ACTIVITY_EVENT_TYPES
     audit = {event.event_type for event in service.activity(opportunity_id=triggered.opportunity_id)}
     assert LifecycleEventType.TRIGGER_CROSSED in audit
@@ -182,6 +188,7 @@ def test_unfiltered_opportunity_history_keeps_hidden_lifecycle_noise() -> None:
         assert [item["event_type"] for item in operator.json()] == [
             "trigger_lost_before_fill",
             "paper_eligible",
+            "qualifying_detected",
         ]
     finally:
         app.dependency_overrides.clear()
@@ -230,18 +237,20 @@ def test_same_timestamp_first_triggered_eligible_history_is_append_order() -> No
     first = service.observe(_observation(edge=EDGE_120, eligible=True, observed_at=OBSERVED))
     events = service.activity(opportunity_id=first.opportunity_id)
     same_ts = [event for event in events if event.occurred_at == OBSERVED]
-    assert [event.event_type for event in same_ts[:3]] == [
+    assert [event.event_type for event in same_ts[:4]] == [
         LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
         LifecycleEventType.TRIGGER_CROSSED,
         LifecycleEventType.CANDIDATE_FIRST_SEEN,
     ]
-    seqs = [event.append_seq for event in same_ts[:3]]
+    seqs = [event.append_seq for event in same_ts[:4]]
     assert all(seq is not None for seq in seqs)
     assert seqs == sorted(seqs, reverse=True)
-    chronological = list(reversed(same_ts[:3]))
+    chronological = list(reversed(same_ts[:4]))
     assert [event.event_type for event in chronological] == [
         LifecycleEventType.CANDIDATE_FIRST_SEEN,
         LifecycleEventType.TRIGGER_CROSSED,
+        LifecycleEventType.QUALIFYING_DETECTED,
         LifecycleEventType.PAPER_ELIGIBLE,
     ]
 

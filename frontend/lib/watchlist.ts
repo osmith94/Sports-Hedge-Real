@@ -1,11 +1,14 @@
 import {
   NearOpportunity,
   OpportunityLifecycleEvent,
+  Venue,
   WatchlistLifecycleEventType,
   WatchlistOpportunityStatus,
 } from "./api";
 import { ActivityEvent, ArbitrageOpportunity, OpportunityStatus } from "./arbitrage-ops";
-import { money, number } from "./format";
+import { venueShortLabel } from "./fixture-inventory-display";
+import { money, number, percent } from "./format";
+import { scanLaneLabel } from "./opportunity-monitor-display";
 
 const NEAR_STATUSES = new Set<WatchlistOpportunityStatus>(["WATCHING", "APPROACHING"]);
 const TRIGGERED_STATUSES = new Set<WatchlistOpportunityStatus>(["TRIGGERED"]);
@@ -118,6 +121,9 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
   trigger_crossed: "Threshold crossed",
   trigger_lost_before_fill: "Trigger lost before fill",
   promoted_to_hot: "Promoted to HOT",
+  qualifying_detected: "Qualifying opportunity",
+  qualifying_lost: "Qualifying lost",
+  qualifying_expired: "Radar expired",
   paper_eligible: "Paper eligible",
   paper_fill_attempted: "Paper fill attempted",
   paper_fill_partial: "Partial paper fill",
@@ -134,6 +140,9 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
 
 export const OPERATOR_ACTIVITY_EVENT_TYPES = [
   "promoted_to_hot",
+  "qualifying_detected",
+  "qualifying_lost",
+  "qualifying_expired",
   "paper_eligible",
   "trigger_lost_before_fill",
   "paper_fill_complete",
@@ -171,6 +180,9 @@ function activityDetail(event: OpportunityLifecycleEvent, subject: string | null
 
 function activityKind(eventType: WatchlistLifecycleEventType): string {
   if (eventType === "promoted_to_hot") return "PROMOTED_TO_HOT";
+  if (eventType === "qualifying_detected") return "QUALIFYING_OPPORTUNITY";
+  if (eventType === "qualifying_lost") return "QUALIFYING_LOST";
+  if (eventType === "qualifying_expired") return "QUALIFYING_EXPIRED";
   if (eventType === "paper_eligible") return "PAPER_ELIGIBLE";
   if (eventType === "trigger_lost_before_fill") return "TRIGGER_LOST_BEFORE_FILL";
   if (eventType === "paper_fill_complete") return "TRADE_ENTERED";
@@ -219,9 +231,30 @@ export function attemptIdFromLifecycleEvent(event: OpportunityLifecycleEvent): s
   return event.event_id.slice(prefix.length).trim() || null;
 }
 
+function qualifyingDiscoveryDetail(event: OpportunityLifecycleEvent): string | null {
+  if (event.event_type !== "qualifying_detected") return null;
+  const parts: string[] = [];
+  const venues = (event.venue_pair ?? "")
+    .split(",")
+    .map((venue) => venue.trim())
+    .filter(Boolean)
+    .map((venue) => venueShortLabel(venue as Venue));
+  if (venues.length) parts.push(venues.join(" / "));
+  if (event.gross_edge != null) parts.push(`gross ${percent(event.gross_edge)}`);
+  if (event.current_net_edge != null) parts.push(`net ${percent(event.current_net_edge)}`);
+  if (event.limiting_depth_gbp != null) parts.push(`executable ${money(event.limiting_depth_gbp)}`);
+  if (event.guaranteed_profit_gbp != null) {
+    parts.push(`guaranteed ${money(event.guaranteed_profit_gbp)}`);
+  }
+  const lane = scanLaneLabel(event.pricing_lane);
+  if (lane !== "—") parts.push(lane);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): ActivityEvent[] {
   return events.filter(isVisibleOperatorActivityEvent).map((item) => {
     const subject = activitySubjectFromEvent(item);
+    const discovery = qualifyingDiscoveryDetail(item);
     return {
       id: item.event_id,
       provenance: "LIVE_PAPER",
@@ -229,7 +262,7 @@ export function activityFromWatchlist(events: OpportunityLifecycleEvent[]): Acti
       kind: activityKind(item.event_type),
       title: lifecycleEventTitle(item.event_type),
       subject,
-      detail: activityDetail(item, subject),
+      detail: discovery ?? activityDetail(item, subject),
       opportunityId: item.opportunity_id,
       eventType: item.event_type,
       missedTriggerEventId:

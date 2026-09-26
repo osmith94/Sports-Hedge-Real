@@ -975,8 +975,13 @@ def _scheduled_hot_tick_env(monkeypatch):
     paper = StubPaperScan()
     monkeypatch.setattr(paper_api, "scheduled_paper_scan_service", lambda: paper)
     monkeypatch.setattr(paper_api, "get_paper_audit_repository", lambda: object())
+    class _RadarWatchlist:
+        def note_qualifying_radar_expiry(self, *args: Any, **kwargs: Any) -> list[Any]:
+            del args, kwargs
+            return []
+
     monkeypatch.setattr(watchlist_api, "get_watchlist_repository", lambda: object())
-    monkeypatch.setattr(watchlist_api, "get_watchlist_service", lambda repo: object())
+    monkeypatch.setattr(watchlist_api, "get_watchlist_service", lambda repo: _RadarWatchlist())
     monkeypatch.setattr(paper_api, "persist_price_engine_item_decision", lambda *a, **k: None)
 
     async def forbidden_collect(*args: Any, **kwargs: Any) -> None:
