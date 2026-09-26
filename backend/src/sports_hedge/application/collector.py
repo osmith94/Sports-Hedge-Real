@@ -16,6 +16,7 @@ from sports_hedge.application import polymarket_fixture_discovery as polymarket_
 from sports_hedge.application.adaptive_scheduler import work_from_lane
 from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
 from sports_hedge.application.catalogue_maintenance import (
+    CATALOGUE_NATIVE_IDENTITY_CONFLICT,
     FamilyDiscoveryCompleteness,
     family_key_from_kalshi_series,
     pair_identity_from_markets,
@@ -4230,6 +4231,7 @@ class ReadOnlyCrossVenueCollector:
             if identity is not None:
                 identities.append(identity)
         generation = self._op_universe_generation_id
+        identity_conflicts: list[Any] = []
         async with self._catalogue_persist_sema:
             await persist_universe_catalogue_pass_offloop(
                 store,
@@ -4245,6 +4247,21 @@ class ReadOnlyCrossVenueCollector:
                 terminal=False,
                 generation_selected_codes=self._op_selected_competition_codes,
                 allow_disappearance=not self._op_generation_superseded,
+                identity_conflicts=identity_conflicts,
+            )
+        for conflict in identity_conflicts:
+            venue = None
+            try:
+                venue = VenueName(str(conflict.venue))
+            except ValueError:
+                venue = None
+            issues.append(
+                CollectorIssue(
+                    stage=CATALOGUE_NATIVE_IDENTITY_CONFLICT,
+                    venue=venue,
+                    source_id=str(conflict.canonical_event_id),
+                    detail=conflict.audit_detail(),
+                )
             )
         return [
             str(identity.register_canonical_key)

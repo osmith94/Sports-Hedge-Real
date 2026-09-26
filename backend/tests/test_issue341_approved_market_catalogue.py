@@ -35,6 +35,7 @@ from sports_hedge.application.approved_market_catalogue import (
 )
 from sports_hedge.application.capture_replay import FORBIDDEN_WRITE_METHODS
 from sports_hedge.application.catalogue_maintenance import (
+    CATALOGUE_NATIVE_IDENTITY_CONFLICT,
     persist_universe_catalogue_pass,
     persist_universe_catalogue_pass_offloop,
 )
@@ -637,13 +638,19 @@ async def test_native_id_change_increments_content_version() -> None:
         matchbook.markets_by_id = {
             str(MB_EVENT_ID): [changed, _mb_btts(), _mb_totals("2.5"), _mb_ftts()]
         }
-        await _collect_catalogue(matchbook, kalshi, store)
+        report = await _collect_catalogue(matchbook, kalshi, store)
         updated = next(
             row for row in store.list_active() if row.register_canonical_key == CANONICAL_MATCH_RESULT_FT
         )
         assert updated.catalogue_row_id == original.catalogue_row_id
-        assert updated.matchbook_market_id == "316099"
-        assert updated.content_version == original.content_version + 1
+        assert updated.matchbook_market_id == original.matchbook_market_id
+        assert updated.content_version == original.content_version
+        conflicts = [
+            issue for issue in report.issues if issue.stage == CATALOGUE_NATIVE_IDENTITY_CONFLICT
+        ]
+        assert conflicts
+        assert "316099" in conflicts[0].detail
+        assert original.matchbook_market_id in conflicts[0].detail
         siblings = [
             row
             for row in store.list_active()
@@ -845,18 +852,22 @@ async def test_catalogue_history_records_disappeared_restored_terminal_and_nativ
         matchbook.markets_by_id = {
             str(MB_EVENT_ID): [changed, _mb_btts(), _mb_totals("2.5"), _mb_ftts()]
         }
-        await _collect_catalogue(matchbook, kalshi, store, universe_generation_id=10)
+        conflict_report = await _collect_catalogue(
+            matchbook, kalshi, store, universe_generation_id=10
+        )
         updated_match = store.get_row(match_result.catalogue_row_id)
         assert updated_match is not None
-        assert updated_match.content_version == original_match.content_version + 1
+        assert updated_match.matchbook_market_id == original_match.matchbook_market_id
+        assert updated_match.content_version == original_match.content_version
+        assert any(
+            issue.stage == CATALOGUE_NATIVE_IDENTITY_CONFLICT for issue in conflict_report.issues
+        )
         native_history = store.list_history(match_result.catalogue_row_id)
         assert native_history[0].new_content_version == 1
-        assert native_history[-1].prior_content_version == original_match.content_version
-        assert native_history[-1].new_content_version == updated_match.content_version
-        prior_identity = json.loads(native_history[-1].prior_native_identity_json or "{}")
-        new_identity = json.loads(native_history[-1].new_native_identity_json)
-        assert prior_identity["matchbook_market_id"] == "316010"
-        assert new_identity["matchbook_market_id"] == "316099"
+        assert native_history[-1].new_content_version == original_match.content_version
+        held_identity = json.loads(native_history[-1].new_native_identity_json)
+        assert held_identity["matchbook_market_id"] == "316010"
+        assert "316099" not in native_history[-1].new_native_identity_json
 
         closed = _mb_event()
         closed["status"] = "closed"
