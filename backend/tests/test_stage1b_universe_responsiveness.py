@@ -683,6 +683,8 @@ def test_ncaab_pairing_matches_cartesian_oracle() -> None:
 
 
 def test_mlb_pairing_matches_cartesian_oracle() -> None:
+    """Structural MLB Game Winner and exact x.5 totals pair. Mismatches stay out."""
+
     left, right = _mlb_case()
     oracle = _prove_pairing(left, right)
     matcher = MarketMatcher()
@@ -690,10 +692,11 @@ def test_mlb_pairing_matches_cartesian_oracle() -> None:
     assert canonical_key_for_market(left[0]) == canonical_key_for_market(right[0])
     assert canonical_key_for_market(left[2]) == canonical_key_for_market(right[2])
     assert canonical_key_for_market(left[2]) != canonical_key_for_market(left[4])
-    assert matcher.match(left[0], right[0]).matched is False
-    assert matcher.match(left[2], right[2]).matched is False
+    assert matcher.match(left[0], right[0]).matched is True
+    assert matcher.match(left[2], right[2]).matched is True
     assert matcher.match(left[0], right[4]).matched is False
-    assert oracle == []
+    assert matcher.match(left[4], right[3]).matched is False
+    assert [(item[0], item[1]) for item in oracle] == [(0, 0), (1, 1), (2, 2)]
     assert canonical_key_for_market(left[5]) is None
 
 

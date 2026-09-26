@@ -206,10 +206,18 @@ def _scheduled_background_tick_env(
         collect_calls.append("collect")
         raise AssertionError("BACKGROUND telemetry must not trigger discovery")
 
+    expiry_calls: list[str] = []
+
+    class _RadarWatchlist:
+        def note_qualifying_radar_expiry(self, *args: Any, **kwargs: Any) -> list[Any]:
+            del args, kwargs
+            expiry_calls.append("expiry")
+            return []
+
     monkeypatch.setattr(paper_api, "scheduled_paper_scan_service", lambda: paper)
     monkeypatch.setattr(paper_api, "get_paper_audit_repository", lambda: audit)
     monkeypatch.setattr(watchlist_api, "get_watchlist_repository", lambda: object())
-    monkeypatch.setattr(watchlist_api, "get_watchlist_service", lambda repo: object())
+    monkeypatch.setattr(watchlist_api, "get_watchlist_service", lambda repo: _RadarWatchlist())
     monkeypatch.setattr(paper_api, "persist_price_engine_item_capture", lambda *a, **k: None)
     monkeypatch.setattr(paper_api, "persist_price_engine_item_decision", lambda *a, **k: None)
     monkeypatch.setattr(paper_api, "_collect_report", forbidden_collect)
@@ -219,7 +227,18 @@ def _scheduled_background_tick_env(
         lambda *a, **k: pm_calls.append("pm") or [],
     )
     plan = DualCadencePlan(lane="background", reason="background_due")
-    return paper_api, coordinator, matchbook, kalshi, paper, plan, audit, collect_calls, pm_calls
+    return (
+        paper_api,
+        coordinator,
+        matchbook,
+        kalshi,
+        paper,
+        plan,
+        audit,
+        collect_calls,
+        pm_calls,
+        expiry_calls,
+    )
 
 
 @pytest.mark.asyncio
@@ -234,6 +253,7 @@ async def test_scheduled_background_tick_persists_one_history_row(tmp_path: Path
         audit,
         collect_calls,
         pm_calls,
+        expiry_calls,
     ) = _scheduled_background_tick_env(monkeypatch, tmp_path, with_row=True)
     try:
         await paper_api_mod.server_owned_refresh_tick(plan)
@@ -255,6 +275,7 @@ async def test_scheduled_background_tick_persists_one_history_row(tmp_path: Path
         assert kalshi.list_markets_calls == []
         assert collect_calls == []
         assert pm_calls == []
+        assert expiry_calls == ["expiry"]
         assert audit.list_scans(limit=100) == []
     finally:
         coordinator.reset()
@@ -274,6 +295,7 @@ async def test_zero_decision_background_cycle_still_appears(tmp_path: Path, monk
         audit,
         collect_calls,
         pm_calls,
+        expiry_calls,
     ) = _scheduled_background_tick_env(monkeypatch, tmp_path, with_row=False)
     try:
         await paper_api_mod.server_owned_refresh_tick(plan)
@@ -292,6 +314,7 @@ async def test_zero_decision_background_cycle_still_appears(tmp_path: Path, monk
         assert kalshi.list_events_calls == 0
         assert collect_calls == []
         assert pm_calls == []
+        assert expiry_calls == ["expiry"]
     finally:
         coordinator.reset()
         set_shared_provider_runtime(None)
@@ -312,6 +335,7 @@ async def test_background_history_persist_does_not_add_provider_or_discovery_cal
         audit,
         collect_calls,
         pm_calls,
+        expiry_calls,
     ) = _scheduled_background_tick_env(monkeypatch, tmp_path, with_row=True)
     try:
         await paper_api_mod.server_owned_refresh_tick(plan)
@@ -334,6 +358,7 @@ async def test_background_history_persist_does_not_add_provider_or_discovery_cal
         assert kalshi.list_events_calls == 0
         assert collect_calls == []
         assert pm_calls == []
+        assert expiry_calls == ["expiry"]
         rows = audit.list_cycles(limit=100)
         assert [row.scan_lane for row in rows] == ["background", "background"]
         assert rows[0].started_at > rows[1].started_at
