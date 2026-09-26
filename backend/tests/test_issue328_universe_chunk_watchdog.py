@@ -565,8 +565,13 @@ def test_issue328_does_not_expand_polymarket_or_enable_execution() -> None:
 
 
 def test_issue328_does_not_rewrite_market_catalogue_matcher() -> None:
-    source = inspect.getsource(MarketMatcher.match)
+    # Stage 1B caches identical fixture-local results in match(). The register
+    # body lives in _match_uncached and is still the only admission path.
+    source = inspect.getsource(MarketMatcher.match) + inspect.getsource(
+        MarketMatcher._match_uncached
+    )
     assert "event_mismatch" in source
     assert "registered_canonical_key" in source
     assert "REGISTER_ADMITTED_REASON" in source
     assert "economic_mismatch_reasons" not in source
+    assert "_match_uncached" in inspect.getsource(MarketMatcher.match)

@@ -34,7 +34,8 @@ from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.fees.labels import operator_fee_label
 from sports_hedge.fees.polymarket import polymarket_cost_from_market
 from sports_hedge.fees.resolver import MATCHBOOK_OVERRIDE_TIER, UnknownRequiredCostError, VenueCostResolver
-from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
+from sports_hedge.matching.bulk_market_pairs import greedy_unique_market_matches
+from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult, memoize_market_matches
 from sports_hedge.normalization.venues import matchbook_raw_market_type
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 
@@ -193,6 +194,32 @@ def assemble_fixture_inventory(
     decisions = decisions_by_source_ids or {}
     pair_decisions = decisions_by_pair or {}
     kalshi_markets = kalshi_markets or []
+    with memoize_market_matches():
+        return _assemble_fixture_inventory(
+            matchbook_markets,
+            polymarket_markets,
+            kalshi_markets=kalshi_markets,
+            matcher=matcher,
+            decisions=decisions,
+            pair_decisions=pair_decisions,
+            venue_costs=venue_costs,
+            fx_snapshots=fx_snapshots,
+            cost_resolver=cost_resolver,
+        )
+
+
+def _assemble_fixture_inventory(
+    matchbook_markets: list[InventoryMarket],
+    polymarket_markets: list[InventoryMarket],
+    *,
+    kalshi_markets: list[InventoryMarket],
+    matcher: MarketMatcher,
+    decisions: dict[tuple[str, str], PaperScanDecision],
+    pair_decisions: dict[tuple[str, str, str, str], PaperScanDecision],
+    venue_costs: list[VenueCostSnapshot] | None,
+    fx_snapshots: list[FxRateSnapshot] | None,
+    cost_resolver: VenueCostResolver | None,
+) -> list[FixtureMarketInventoryRow]:
     rows: list[FixtureMarketInventoryRow] = []
 
     unmatched_left: list[InventoryMarket] = []
@@ -428,6 +455,12 @@ def _greedy_pairs(
     *,
     matched_only: bool,
 ) -> list[tuple[int, int, MarketMatchResult]]:
+    if matched_only:
+        return greedy_unique_market_matches(
+            [item.canonical for item in left],
+            [item.canonical for item in right],
+            matcher,
+        )
     candidates: list[tuple[float, int, int, MarketMatchResult]] = []
     for left_index, left_item in enumerate(left):
         if left_item.canonical is None:
@@ -436,8 +469,6 @@ def _greedy_pairs(
             if right_item.canonical is None:
                 continue
             match = matcher.match(left_item.canonical, right_item.canonical)
-            if matched_only and not match.matched:
-                continue
             candidates.append((match.confidence, left_index, right_index, match))
     candidates.sort(key=lambda item: item[0], reverse=True)
     used_left: set[int] = set()
@@ -1150,7 +1181,12 @@ def _matching_kalshi_index(
     if row.family is None:
         return None
     skipped = exclude or set()
-    related: list[tuple[bool, int]] = []
+    # The first equivalent Kalshi leg in list order wins. A non-equivalent
+    # leg is used only when no equivalent leg exists, and only when this row
+    # is not already a comparable opportunity. Stopping at the first
+    # equivalent leg is the same answer as scanning the rest.
+    comparable = inventory_is_comparable_opportunity(row.comparison_status)
+    first_related: int | None = None
     for index, item in enumerate(kalshi_markets):
         if index in skipped:
             continue
@@ -1163,16 +1199,13 @@ def _matching_kalshi_index(
             matchbook_markets=matchbook_markets,
             polymarket_markets=polymarket_markets,
         )
-        equivalent = any(match.matched for match in matches)
-        if not equivalent and inventory_is_comparable_opportunity(row.comparison_status):
-            continue
-        related.append((equivalent, index))
-    if not related:
-        return None
-    for equivalent, index in related:
-        if equivalent:
+        if any(match.matched for match in matches):
             return index
-    return related[0][1]
+        if comparable:
+            continue
+        if first_related is None:
+            first_related = index
+    return first_related
 
 
 def _clear_stale_venue_only(row: FixtureMarketInventoryRow) -> None:
