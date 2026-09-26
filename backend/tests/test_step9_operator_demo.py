@@ -775,7 +775,9 @@ def test_demo_operator_surface_wires_live_discovery_and_solver_guard() -> None:
     ui = (REPO_ROOT / "frontend/components/demo-walkthrough.tsx").read_text(encoding="utf-8")
     assert "runPaperCollection" in ui
     assert "Refresh Live Discovery" in ui
-    assert "getLiveRefreshStatus" in ui
+    assert "useLiveStatus" in ui
+    assert "refreshNow" in ui
+    assert "getLiveRefreshStatus" not in ui
     assert "setInterval" in ui
     assert 'disabled={!pairSupportsGeneralized(pair)}' in ui
     assert 'pair === "matchbook_polymarket"' in ui

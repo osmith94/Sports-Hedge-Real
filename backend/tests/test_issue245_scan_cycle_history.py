@@ -211,7 +211,8 @@ def test_scan_cycle_endpoint_and_live_refresh_poll_see_new_row(
         assert body[0]["matched_event_pairs"] == 3
         status = client.get("/paper/live-refresh")
         assert status.status_code == 200
-        cycles = status.json()["recent_scan_cycles"]
+        assert "recent_scan_cycles" not in status.json()
+        cycles = client.get("/paper/scan-cycles", params={"limit": 50}).json()
         assert len(cycles) == 1
         assert cycles[0]["cycle_id"] == body[0]["cycle_id"]
         assert client.get("/paper/scans").json() == []

@@ -163,24 +163,27 @@ describe("scan cycle history presentation", () => {
 });
 
 describe("scan cycle history console wiring", () => {
-  it("loads latest 100 through live-refresh poll / router refresh without mixing market audit rows", () => {
+  it("loads latest 50 from the scan-cycle endpoint without mixing market audit rows", () => {
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
     const panel = readFileSync(join(frontendRoot, "components/scan-cycle-history-panel.tsx"), "utf8");
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
+    const provider = readFileSync(join(frontendRoot, "components/live-status-provider.tsx"), "utf8");
     const hotIndex = page.indexOf("<HotFixturesPanel");
     const monitorIndex = page.indexOf("<OpportunityMonitor");
     const cycleIndex = page.indexOf("<ScanCycleHistoryPanel");
-    const auditIndex = page.indexOf("<PaperScanHistoryTable");
     assert.ok(hotIndex > 0);
     assert.ok(monitorIndex > hotIndex);
     assert.ok(cycleIndex > monitorIndex);
-    assert.ok(auditIndex > cycleIndex);
-    assert.match(page, /getPaperScanCycles\("limit=100"\)/);
-    assert.match(page, /recent_scan_cycles/);
+    assert.equal(page.indexOf("<PaperScanHistoryTable"), -1);
+    assert.doesNotMatch(page, /getPaperScanCycles/);
+    assert.doesNotMatch(page, /recent_scan_cycles/);
+    assert.match(provider, /SCAN_CYCLE_HISTORY_LIMIT = 50/);
+    assert.match(provider, /getPaperScanCycles\(`limit=\$\{SCAN_CYCLE_HISTORY_LIMIT\}`\)/);
+    assert.match(api, /query = "limit=50"/);
     assert.match(api, /\/paper\/scan-cycles/);
     assert.match(scan, /router\.refresh\(\)/);
-    assert.match(scan, /last_completed_at/);
+    assert.doesNotMatch(scan, /recent_scan_cycles/);
     assert.equal(SCAN_CYCLE_TITLE, "Scan cycle history");
     assert.equal((panel.match(/<CycleTable/g) || []).length, 1);
     assert.equal((panel.match(/<table/g) || []).length, 1);
@@ -197,7 +200,7 @@ describe("scan cycle history console wiring", () => {
     assert.doesNotMatch(panel, /open>/);
     assert.doesNotMatch(panel, /getPaperScans/);
     assert.doesNotMatch(panel, /PaperScanRecord/);
-    assert.match(page, /market-decision audit/);
+    assert.doesNotMatch(page, /market-decision audit/);
     assert.match(panel, /SCAN_CYCLE_REPORT_ACTION/);
     assert.match(api, /\/paper\/scan-cycle-report/);
   });

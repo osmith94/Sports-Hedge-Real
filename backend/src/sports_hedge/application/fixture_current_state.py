@@ -29,6 +29,15 @@ from sports_hedge.application.hot_identity import (
     hot_scheduling_key,
     unique_hot_scheduling_ids,
 )
+from sports_hedge.application.operations_read_model import (
+    AWAITING_CROSS_VENUE_STATES,
+    DeferredFixtureReport,
+    DeferredFixtureRow,
+    HotRosterEntry,
+    UniverseCatalogueFixture,
+    UniverseCatalogueMemory,
+    UniverseCatalogueSnapshot,
+)
 from sports_hedge.application.hot_market_relationships import (
     HotMarketRelationship,
     relationships_from_current_slots,
@@ -76,6 +85,16 @@ class LaneObservation:
     source_events: tuple[StoredSourceEvent, ...] = ()
     evaluated: bool = True
     universe_generation_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _ConsoleProjection:
+    as_of: datetime
+    hot_count: int
+    universe_count: int
+    breakdown: tuple[int, int, int]
+    hot_roster: list[HotRosterEntry]
+    deferred_awaiting_count: int
 
 
 @dataclass(frozen=True)
@@ -188,6 +207,7 @@ class FixtureCurrentStateStore:
         self._universe_generation_closed_at_by_id: dict[int, datetime] = {}
         self._execution_miss_hot_until: dict[str, datetime] = {}
         self._touched_ids: set[str] | None = None
+        self._universe_catalogue = UniverseCatalogueMemory()
 
     def clear(self, *, keep_tombstones: bool = False, keep_universe_generation: bool = False) -> None:
         with self._lock:
@@ -204,6 +224,7 @@ class FixtureCurrentStateStore:
                 self._open_universe_generation_id = None
                 self._universe_generation_closed_at_by_id = {}
             self._execution_miss_hot_until = {}
+            self._universe_catalogue.clear(seen_at=datetime.now(UTC))
 
     def drop_universe_working_set(
         self,
@@ -253,6 +274,9 @@ class FixtureCurrentStateStore:
                 if lifecycle_hot or _open_paper:
                     continue
                 self._drop_identity(canonical_id)
+            # Clear / Clear & update drops the UNIVERSE catalogue. HOT rows that
+            # remain are not catalogue events until UNIVERSE publishes them again.
+            self._universe_catalogue.clear(seen_at=evaluated)
 
     @property
     def generation(self) -> int:
@@ -270,7 +294,11 @@ class FixtureCurrentStateStore:
         """Compatibility generation replace used by explicit diagnostic collects."""
 
         self.clear(keep_tombstones=True, keep_universe_generation=True)
-        self.upsert_from_report(report, scan_lane=ScanLane.UNIVERSE)
+        self.upsert_from_report(
+            report,
+            scan_lane=ScanLane.UNIVERSE,
+            publish_universe_catalogue=True,
+        )
 
     def open_universe_generation(self, generation_id: int, *, started_at: datetime | None = None) -> None:
         with self._lock:
@@ -325,6 +353,7 @@ class FixtureCurrentStateStore:
         now: datetime | None = None,
         universe_generation_id: int | None = None,
         reset_generation: int | None = None,
+        publish_universe_catalogue: bool = False,
     ) -> None:
         with self._lock:
             if (
@@ -337,6 +366,7 @@ class FixtureCurrentStateStore:
                 scan_lane=scan_lane,
                 now=now,
                 universe_generation_id=universe_generation_id,
+                publish_universe_catalogue=publish_universe_catalogue,
             )
 
     def upsert_evaluated_fixture(
@@ -350,6 +380,7 @@ class FixtureCurrentStateStore:
         scan_lane: ScanLane | str = ScanLane.UNIVERSE,
         now: datetime | None = None,
         universe_generation_id: int | None = None,
+        publish_universe_catalogue: bool = False,
     ) -> None:
         """Stream one evaluated fixture into current state immediately."""
 
@@ -370,6 +401,7 @@ class FixtureCurrentStateStore:
             scan_lane=scan_lane,
             now=scanned,
             universe_generation_id=universe_generation_id,
+            publish_universe_catalogue=publish_universe_catalogue,
         )
 
     def _upsert_from_report_unlocked(
@@ -379,6 +411,7 @@ class FixtureCurrentStateStore:
         scan_lane: ScanLane | str = ScanLane.UNIVERSE,
         now: datetime | None = None,
         universe_generation_id: int | None = None,
+        publish_universe_catalogue: bool = False,
     ) -> None:
         lane = ScanLane(scan_lane) if not isinstance(scan_lane, ScanLane) else scan_lane
         if lane is ScanLane.DROP:
@@ -406,6 +439,8 @@ class FixtureCurrentStateStore:
                 aliases=aliases,
                 scanned_at=scanned_at,
             ):
+                if publish_universe_catalogue and lane is ScanLane.UNIVERSE:
+                    self._universe_catalogue.remove(canonical_id, seen_at=scanned_at)
                 continue
             target_id = self._merge_target_identity(canonical_id, aliases)
             target_id = self._merge_scheduling_identity(target_id, fixture)
@@ -423,6 +458,10 @@ class FixtureCurrentStateStore:
                     self._drop_identity(target_id)
                     if target_id != canonical_id:
                         self._drop_identity(canonical_id)
+                if publish_universe_catalogue and lane is ScanLane.UNIVERSE:
+                    self._universe_catalogue.remove(target_id, seen_at=scanned_at)
+                    if target_id != canonical_id:
+                        self._universe_catalogue.remove(canonical_id, seen_at=scanned_at)
                 continue
             evaluated = (
                 fixture.market_evaluation_state == MarketEvaluationState.EVALUATED.value
@@ -441,6 +480,17 @@ class FixtureCurrentStateStore:
                 universe_generation_id=stamped_generation_id,
             )
             self._upsert_observation(target_id, observation)
+            if publish_universe_catalogue and lane is ScanLane.UNIVERSE:
+                if target_id != canonical_id:
+                    self._universe_catalogue.remove(canonical_id, seen_at=scanned_at)
+                self._universe_catalogue.upsert(
+                    _universe_catalogue_fixture(
+                        stored_fixture,
+                        generation_id=stamped_generation_id,
+                        updated_at=scanned_at,
+                    ),
+                    seen_at=scanned_at,
+                )
             self._bind_aliases(aliases | {canonical_id, target_id}, target_id)
             for event in observation.source_events:
                 self._bind_alias(event.source_event_id, target_id)
@@ -898,6 +948,144 @@ class FixtureCurrentStateStore:
         if membership is not ScanLane.HOT:
             return None
         return record.status_fixture(now, **market_kwargs) or lifecycle
+
+    def universe_catalogue_snapshot(self) -> UniverseCatalogueSnapshot:
+        with self._lock:
+            return self._universe_catalogue.snapshot()
+
+    def console_projection(self, now: datetime, **kwargs: Any) -> _ConsoleProjection:
+        """HOT roster and counts without projecting every discovered fixture.
+
+        Eviction still runs, matching ``operator_board``. Full fixture economics
+        run only for the small non-deferred HOT set.
+        """
+
+        views, classify_kwargs, market_kwargs = self._capture_status_views(now, **kwargs)
+        hot_horizon = kwargs.get("hot_horizon", DEFAULT_HOT_HORIZON)
+        hot_for_counts: list[DiscoveredFixture] = []
+        hot_roster: list[HotRosterEntry] = []
+        universe = 0
+        lifecycle_hot = 0
+        promoted = 0
+        deferred = 0
+        for record in views:
+            lifecycle = record.lifecycle_fixture()
+            if lifecycle is None:
+                continue
+            membership = self._identity_membership(
+                record,
+                lifecycle,
+                now,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
+            )
+            if membership is ScanLane.DROP:
+                continue
+            if str(lifecycle.market_evaluation_state or "") in AWAITING_CROSS_VENUE_STATES:
+                deferred += 1
+            if membership is ScanLane.HOT:
+                hot_for_counts.append(lifecycle)
+                classified = classify_scan_lane(lifecycle, now, **classify_kwargs)
+                if classified is ScanLane.HOT:
+                    lifecycle_hot += 1
+                else:
+                    promoted += 1
+                if str(lifecycle.market_evaluation_state or "") in AWAITING_CROSS_VENUE_STATES:
+                    continue
+                projected = record.status_fixture(now, **market_kwargs) or lifecycle
+                lane, scanned = record.scheduler_lane_scan(membership, projected)
+                qualifying_promotion = False
+                surveillance_promotion = False
+                net_proximity_promotion = False
+                execution_miss_promotion = False
+                net_proximity_distance_pp = None
+                if classified is ScanLane.UNIVERSE:
+                    qualifying_promotion = current_slots_prove_qualifying_opportunity(
+                        record.live_market_slots(),
+                        now=now,
+                        **market_kwargs,
+                    )
+                    net_proximity_distance_pp = current_slots_net_proximity_distance_pp(
+                        record.live_market_slots(),
+                        now=now,
+                        **market_kwargs,
+                    )
+                    net_proximity_promotion = (
+                        not qualifying_promotion and net_proximity_distance_pp is not None
+                    )
+                    surveillance_promotion = (
+                        not qualifying_promotion
+                        and not net_proximity_promotion
+                        and current_slots_prove_surveillance_opportunity(
+                            record.live_market_slots(),
+                            now=now,
+                            **market_kwargs,
+                        )
+                    )
+                    execution_miss_promotion = (
+                        not qualifying_promotion
+                        and not net_proximity_promotion
+                        and not surveillance_promotion
+                        and self._execution_miss_hot_active(projected.canonical_event_id, now)
+                    )
+                stamped = projected.model_copy(
+                    update={
+                        "scan_lane": lane.value,
+                        "last_scanned_at": scanned,
+                        "hot_reasons": hot_reason_labels(
+                            projected,
+                            now,
+                            membership=membership,
+                            lifecycle=classified,
+                            qualifying_promotion=qualifying_promotion,
+                            surveillance_promotion=surveillance_promotion,
+                            net_proximity_promotion=net_proximity_promotion,
+                            net_proximity_distance_pp=net_proximity_distance_pp,
+                            execution_miss_promotion=execution_miss_promotion,
+                            hot_horizon=hot_horizon,
+                        ),
+                    }
+                )
+                hot_roster.append(_hot_roster_entry(stamped))
+            elif membership is ScanLane.UNIVERSE:
+                universe += 1
+        hot_roster.sort(key=lambda item: (item.kickoff_utc, item.canonical_event_id))
+        return _ConsoleProjection(
+            as_of=require_aware_instant(now, "now"),
+            hot_count=len(unique_hot_scheduling_ids(hot_for_counts)),
+            universe_count=universe,
+            breakdown=(
+                len(unique_hot_scheduling_ids(hot_for_counts)),
+                lifecycle_hot,
+                promoted,
+            ),
+            hot_roster=hot_roster,
+            deferred_awaiting_count=deferred,
+        )
+
+    def deferred_fixture_report(self, now: datetime, **kwargs: Any) -> DeferredFixtureReport:
+        """Detailed deferred rows. Reads retained state. Does not scan or call venues."""
+
+        views, classify_kwargs, market_kwargs = self._capture_status_views(now, **kwargs)
+        rows: list[DeferredFixtureRow] = []
+        for record in views:
+            lifecycle = record.lifecycle_fixture()
+            if lifecycle is None:
+                continue
+            membership = self._identity_membership(
+                record,
+                lifecycle,
+                now,
+                classify_kwargs=classify_kwargs,
+                market_kwargs=market_kwargs,
+            )
+            if membership is ScanLane.DROP:
+                continue
+            if str(lifecycle.market_evaluation_state or "") not in AWAITING_CROSS_VENUE_STATES:
+                continue
+            rows.append(_deferred_row(lifecycle))
+        rows.sort(key=lambda item: (item.kickoff_utc, item.canonical_event_id))
+        return DeferredFixtureReport(count=len(rows), rows=rows)
 
     def operator_board(
         self,
@@ -1967,3 +2155,78 @@ def _market_ttl_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
             "universe_generation_closed_at_by_id"
         ]
     return allowed
+
+
+def _universe_catalogue_fixture(
+    fixture: DiscoveredFixture,
+    *,
+    generation_id: int | None,
+    updated_at: datetime,
+) -> UniverseCatalogueFixture:
+    return UniverseCatalogueFixture(
+        canonical_event_id=fixture.canonical_event_id,
+        sport=fixture.sport,
+        competition=fixture.competition,
+        target_competition_code=fixture.target_competition_code,
+        home_team=fixture.home_team,
+        away_team=fixture.away_team,
+        kickoff_utc=fixture.kickoff_utc,
+        matchbook_matched=fixture.matchbook_matched,
+        polymarket_matched=fixture.polymarket_matched,
+        kalshi_matched=fixture.kalshi_matched,
+        fixture_status=fixture.fixture_status,
+        universe_generation_id=generation_id,
+        updated_at=updated_at,
+    )
+
+
+def _hot_roster_entry(fixture: DiscoveredFixture) -> HotRosterEntry:
+    return HotRosterEntry(
+        canonical_event_id=fixture.canonical_event_id,
+        home_team=fixture.home_team,
+        away_team=fixture.away_team,
+        competition=fixture.competition,
+        sport=fixture.sport,
+        target_competition_code=fixture.target_competition_code,
+        kickoff_utc=fixture.kickoff_utc,
+        in_running=fixture.in_running,
+        fixture_status=fixture.fixture_status,
+        live_score_supported=fixture.live_score_supported,
+        home_score=fixture.home_score,
+        away_score=fixture.away_score,
+        hot_reasons=list(fixture.hot_reasons or []),
+        scan_lane=fixture.scan_lane or "hot",
+        market_evaluation_state=fixture.market_evaluation_state,
+        market_evaluation_reason=fixture.market_evaluation_reason,
+        solver_is_arbitrage=fixture.solver_is_arbitrage,
+        matchbook_matched=fixture.matchbook_matched,
+        polymarket_matched=fixture.polymarket_matched,
+        kalshi_matched=fixture.kalshi_matched,
+        last_scanned_at=fixture.last_scanned_at,
+        last_seen_at=fixture.last_seen_at,
+        matched_equivalent_count=fixture.matched_equivalent_count,
+        current_net_edge=fixture.current_net_edge,
+    )
+
+
+def _deferred_row(fixture: DiscoveredFixture) -> DeferredFixtureRow:
+    return DeferredFixtureRow(
+        canonical_event_id=fixture.canonical_event_id,
+        home_team=fixture.home_team,
+        away_team=fixture.away_team,
+        competition=fixture.competition,
+        sport=fixture.sport,
+        target_competition_code=fixture.target_competition_code,
+        kickoff_utc=fixture.kickoff_utc,
+        fixture_status=fixture.fixture_status,
+        in_running=fixture.in_running,
+        matchbook_matched=fixture.matchbook_matched,
+        polymarket_matched=fixture.polymarket_matched,
+        kalshi_matched=fixture.kalshi_matched,
+        market_evaluation_state=fixture.market_evaluation_state,
+        market_evaluation_reason=fixture.market_evaluation_reason,
+        hot_reasons=list(fixture.hot_reasons or []),
+        scan_lane=fixture.scan_lane,
+        last_scanned_at=fixture.last_scanned_at,
+        last_seen_at=fixture.last_seen_at,
+    )

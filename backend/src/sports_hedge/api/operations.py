@@ -5,13 +5,31 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 
+from sports_hedge.api.paper import get_paper_operations_service
 from sports_hedge.application.collector import FixtureDetailReadModel, FixturePaperEntry
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
-from sports_hedge.api.paper import get_paper_operations_service
+from sports_hedge.application.operations_read_model import (
+    DeferredFixtureReport,
+    UniverseCatalogueSnapshot,
+)
 from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.paper.trades import PaperTradeState
 
 router = APIRouter(prefix="/operations", tags=["operations"])
+
+
+@router.get("/universe-fixtures", response_model=UniverseCatalogueSnapshot)
+def universe_fixtures() -> UniverseCatalogueSnapshot:
+    """Lightweight UNIVERSE event catalogue. Does not scan or call venues."""
+
+    return get_live_refresh_coordinator().universe_fixture_catalogue()
+
+
+@router.get("/deferred-fixtures", response_model=DeferredFixtureReport)
+def deferred_fixtures() -> DeferredFixtureReport:
+    """On-demand deferred fixture diagnostic. Does not scan or call venues."""
+
+    return get_live_refresh_coordinator().deferred_fixture_report()
 
 
 @router.get("/universe-matching-report")

@@ -11,13 +11,13 @@ import {
   PaperTrade,
   closeDemoTrade,
   getDemoWalkthrough,
-  getLiveRefreshStatus,
   resetDemoWalkthrough,
   runFixtureReplay,
   runPaperCollection,
 } from "../lib/api";
 import { DEFAULT_SCANNER_ASSUMPTIONS } from "../lib/arbitrage-ops";
 import { money } from "../lib/format";
+import { useLiveStatus } from "./live-status-provider";
 
 const PAIRS: Array<FixtureReplayResult["venue_pair"]> = [
   "matchbook_polymarket",
@@ -55,6 +55,7 @@ export function DemoWalkthroughBoard() {
   const collectInFlight = useRef(false);
   const collectRef = useRef<() => Promise<void>>(async () => undefined);
   const serverOwnedRef = useRef(false);
+  const { refreshNow, status: sharedStatus } = useLiveStatus();
 
   const refresh = useCallback(async () => {
     const next = await getDemoWalkthrough();
@@ -65,13 +66,13 @@ export function DemoWalkthroughBoard() {
 
   const refreshLiveDiscovery = useCallback(async () => {
     let owned = serverOwnedRef.current;
-    try {
-      const status = await getLiveRefreshStatus();
+    const status = await refreshNow();
+    if (status) {
       owned = Boolean(status.server_loop_enabled);
       serverOwnedRef.current = owned;
       setServerOwned(owned);
       if (status.interval_seconds) setIntervalSeconds(status.interval_seconds);
-    } catch {
+    } else {
       owned = serverOwnedRef.current;
     }
     if (owned) {
@@ -107,7 +108,7 @@ export function DemoWalkthroughBoard() {
         setError(err instanceof Error ? err.message : "Demo walkthrough API unavailable");
       }
     }
-  }, [refresh]);
+  }, [refresh, refreshNow]);
 
   useEffect(() => {
     collectRef.current = refreshLiveDiscovery;
@@ -123,25 +124,12 @@ export function DemoWalkthroughBoard() {
   }, [refresh]);
 
   useEffect(() => {
-    let cancelled = false;
-    getLiveRefreshStatus()
-      .then((status) => {
-        if (!cancelled && status.interval_seconds) {
-          setIntervalSeconds(status.interval_seconds);
-        }
-        if (!cancelled) {
-          const owned = Boolean(status.server_loop_enabled);
-          serverOwnedRef.current = owned;
-          setServerOwned(owned);
-        }
-      })
-      .catch(() => {
-        // Status endpoint down: keep the 30s default cadence used by the operations console.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (!sharedStatus) return;
+    if (sharedStatus.interval_seconds) setIntervalSeconds(sharedStatus.interval_seconds);
+    const owned = Boolean(sharedStatus.server_loop_enabled);
+    serverOwnedRef.current = owned;
+    setServerOwned(owned);
+  }, [sharedStatus]);
 
   useEffect(() => {
     if (!autoLiveRefresh) return undefined;

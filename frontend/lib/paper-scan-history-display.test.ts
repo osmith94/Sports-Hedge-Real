@@ -53,19 +53,20 @@ function scan(overrides: Partial<PaperScanRecord> & Pick<PaperScanRecord, "recor
 }
 
 describe("paper scan history surface", () => {
-  it("loads the latest 100 audit observations and labels that window", () => {
+  it("keeps the audit endpoint and leaves the audit table off the operations console", () => {
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
     const api = readFileSync(join(frontendRoot, "lib/api.ts"), "utf8");
-    assert.match(page, /getPaperScans\("limit=100"\)/);
+    const table = readFileSync(join(frontendRoot, "components/paper-scan-history-table.tsx"), "utf8");
     assert.match(api, /query = "limit=100"/);
-    assert.match(page, /Latest 100 audit observations/);
-    assert.match(page, /Not current scanner radar/);
-    assert.match(page, /LATEST 100 AUDIT/);
-    assert.match(page, /Sorting applies to this loaded/);
-    assert.match(page, /Age uses each row/);
-    assert.match(page, /<PaperScanHistoryTable scans=\{scans\}/);
+    assert.match(api, /\/paper\/scans/);
+    assert.match(table, /Historical audit window/);
+    assert.match(table, /Sorting applies to these loaded/);
+    assert.match(table, /Age uses each row/);
+    assert.doesNotMatch(page, /getPaperScans/);
+    assert.doesNotMatch(page, /PaperScanHistoryTable/);
+    assert.doesNotMatch(page, /audit-disclosure/);
+    assert.doesNotMatch(page, /LATEST 100 AUDIT/);
     assert.match(page, /OpportunityMonitor/);
-    assert.match(page, /audit-disclosure/);
     assert.doesNotMatch(page, /panel-title">Paper scan history/);
     assert.doesNotMatch(page, /scans\.filter/);
     assert.doesNotMatch(page, /current_radar_rows/);

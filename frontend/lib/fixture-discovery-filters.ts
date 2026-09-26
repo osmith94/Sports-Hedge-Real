@@ -1,4 +1,7 @@
-import type { DiscoveredFixture } from "./api";
+type DiscoveryFilterable = {
+  sport?: string | null;
+  competition?: string | null;
+};
 
 /** Display-only Fixture Discovery filters. They do not read or write scanner scope. */
 
@@ -40,7 +43,7 @@ export const DEFAULT_DISCOVERY_FILTERS: DiscoveryFilterSelection = {
   competition: ALL_DISCOVERY_FILTER,
 };
 
-export function fixtureSportToken(item: Pick<DiscoveredFixture, "sport">): string {
+export function fixtureSportToken(item: DiscoveryFilterable): string {
   const token = (item.sport ?? "").trim().toLowerCase();
   if (!token || token === UNKNOWN_SPORT || !(token in SPORT_LABELS)) return UNKNOWN_SPORT;
   return token;
@@ -50,12 +53,12 @@ export function sportFilterLabel(token: string): string {
   return SPORT_LABELS[token] ?? SPORT_LABELS[UNKNOWN_SPORT];
 }
 
-export function competitionFilterKey(item: Pick<DiscoveredFixture, "competition">): string {
+export function competitionFilterKey(item: DiscoveryFilterable): string {
   const label = (item.competition ?? "").trim();
   return label || "Unknown";
 }
 
-export function sportFilterOptions(fixtures: readonly DiscoveredFixture[]): SportFilterOption[] {
+export function sportFilterOptions(fixtures: readonly DiscoveryFilterable[]): SportFilterOption[] {
   const counts = new Map<string, number>();
   for (const item of fixtures) {
     const token = fixtureSportToken(item);
@@ -71,7 +74,7 @@ export function sportFilterOptions(fixtures: readonly DiscoveredFixture[]): Spor
 }
 
 export function competitionFilterOptions(
-  fixtures: readonly DiscoveredFixture[],
+  fixtures: readonly DiscoveryFilterable[],
   sport: string = ALL_DISCOVERY_FILTER,
 ): CompetitionFilterOption[] {
   const counts = new Map<string, number>();
@@ -85,10 +88,10 @@ export function competitionFilterOptions(
     .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
 }
 
-export function applyFixtureDiscoveryFilters(
-  fixtures: readonly DiscoveredFixture[],
+export function applyFixtureDiscoveryFilters<T extends DiscoveryFilterable>(
+  fixtures: readonly T[],
   selection: DiscoveryFilterSelection = DEFAULT_DISCOVERY_FILTERS,
-): DiscoveredFixture[] {
+): T[] {
   const sport = selection.sport || ALL_DISCOVERY_FILTER;
   const competition = selection.competition || ALL_DISCOVERY_FILTER;
   return fixtures.filter((item) => {

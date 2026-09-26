@@ -13,7 +13,6 @@ import {
   UniverseRunMode,
   clearPaperUniverse,
   getEconomicsStatus,
-  getLiveRefreshStatus,
   pauseBackgroundPricing,
   pauseUniverseSchedule,
   resetMatchbookFee,
@@ -31,7 +30,7 @@ import {
 } from "../lib/api";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
-import { applyLatestLiveRefresh, createLiveRefreshPollGuard } from "../lib/live-refresh-poll-guard";
+import { useLiveStatus } from "./live-status-provider";
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { FootballCompetitionsModal } from "./football-competitions-modal";
@@ -263,8 +262,7 @@ export function RunPaperScan() {
   const [feeMessage, setFeeMessage] = useState<string | null>(null);
   const payloadRef = useRef<PaperCollectionRequest>({ maximum_execution_risk: 60 });
   const inFlightRef = useRef(false);
-  const lastSeenCycleRef = useRef<string>("");
-  const liveRefreshPollGuardRef = useRef(createLiveRefreshPollGuard());
+  const { status: sharedStatus, refreshNow } = useLiveStatus();
 
   const buildPayload = useCallback((): PaperCollectionRequest => {
     const capital = optionalPositive(capitalLimit, "Capital limit");
@@ -345,14 +343,14 @@ export function RunPaperScan() {
       if (duration != null) setLastDurationMs(duration);
       if (status.venue_health) setVenueHealth(status.venue_health);
       setLiveRefresh(status);
-      const stamp = `${status.hot?.last_completed_at ?? ""}|${status.universe?.last_completed_at ?? ""}`;
-      if (stamp !== lastSeenCycleRef.current) {
-        lastSeenCycleRef.current = stamp;
-        if (stamp !== "|") router.refresh();
-      }
     },
-    [router, settingsDirty],
+    [settingsDirty],
   );
+
+  useEffect(() => {
+    if (!autoRefresh || !sharedStatus) return;
+    applyLiveRefresh(sharedStatus);
+  }, [applyLiveRefresh, autoRefresh, sharedStatus]);
 
   useEffect(() => {
     const scope = liveRefresh?.universe_scope;
@@ -365,7 +363,6 @@ export function RunPaperScan() {
     if (liveRefresh?.scanner_stopped) return;
     if (inFlightRef.current) return;
     inFlightRef.current = true;
-    liveRefreshPollGuardRef.current.begin();
     setLoadingMode(mode);
     setState({ kind: "idle" });
     try {
@@ -386,11 +383,7 @@ export function RunPaperScan() {
         setLastDurationMs(Math.max(0, completed - started));
       }
       try {
-        await applyLatestLiveRefresh(
-          liveRefreshPollGuardRef.current,
-          getLiveRefreshStatus,
-          applyLiveRefresh,
-        );
+        await refreshNow();
       } catch {
         // Keep the completed report facts if status is briefly unavailable.
       }
@@ -401,11 +394,7 @@ export function RunPaperScan() {
         message: error instanceof Error ? error.message : "Read-only scan failed.",
       });
       try {
-        await applyLatestLiveRefresh(
-          liveRefreshPollGuardRef.current,
-          getLiveRefreshStatus,
-          applyLiveRefresh,
-        );
+        await refreshNow();
       } catch {
         // Keep prior last-scan facts. A failed collect is not a completed scan.
       }
@@ -414,19 +403,7 @@ export function RunPaperScan() {
       setLoadingMode(null);
       router.refresh();
     }
-  }, [applyLiveRefresh, buildPayload, liveRefresh?.scanner_stopped, refreshEconomics, router]);
-
-  const pollLiveStatus = useCallback(async () => {
-    try {
-      await applyLatestLiveRefresh(
-        liveRefreshPollGuardRef.current,
-        getLiveRefreshStatus,
-        applyLiveRefresh,
-      );
-    } catch {
-      // Status endpoint down: keep prior HOT/BACKGROUND/UNIVERSE facts.
-    }
-  }, [applyLiveRefresh]);
+  }, [applyLiveRefresh, buildPayload, liveRefresh?.scanner_stopped, refreshEconomics, refreshNow, router]);
 
   useEffect(() => {
     void refreshEconomics();
@@ -441,38 +418,10 @@ export function RunPaperScan() {
   }, [economics?.matchbook_fee?.effective_rate]);
 
   useEffect(() => {
-    let cancelled = false;
-    void applyLatestLiveRefresh(
-      liveRefreshPollGuardRef.current,
-      getLiveRefreshStatus,
-      (status) => {
-        if (cancelled) return;
-        applyLiveRefresh(status);
-      },
-    ).catch(() => {
-      // Status endpoint down: keep the scan-interval and reprice defaults.
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [applyLiveRefresh]);
-
-  useEffect(() => {
     if (!completeFlash) return undefined;
     const timer = window.setTimeout(() => setCompleteFlash(false), 550);
     return () => window.clearTimeout(timer);
   }, [completeFlash]);
-
-  useEffect(() => {
-    if (!autoRefresh) {
-      return undefined;
-    }
-    void pollLiveStatus();
-    const timer = window.setInterval(() => {
-      void pollLiveStatus();
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [autoRefresh, liveRefresh?.server_loop_enabled, pollLiveStatus]);
 
   useEffect(() => {
     if (!autoRefresh || loadingMode !== null) return undefined;
@@ -615,7 +564,6 @@ export function RunPaperScan() {
     if (liveRefresh?.scanner_stopped) return;
     if (inFlightRef.current) return;
     inFlightRef.current = true;
-    liveRefreshPollGuardRef.current.begin();
     setLoadingMode("background");
     setState({ kind: "idle" });
     try {

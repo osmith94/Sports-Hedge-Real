@@ -276,7 +276,9 @@ def test_collect_api_returns_degraded_matchbook_and_pm_fixtures(monkeypatch: pyt
     assert payload["last_completed_at"]
     assert payload["cycle_in_progress"] is False
     assert payload["venue_health"]["matchbook"] == "discovery_timeout"
-    assert payload["discovered_fixtures"]
+    assert "discovered_fixtures" not in payload
+    catalogue = client.get("/operations/universe-fixtures").json()
+    assert catalogue["fixtures"]
     get_live_refresh_coordinator().reset()
 
 
@@ -327,7 +329,9 @@ def test_collect_api_returns_partial_fixtures_when_cluster_scan_overruns(
     payload = status.json()
     assert payload["cycle_in_progress"] is False
     assert payload["last_completed_at"]
-    assert payload["discovered_fixtures"]
+    assert "discovered_fixtures" not in payload
+    catalogue = client.get("/operations/universe-fixtures").json()
+    assert catalogue["fixtures"]
     get_live_refresh_coordinator().reset()
 
 
@@ -431,6 +435,8 @@ def test_collect_api_sixty_slow_markets_returns_partial_200_before_hard_timeout(
     assert payload["cycle_in_progress"] is False
     assert payload["last_error"] is None
     assert payload["venue_health"]
-    assert payload["discovered_fixtures"]
+    assert "discovered_fixtures" not in payload
+    catalogue = client.get("/operations/universe-fixtures").json()
+    assert catalogue["universe_fixture_count"] == DEFAULT_MAX_EVENT_PAIRS
     get_live_refresh_coordinator().reset()
 

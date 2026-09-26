@@ -30,6 +30,12 @@ from sports_hedge.application.event_loop_activity import (
     sync_subphase,
 )
 from sports_hedge.application.hot_market_relationships import HotMarketRelationship
+from sports_hedge.application.operations_read_model import (
+    HEARTBEAT_OMITTED_FIELDS,
+    DeferredFixtureReport,
+    HotRosterEntry,
+    UniverseCatalogueSnapshot,
+)
 from sports_hedge.application.collector import (
     DIAGNOSTIC_PROVIDERS,
     DIAGNOSTIC_STAGES,
@@ -397,6 +403,86 @@ class LiveRefreshStatus(BaseModel):
     universe_scope: OperatorUniverseScope | None = None
     startup_pricing_ready: bool = False
     startup_phase: str = STARTUP_PHASE_UNIVERSE_INITIALISING
+
+
+class OperationsHeartbeat(BaseModel):
+    """High-frequency console poll. No fixture board and no scan-cycle history."""
+
+    discovery_source: VenueName = VenueName.MATCHBOOK
+    discovery_mode: str = "venue_union"
+    matching_venue: VenueName | None = VenueName.POLYMARKET
+    matching_venues: list[VenueName] = Field(
+        default_factory=lambda: [VenueName.POLYMARKET, VenueName.KALSHI]
+    )
+    server_loop_enabled: bool
+    paper_autofill_enabled: bool = False
+    paper_auto_unwind_enabled: bool = False
+    scanner_stopped: bool = False
+    universe_scans_paused: bool = False
+    background_pricing_paused: bool = False
+    operator_settings: OperatorScannerSettings | None = None
+    interval_seconds: int = Field(default=10, ge=5, le=300)
+    cycle_in_progress: bool = False
+    last_started_at: datetime | None = None
+    last_completed_at: datetime | None = None
+    last_duration_ms: int | None = Field(default=None, ge=0)
+    last_error: str | None = None
+    last_matched_event_pairs: int | None = None
+    last_matched_market_pairs: int | None = None
+    last_paper_decisions: int | None = None
+    last_issue_count: int | None = None
+    skipped_out_of_scope: int | None = None
+    operator_summary: str | None = None
+    config_warnings: list[str] = Field(default_factory=list)
+    venue_health: dict[str, str] = Field(default_factory=dict)
+    live_scores: str = "unavailable_unless_matchbook_payload_includes_scores"
+    hot: LaneRefreshStatus = Field(
+        default_factory=lambda: LaneRefreshStatus(
+            cadence_seconds=10,
+            scan_interval_seconds=10,
+            reprice_after_seconds=30,
+            cycle_timeout_seconds=25,
+        )
+    )
+    universe: LaneRefreshStatus = Field(
+        default_factory=lambda: LaneRefreshStatus(
+            cadence_seconds=DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS,
+            discovery_refresh_seconds=DEFAULT_UNIVERSE_DISCOVERY_INTERVAL_SECONDS,
+            cycle_timeout_seconds=150,
+            generation_budget_seconds=150,
+        )
+    )
+    background: LaneRefreshStatus = Field(
+        default_factory=lambda: LaneRefreshStatus(
+            cadence_seconds=10,
+            scan_interval_seconds=10,
+            reprice_after_seconds=600,
+            cycle_timeout_seconds=None,
+        )
+    )
+    active_trade: LaneRefreshStatus = Field(
+        default_factory=lambda: LaneRefreshStatus(
+            cadence_seconds=DEFAULT_ACTIVE_TRADE_CADENCE_SECONDS,
+            cycle_timeout_seconds=None,
+        )
+    )
+    price_engine: PriceEnginePublicStatus = Field(default_factory=empty_price_engine_status)
+    venue_participation: LaneVenueParticipation | None = None
+    provider_access: dict[str, Any] = Field(default_factory=dict)
+    venue_degradation_incidents: dict[str, VenueDegradationIncidentRef] = Field(
+        default_factory=dict
+    )
+    active_trade_timeline: list[ActiveTradeTimelineItem] = Field(default_factory=list)
+    system_load: SystemLoadSummary = Field(default_factory=SystemLoadSummary)
+    universe_scope: OperatorUniverseScope | None = None
+    startup_pricing_ready: bool = False
+    startup_phase: str = STARTUP_PHASE_UNIVERSE_INITIALISING
+    universe_fixture_count: int = 0
+    universe_catalogue_version: str = ""
+    universe_catalogue_as_of: datetime | None = None
+    universe_catalogue_generation_id: int | None = None
+    hot_roster: list[HotRosterEntry] = Field(default_factory=list)
+    deferred_awaiting_count: int = 0
 
 
 class DualCadencePlan(BaseModel):
@@ -3013,7 +3099,10 @@ class LiveRefreshCoordinator:
             self._universe_generation_id_for_upsert() if lane is ScanLane.UNIVERSE else None
         )
         self._fixture_state.upsert_from_report(
-            report, scan_lane=lane, universe_generation_id=generation_id
+            report,
+            scan_lane=lane,
+            universe_generation_id=generation_id,
+            publish_universe_catalogue=lane is ScanLane.UNIVERSE,
         )
         duration_ms = max(
             0, int((report.completed_at - report.started_at).total_seconds() * 1000)
@@ -3100,7 +3189,10 @@ class LiveRefreshCoordinator:
             self._universe_generation_id_for_upsert() if lane is ScanLane.UNIVERSE else None
         )
         self._fixture_state.upsert_from_report(
-            report, scan_lane=lane, universe_generation_id=generation_id
+            report,
+            scan_lane=lane,
+            universe_generation_id=generation_id,
+            publish_universe_catalogue=lane is ScanLane.UNIVERSE,
         )
         duration_ms = max(
             0, int((report.completed_at - report.started_at).total_seconds() * 1000)
@@ -3665,6 +3757,7 @@ class LiveRefreshCoordinator:
                 scan_lane=ScanLane.UNIVERSE,
                 now=scanned,
                 universe_generation_id=generation_id,
+                publish_universe_catalogue=True,
             )
             if rehydrating:
                 self._clear_universe_rehydration_unlocked(canonical_id)
@@ -5402,6 +5495,29 @@ class LiveRefreshCoordinator:
         classification time.
         """
 
+        status = self._compose_public_status(project_fixture_board=True)
+        assert isinstance(status, LiveRefreshStatus)
+        return status
+
+    def public_heartbeat(self) -> OperationsHeartbeat:
+        """Lightweight console poll. Does not project the full fixture board."""
+
+        heartbeat = self._compose_public_status(project_fixture_board=False)
+        assert isinstance(heartbeat, OperationsHeartbeat)
+        return heartbeat
+
+    def universe_fixture_catalogue(self) -> UniverseCatalogueSnapshot:
+        return self._fixture_state.universe_catalogue_snapshot()
+
+    def deferred_fixture_report(self) -> DeferredFixtureReport:
+        """On-demand deferred rows from retained current state. No provider I/O."""
+
+        horizon = self.radar_horizon_kwargs()
+        return self._fixture_state.deferred_fixture_report(self.now(), **horizon)
+
+    def _compose_public_status(
+        self, *, project_fixture_board: bool
+    ) -> LiveRefreshStatus | OperationsHeartbeat:
         now = self.now()
         horizon = self.radar_horizon_kwargs()
         classify = {
@@ -5409,17 +5525,37 @@ class LiveRefreshCoordinator:
             "post_kickoff_unknown_horizon": horizon["post_kickoff_unknown_horizon"],
             "post_kickoff_current_radar_ceiling": horizon["post_kickoff_current_radar_ceiling"],
         }
-        board = self._fixture_state.operator_board(
-            now,
-            **classify,
-            hot_interval_seconds=horizon["hot_interval_seconds"],
-            universe_interval_seconds=horizon["universe_interval_seconds"],
-            hot_ttl_seconds=horizon["hot_ttl_seconds"],
-            universe_ttl_seconds=horizon["universe_ttl_seconds"],
-        )
-        inventory = board.discovered
-        hot_count, universe_count = board.membership
-        unique, lifecycle, promoted = board.breakdown
+        hot_roster: list[HotRosterEntry] = []
+        deferred_count = 0
+        if project_fixture_board:
+            board = self._fixture_state.operator_board(
+                now,
+                **classify,
+                hot_interval_seconds=horizon["hot_interval_seconds"],
+                universe_interval_seconds=horizon["universe_interval_seconds"],
+                hot_ttl_seconds=horizon["hot_ttl_seconds"],
+                universe_ttl_seconds=horizon["universe_ttl_seconds"],
+            )
+            inventory = board.discovered
+            hot_count, universe_count = board.membership
+            unique, lifecycle, promoted = board.breakdown
+            board_as_of = board.as_of
+        else:
+            projection = self._fixture_state.console_projection(
+                now,
+                **classify,
+                hot_interval_seconds=horizon["hot_interval_seconds"],
+                universe_interval_seconds=horizon["universe_interval_seconds"],
+                hot_ttl_seconds=horizon["hot_ttl_seconds"],
+                universe_ttl_seconds=horizon["universe_ttl_seconds"],
+            )
+            inventory = []
+            hot_count, universe_count = projection.hot_count, projection.universe_count
+            unique, lifecycle, promoted = projection.breakdown
+            board_as_of = projection.as_of
+            hot_roster = projection.hot_roster
+            deferred_count = projection.deferred_awaiting_count
+        catalogue = self._fixture_state.universe_catalogue_snapshot()
         engine_status = (
             self._price_engine.public_status(now=now)
             if self._price_engine is not None
@@ -5488,8 +5624,8 @@ class LiveRefreshCoordinator:
             )
             self.status = self.status.model_copy(
                 update={
-                    "discovered_fixtures": inventory,
-                    "fixture_board_as_of": board.as_of,
+                    "discovered_fixtures": inventory if project_fixture_board else [],
+                    "fixture_board_as_of": board_as_of if project_fixture_board else None,
                     "hot": hot,
                     "background": background,
                     "active_trade": active_trade,
@@ -5555,7 +5691,20 @@ class LiveRefreshCoordinator:
                     "active_trade_timeline": active_trade_timeline,
                 }
             )
-            return self.status
+            if project_fixture_board:
+                return self.status
+            payload = self.status.model_dump(exclude=set(HEARTBEAT_OMITTED_FIELDS))
+            payload.update(
+                {
+                    "universe_fixture_count": catalogue.universe_fixture_count,
+                    "universe_catalogue_version": catalogue.universe_catalogue_version,
+                    "universe_catalogue_as_of": catalogue.universe_catalogue_as_of,
+                    "universe_catalogue_generation_id": catalogue.universe_generation_id,
+                    "hot_roster": hot_roster,
+                    "deferred_awaiting_count": deferred_count,
+                }
+            )
+            return OperationsHeartbeat.model_validate(payload)
 
     def _recent_active_trade_timeline(self) -> list[ActiveTradeTimelineItem]:
         try:

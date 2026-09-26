@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "vitest";
 
-import type { DiscoveredFixture, LiveRefreshStatus } from "./api";
+import type { DiscoveredFixture } from "./api";
 import { DiscoveredFixturesPanel } from "../components/discovered-fixtures";
 import {
   ALL_DISCOVERY_FILTER,
@@ -130,17 +130,8 @@ describe("fixture discovery sport and competition filters", () => {
   });
 
   it("renders the default All filter and the original row order", () => {
-    const status: LiveRefreshStatus = {
-      discovery_source: "matchbook",
-      matching_venue: "polymarket",
-      server_loop_enabled: true,
-      interval_seconds: 30,
-      cycle_in_progress: false,
-      live_scores: "unavailable_unless_matchbook_payload_includes_scores",
-      discovered_fixtures: snapshot,
-    };
     const markup = renderToStaticMarkup(
-      createElement(DiscoveredFixturesPanel, { status, available: true }),
+      createElement(DiscoveredFixturesPanel, { fixtures: snapshot, available: true }),
     );
     assert.match(markup, /Sport/);
     assert.match(markup, /Competition \/ Event/);

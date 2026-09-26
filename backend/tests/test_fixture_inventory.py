@@ -623,7 +623,7 @@ def test_fixture_ui_routes_by_canonical_id_and_renders_inventory_states() -> Non
     )
     workspace = (FRONTEND / "components" / "fixture-inventory.tsx").read_text(encoding="utf-8")
     api = (FRONTEND / "lib" / "api.ts").read_text(encoding="utf-8")
-    assert "fixtureHref" in discovered
+    assert "fixtureDetailHref" in discovered
     assert "canonical_event_id" in discovered
     assert "/operations/fixtures/" in api
     assert "getFixtureDetail" in page
