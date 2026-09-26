@@ -8,8 +8,6 @@ fixture rows stay off the heartbeat.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -60,6 +58,17 @@ HEARTBEAT_OMITTED_FIELDS = frozenset(
         "discovered_fixtures",
         "recent_scan_cycles",
         "fixture_board_as_of",
+    }
+)
+
+# Lane diagnostics the console does not render. They stay on the stored lane
+# status and on the on-demand cycle report. The 2-second poll does not ship them.
+HEARTBEAT_BULK_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "series_results",
+        "polymarket_series_results",
+        "identity_shards",
+        "identity_scope",
     }
 )
 
@@ -162,38 +171,68 @@ class DeferredFixtureReport(BaseModel):
     )
 
 
-def catalogue_version(rows: list[UniverseCatalogueFixture]) -> str:
-    """Stable revision of recognition fields. Touch time is not part of it."""
+def strip_heartbeat_bulk_diagnostics(payload: dict[str, Any]) -> None:
+    """Drop diagnostic lists from a heartbeat dict. Does not mutate stored status."""
 
-    payload = [
-        row.model_dump(mode="json", exclude={"updated_at"})
-        for row in sorted(rows, key=lambda item: item.canonical_event_id)
-    ]
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(raw.encode()).hexdigest()[:20]
+    for lane_name in ("hot", "universe", "background", "active_trade"):
+        lane = payload.get(lane_name)
+        if not isinstance(lane, dict):
+            continue
+        diagnostics = lane.get("last_diagnostics")
+        if not isinstance(diagnostics, dict):
+            continue
+        lane["last_diagnostics"] = {
+            key: value
+            for key, value in diagnostics.items()
+            if key not in HEARTBEAT_BULK_DIAGNOSTIC_KEYS
+        }
 
 
 def catalogue_recognition(row: UniverseCatalogueFixture) -> dict[str, Any]:
     return row.model_dump(mode="json", exclude={"updated_at"})
 
 
+class UniverseCatalogueMetadata(BaseModel):
+    """Heartbeat fields. Counting and reading the revision does not sort fixtures."""
+
+    universe_fixture_count: int = 0
+    universe_catalogue_version: str = "0"
+    universe_catalogue_as_of: datetime | None = None
+    universe_generation_id: int | None = None
+
+
 class UniverseCatalogueMemory:
-    """Process-local catalogue. Mutations are explicit UNIVERSE-facing events."""
+    """Process-local catalogue. Mutations are explicit UNIVERSE-facing events.
+
+    ``revision`` is a monotonic token. It advances by one when recognition
+    content changes. A pure touch does not advance it, and the heartbeat can
+    read it without sorting or hashing the catalogue.
+    """
 
     def __init__(self) -> None:
         self.rows: dict[str, UniverseCatalogueFixture] = {}
-        self.version = catalogue_version([])
+        self.revision = 0
+        self.version = "0"
         self.as_of: datetime | None = None
         self.generation_id: int | None = None
 
-    def snapshot(self) -> UniverseCatalogueSnapshot:
-        rows = sorted(self.rows.values(), key=lambda row: (row.kickoff_utc, row.canonical_event_id))
-        return UniverseCatalogueSnapshot(
-            fixtures=rows,
-            universe_fixture_count=len(rows),
+    def metadata(self) -> UniverseCatalogueMetadata:
+        return UniverseCatalogueMetadata(
+            universe_fixture_count=len(self.rows),
             universe_catalogue_version=self.version,
             universe_catalogue_as_of=self.as_of,
             universe_generation_id=self.generation_id,
+        )
+
+    def snapshot(self) -> UniverseCatalogueSnapshot:
+        rows = sorted(self.rows.values(), key=lambda row: (row.kickoff_utc, row.canonical_event_id))
+        meta = self.metadata()
+        return UniverseCatalogueSnapshot(
+            fixtures=rows,
+            universe_fixture_count=meta.universe_fixture_count,
+            universe_catalogue_version=meta.universe_catalogue_version,
+            universe_catalogue_as_of=meta.universe_catalogue_as_of,
+            universe_generation_id=meta.universe_generation_id,
         )
 
     def upsert(self, row: UniverseCatalogueFixture, *, seen_at: datetime) -> bool:
@@ -212,7 +251,7 @@ class UniverseCatalogueMemory:
         return True
 
     def clear(self, *, seen_at: datetime | None) -> bool:
-        if not self.rows and self.version == catalogue_version([]):
+        if not self.rows:
             return False
         self.rows.clear()
         self.generation_id = None
@@ -220,7 +259,8 @@ class UniverseCatalogueMemory:
         return True
 
     def _commit(self, seen_at: datetime | None, generation_id: int | None) -> None:
-        self.version = catalogue_version(list(self.rows.values()))
+        self.revision += 1
+        self.version = str(self.revision)
         self.as_of = seen_at
         if generation_id is not None or not self.rows:
             self.generation_id = generation_id

@@ -11,6 +11,7 @@ import {
   getUniverseFixtureCatalogue,
 } from "../lib/api";
 import { createLiveStatusPoll } from "../lib/live-status-poll";
+import { startVersionedFetch } from "../lib/versioned-fetch";
 
 const LIVE_STATUS_INTERVAL_MS = 2000;
 export const SCAN_CYCLE_HISTORY_LIMIT = 50;
@@ -81,40 +82,33 @@ export function LiveStatusProvider({ children }: { children: ReactNode }) {
 
   const version = status?.universe_catalogue_version ?? "";
   useEffect(() => {
-    if (!version || version === catalogueVersion.current) return undefined;
-    let cancelled = false;
-    getUniverseFixtureCatalogue()
-      .then((next) => {
-        if (cancelled) return;
+    if (!version) return undefined;
+    const task = startVersionedFetch({
+      load: getUniverseFixtureCatalogue,
+      accept: () => catalogueVersion.current !== version,
+      onSuccess: (next) => {
         catalogueVersion.current = next.universe_catalogue_version || version;
         setCatalogue(next);
         setCatalogueAvailable(true);
-      })
-      .catch(() => {
-        if (!cancelled) setCatalogueAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      },
+      onError: () => setCatalogueAvailable(false),
+    });
+    return () => task.stop();
   }, [version]);
 
   const stamp = cycleStampOf(status);
   useEffect(() => {
-    if (loadedStamp.current === stamp && loadedStamp.current !== null) return undefined;
-    let cancelled = false;
-    getPaperScanCycles(`limit=${SCAN_CYCLE_HISTORY_LIMIT}`)
-      .then((cycles) => {
-        if (cancelled) return;
+    const task = startVersionedFetch({
+      load: () => getPaperScanCycles(`limit=${SCAN_CYCLE_HISTORY_LIMIT}`),
+      accept: () => loadedStamp.current !== stamp,
+      onSuccess: (cycles) => {
         loadedStamp.current = stamp;
         setScanCycles(cycles.slice(0, SCAN_CYCLE_HISTORY_LIMIT));
         setScanCyclesAvailable(true);
-      })
-      .catch(() => {
-        if (!cancelled) setScanCyclesAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      },
+      onError: () => setScanCyclesAvailable(false),
+    });
+    return () => task.stop();
   }, [stamp]);
 
   const value = useMemo<LiveStatusValue>(

@@ -182,7 +182,8 @@ describe("scan cycle history console wiring", () => {
     assert.match(provider, /getPaperScanCycles\(`limit=\$\{SCAN_CYCLE_HISTORY_LIMIT\}`\)/);
     assert.match(api, /query = "limit=50"/);
     assert.match(api, /\/paper\/scan-cycles/);
-    assert.match(scan, /router\.refresh\(\)/);
+    assert.equal((scan.match(/router\.refresh\(\)/g) || []).length, 1);
+    assert.match(provider, /startVersionedFetch/);
     assert.doesNotMatch(scan, /recent_scan_cycles/);
     assert.equal(SCAN_CYCLE_TITLE, "Scan cycle history");
     assert.equal((panel.match(/<CycleTable/g) || []).length, 1);

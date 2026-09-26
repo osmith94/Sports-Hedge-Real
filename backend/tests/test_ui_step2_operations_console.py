@@ -20,6 +20,7 @@ from sports_hedge.application.live_refresh import LiveRefreshCoordinator, get_li
 from sports_hedge.application.operations_read_model import (
     CATALOGUE_FORBIDDEN_FIELDS,
     HEARTBEAT_OMITTED_FIELDS,
+    UniverseCatalogueMemory,
 )
 from sports_hedge.application.price_engine import CataloguePriceEngine
 from sports_hedge.application.scan_lanes import ScanLane
@@ -149,6 +150,33 @@ def test_catalogue_changes_only_on_universe_publication() -> None:
     assert cleared.universe_catalogue_version != changed.universe_catalogue_version
 
 
+def test_catalogue_revision_is_o1_and_heartbeat_does_not_sort_the_catalogue() -> None:
+    commit = inspect.getsource(UniverseCatalogueMemory._commit)
+    metadata = inspect.getsource(UniverseCatalogueMemory.metadata)
+    assert "sort(" not in commit
+    assert "hashlib" not in commit
+    assert "json.dumps" not in commit
+    assert "sort(" not in metadata
+
+    coordinator = LiveRefreshCoordinator()
+    fixtures = [_fixture(f"evt-{index:02d}", polymarket=index % 2 == 0) for index in range(40)]
+    coordinator.record_report(_report(fixtures), scan_lane=ScanLane.UNIVERSE)
+    assert coordinator.universe_fixture_catalogue().universe_catalogue_version == "40"
+    coordinator.record_report(_report(fixtures), scan_lane=ScanLane.UNIVERSE)
+    assert coordinator.universe_fixture_catalogue().universe_catalogue_version == "40"
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("heartbeat must not build the sorted fixture catalogue")
+
+    coordinator._fixture_state.universe_catalogue_snapshot = boom  # type: ignore[method-assign]
+    heartbeat = coordinator.public_heartbeat()
+    assert heartbeat.universe_fixture_count == 40
+    assert heartbeat.universe_catalogue_version == "40"
+    compose = inspect.getsource(LiveRefreshCoordinator._compose_public_status)
+    assert "universe_catalogue_metadata" in compose
+    assert "universe_catalogue_snapshot()" not in compose
+
+
 def test_price_engine_does_not_opt_into_catalogue_publication() -> None:
     source = inspect.getsource(CataloguePriceEngine)
     assert "publish_universe_catalogue=True" not in source
@@ -236,5 +264,29 @@ def test_representative_heartbeat_is_much_smaller_than_the_old_board() -> None:
     heartbeat = json.dumps(coordinator.public_heartbeat().model_dump(mode="json")).encode()
     board = json.dumps(coordinator.public_status().model_dump(mode="json")).encode()
     assert len(board) > 100_000
-    assert len(heartbeat) < 80_000
+    assert len(heartbeat) < 50_000
     assert len(heartbeat) * 4 < len(board)
+    coordinator.status = coordinator.status.model_copy(
+        update={
+            "universe": coordinator.status.universe.model_copy(
+                update={
+                    "last_diagnostics": {
+                        "paper_decision_count": 3,
+                        "matching_coverage": {"catalogue_by_archetype": {"1x2": {"approved_equivalent": 1}}},
+                        "series_results": {"kalshi": ["row"] * 400},
+                        "polymarket_series_results": ["row"] * 80,
+                        "identity_shards": [{"id": index} for index in range(40)],
+                        "identity_scope": [f"evt-{index}" for index in range(80)],
+                    }
+                }
+            )
+        }
+    )
+    trimmed = coordinator.public_heartbeat()
+    diagnostics = trimmed.universe.last_diagnostics or {}
+    assert diagnostics["paper_decision_count"] == 3
+    assert "catalogue_by_archetype" in diagnostics["matching_coverage"]
+    for key in ("series_results", "polymarket_series_results", "identity_shards", "identity_scope"):
+        assert key not in diagnostics
+    stored = coordinator.public_status().universe.last_diagnostics or {}
+    assert "series_results" in stored

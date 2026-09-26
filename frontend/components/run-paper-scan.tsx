@@ -579,7 +579,11 @@ export function RunPaperScan() {
     } finally {
       inFlightRef.current = false;
       setLoadingMode(null);
-      router.refresh();
+      try {
+        await refreshNow();
+      } catch {
+        // The shared poll keeps the last heartbeat. This action does not reload the page.
+      }
     }
   }
 

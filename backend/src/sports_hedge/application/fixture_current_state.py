@@ -36,6 +36,7 @@ from sports_hedge.application.operations_read_model import (
     HotRosterEntry,
     UniverseCatalogueFixture,
     UniverseCatalogueMemory,
+    UniverseCatalogueMetadata,
     UniverseCatalogueSnapshot,
 )
 from sports_hedge.application.hot_market_relationships import (
@@ -948,6 +949,12 @@ class FixtureCurrentStateStore:
         if membership is not ScanLane.HOT:
             return None
         return record.status_fixture(now, **market_kwargs) or lifecycle
+
+    def universe_catalogue_metadata(self) -> UniverseCatalogueMetadata:
+        """Count and revision only. Does not sort or copy fixture rows."""
+
+        with self._lock:
+            return self._universe_catalogue.metadata()
 
     def universe_catalogue_snapshot(self) -> UniverseCatalogueSnapshot:
         with self._lock:

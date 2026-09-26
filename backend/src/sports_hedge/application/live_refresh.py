@@ -35,6 +35,7 @@ from sports_hedge.application.operations_read_model import (
     DeferredFixtureReport,
     HotRosterEntry,
     UniverseCatalogueSnapshot,
+    strip_heartbeat_bulk_diagnostics,
 )
 from sports_hedge.application.collector import (
     DIAGNOSTIC_PROVIDERS,
@@ -5555,7 +5556,11 @@ class LiveRefreshCoordinator:
             board_as_of = projection.as_of
             hot_roster = projection.hot_roster
             deferred_count = projection.deferred_awaiting_count
-        catalogue = self._fixture_state.universe_catalogue_snapshot()
+        catalogue_meta = (
+            None
+            if project_fixture_board
+            else self._fixture_state.universe_catalogue_metadata()
+        )
         engine_status = (
             self._price_engine.public_status(now=now)
             if self._price_engine is not None
@@ -5693,13 +5698,15 @@ class LiveRefreshCoordinator:
             )
             if project_fixture_board:
                 return self.status
+            assert catalogue_meta is not None
             payload = self.status.model_dump(exclude=set(HEARTBEAT_OMITTED_FIELDS))
+            strip_heartbeat_bulk_diagnostics(payload)
             payload.update(
                 {
-                    "universe_fixture_count": catalogue.universe_fixture_count,
-                    "universe_catalogue_version": catalogue.universe_catalogue_version,
-                    "universe_catalogue_as_of": catalogue.universe_catalogue_as_of,
-                    "universe_catalogue_generation_id": catalogue.universe_generation_id,
+                    "universe_fixture_count": catalogue_meta.universe_fixture_count,
+                    "universe_catalogue_version": catalogue_meta.universe_catalogue_version,
+                    "universe_catalogue_as_of": catalogue_meta.universe_catalogue_as_of,
+                    "universe_catalogue_generation_id": catalogue_meta.universe_generation_id,
                     "hot_roster": hot_roster,
                     "deferred_awaiting_count": deferred_count,
                 }
