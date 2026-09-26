@@ -209,6 +209,7 @@ class ObservationAgeScan:
         self.last_left_age: int | None = None
         self.last_right_age: int | None = None
         self.last: PaperScanDecision | None = None
+        self.samples: list[tuple[int | None, int | None, int | None]] = []
 
     def scan_pair(self, left, right, **kwargs: Any) -> PaperScanDecision:
         self.calls += 1
@@ -217,6 +218,7 @@ class ObservationAgeScan:
         self.last_left_age = left.quote_age_ms
         self.last_right_age = right.quote_age_ms
         combined = conservative_combined_age_ms(left.quote_age_ms, right.quote_age_ms)
+        self.samples.append((left.quote_age_ms, right.quote_age_ms, combined))
         legs = []
         for leg in decision.fill_legs:
             age = left.quote_age_ms if leg.venue is VenueName.MATCHBOOK else right.quote_age_ms
@@ -522,10 +524,10 @@ async def test_stale_quote_blocks_open_with_existing_rejection(
         engine, _mb, _ks, _layer = _engine([row], paper_scan=paper)
         _bind(engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch)
         await _slice_and_drain(engine,PriceEnginePriority.HOT, now=NOW)
-        trades = ops.list_active_trades()
-        assert len(trades) == 1
-        assert trades[0].state is PaperTradeState.OPEN
-        assert trades[0].paper_only is True
+        # The second price is still at the entry-age gate, so it must not fill.
+        assert ops.list_active_trades() == []
+        assert SNAPSHOT_STALE_AT_DECISION in ops._entry_rejections.values()
+        assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
     finally:
         repository.close()
         ledger.close()
@@ -809,10 +811,8 @@ async def test_matchbook_then_delayed_kalshi_is_stale_at_evaluation(
         assert paper.last_left_age >= max_age
         assert paper.last.quote_age_ms is not None
         assert paper.last.quote_age_ms >= max_age
-        trades = ops.list_active_trades()
-        assert len(trades) == 1
-        assert trades[0].state is PaperTradeState.OPEN
-        assert SNAPSHOT_STALE_AT_DECISION not in ops._entry_rejections.values()
+        assert ops.list_active_trades() == []
+        assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
     finally:
         repository.close()
         ledger.close()
@@ -842,17 +842,15 @@ async def test_stale_first_kalshi_constituent_fails_capture_while_last_is_fresh(
         )
         _bind(engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch)
         await _slice_and_drain(engine, PriceEnginePriority.HOT, now=NOW)
-        assert paper.last is not None
-        assert paper.last_left_age is not None
-        assert paper.last_left_age < max_age
-        assert paper.last_right_age is not None
-        assert paper.last_right_age >= max_age
-        assert paper.last.quote_age_ms is not None
-        assert paper.last.quote_age_ms >= max_age
-        trades = ops.list_active_trades()
-        assert len(trades) == 1
-        assert trades[0].state is PaperTradeState.OPEN
-        assert SNAPSHOT_STALE_AT_DECISION not in ops._entry_rejections.values()
+        assert len(paper.samples) >= 2
+        discovery_left, discovery_right, discovery_combined = paper.samples[0]
+        assert discovery_left is not None and discovery_left < max_age
+        assert discovery_right is not None and discovery_right >= max_age
+        assert discovery_combined is not None and discovery_combined >= max_age
+        _execution_left, _execution_right, execution_combined = paper.samples[-1]
+        assert execution_combined is not None and execution_combined >= max_age
+        assert ops.list_active_trades() == []
+        assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
     finally:
         repository.close()
         ledger.close()

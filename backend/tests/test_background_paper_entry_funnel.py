@@ -1,10 +1,10 @@
-"""BACKGROUND prices catalogue rows. PAPER entry is the same decision.
+"""BACKGROUND prices catalogue rows, then PAPER entry reprices exact IDs once.
 
 Deterministic fixture/demo books, not live quotes. Thresholds, fees, and
 execution rules are the current Settings defaults except where a case sets
 the existing risk cap or treasury seed. Autofill is the production
-LIVE_PAPER flag. Entry goes through CataloguePriceEngine.scan_pair once,
-then bind_price_engine_item_persist. There is no second scan.
+LIVE_PAPER flag. A capture-eligible row gets one discovery scan and one
+execution reprice. Dull and risk-capped rows do not take the second read.
 """
 
 from __future__ import annotations
@@ -217,17 +217,23 @@ def _open_trades(operations: PaperOperationsService):
     ]
 
 
-def _assert_no_rediscovery(matchbook: FakeMatchbook, kalshi: _Books, rows: int) -> None:
+def _assert_no_rediscovery(
+    matchbook: FakeMatchbook,
+    kalshi: _Books,
+    rows: int,
+    *,
+    extra_exact_reads: int = 0,
+) -> None:
     assert matchbook.list_events_calls == 0
     assert kalshi.list_events_calls == 0
     assert matchbook.list_markets_calls == []
     assert kalshi.list_markets_calls == []
-    assert len(matchbook.get_market_calls) == rows
-    assert len(kalshi.book_calls) == rows
+    assert len(matchbook.get_market_calls) == rows + extra_exact_reads
+    assert len(kalshi.book_calls) == rows + extra_exact_reads
 
 
 @pytest.mark.asyncio
-async def test_background_opens_one_paper_trade_without_a_second_scan(
+async def test_background_opens_one_paper_trade_after_one_execution_reprice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,10 +254,10 @@ async def test_background_opens_one_paper_trade_without_a_second_scan(
     expected_rows = DULL_COUNT + 1
     assert len(result.evaluated) == expected_rows
     assert len(result.decisions) == expected_rows
-    assert scan.scan_calls == expected_rows
-    _assert_no_rediscovery(matchbook, kalshi, expected_rows)
-    assert (RICH_EVENT, RICH_MARKET) in matchbook.get_market_calls
-    assert RICH_TICKER in kalshi.book_calls
+    assert scan.scan_calls == expected_rows + 1
+    _assert_no_rediscovery(matchbook, kalshi, expected_rows, extra_exact_reads=1)
+    assert matchbook.get_market_calls.count((RICH_EVENT, RICH_MARKET)) == 2
+    assert kalshi.book_calls.count(RICH_TICKER) == 2
 
     dull = [item for item in result.decisions if not item.eligible_for_paper_simulation]
     rich = [item for item in result.decisions if item.eligible_for_paper_simulation]
@@ -264,7 +270,11 @@ async def test_background_opens_one_paper_trade_without_a_second_scan(
     assert qualifying.allocation is not None and qualifying.allocation.accepted
     assert qualifying.execution_risk is not None
     assert qualifying.execution_risk.score <= defaults.max_execution_risk
-    assert qualifying in captured
+    assert qualifying not in captured
+    execution = next(
+        item for item in captured if item.canonical_market_id == qualifying.canonical_market_id
+    )
+    assert execution.eligible_for_paper_simulation is True
 
     opened = _open_trades(operations)
     assert len(opened) == 1
@@ -309,15 +319,18 @@ async def test_qualifying_background_row_without_treasury_creates_no_paper_trade
     )
     qualifying = next(item for item in result.decisions if item.eligible_for_paper_simulation)
     assert qualifying.allocation is not None and qualifying.allocation.accepted
-    assert qualifying in captured
-    assert scan.scan_calls == DULL_COUNT + 1
+    assert qualifying not in captured
+    assert any(
+        item.canonical_market_id == qualifying.canonical_market_id for item in captured
+    )
+    assert scan.scan_calls == DULL_COUNT + 2
     assert _open_trades(operations) == []
     assert operations._entry_rejections
     assert any(
         reason == "insufficient_spendable_treasury"
         for reason in operations._entry_rejections.values()
     )
-    _assert_no_rediscovery(matchbook, kalshi, DULL_COUNT + 1)
+    _assert_no_rediscovery(matchbook, kalshi, DULL_COUNT + 1, extra_exact_reads=1)
 
 
 @pytest.mark.asyncio

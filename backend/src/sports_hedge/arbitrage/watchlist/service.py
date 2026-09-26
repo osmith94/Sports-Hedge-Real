@@ -616,6 +616,46 @@ class WatchlistService:
                 )
             return current
 
+    def note_execution_reprice_miss(
+        self,
+        decision: PaperScanDecision,
+        *,
+        occurred_at,
+        reason: str,
+        pricing_lane: str | None = None,
+    ) -> OpportunityLifecycleEvent | None:
+        """Record one fail-closed execution reprice without changing radar status.
+
+        Discovery QUALIFYING stays in place when the second price fails, is
+        still stale, or is no longer the capture snapshot. This does not open
+        a paper trade and does not schedule another reprice.
+        """
+
+        if not decision.canonical_market_id:
+            return None
+        opportunity_id = opportunity_id_for_canonical_market(decision.canonical_market_id)
+        current = self.repository.get(opportunity_id)
+        if current is None:
+            return None
+        event = OpportunityLifecycleEvent(
+            event_id=f"{opportunity_id}:{reason}:{uuid4()}",
+            opportunity_id=opportunity_id,
+            occurred_at=occurred_at,
+            event_type=LifecycleEventType.PAPER_FILL_REJECTED,
+            status=current.status,
+            current_net_edge=current.current_net_edge,
+            distance_to_trigger_pp=current.distance_to_trigger_pp,
+            detail=reason,
+            gross_edge=current.gross_edge,
+            limiting_depth_gbp=current.limiting_depth_gbp,
+            guaranteed_profit_gbp=current.guaranteed_profit_gbp,
+            quote_age_ms=current.quote_age_ms,
+            pricing_lane=pricing_lane,
+            **lifecycle_identity_from_opportunity(current),
+        )
+        self.repository.append_event(event)
+        return event
+
     def close(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
     ) -> NearOpportunity:

@@ -2395,6 +2395,7 @@ def persist_price_engine_item_capture(
     watchlist: WatchlistService,
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     pricing_lane: str | None = None,
+    execution_authoritative: bool = False,
 ) -> list[Any] | None:
     """Capture-critical watchlist + ``persist_triggered_chain`` only.
 
@@ -2419,6 +2420,7 @@ def persist_price_engine_item_capture(
             ),
             write_audit=False,
             pricing_lane=pricing_lane,
+            execution_authoritative=execution_authoritative,
         )
 
 
@@ -2486,13 +2488,23 @@ def bind_price_engine_item_persist(
     """
 
     async def _handoff(decision: PaperScanDecision, runtime: Any) -> None:
-        history = await asyncio.to_thread(
-            persist_price_engine_item_capture,
+        from sports_hedge.application.execution_reprice import capture_with_execution_reprice
+
+        captured = await capture_with_execution_reprice(
             decision,
+            runtime=runtime,
+            engine=engine,
             service=service,
             watchlist=watchlist,
             pricing_lane=_pricing_lane_from_runtime(runtime),
         )
+        history = (
+            captured.entry_history
+            if captured.entry_history is not None
+            else captured.discovery_history
+        )
+        observed_discovery = captured.discovery_decision or decision
+        audit_decision = captured.entry_decision or observed_discovery
         if decision.canonical_market_id:
             operations = get_paper_operations_service(watchlist, get_priority_alert_service())
             miss = operations.consume_execution_miss(
@@ -2508,11 +2520,26 @@ def bind_price_engine_item_persist(
                     zero_fill_reason=miss.reason,
                     pricing_lane=miss.pricing_lane or _pricing_lane_from_runtime(runtime),
                 )
-        engine.schedule_observability(
-            lambda captured=history, item=decision: record_price_engine_item_audit(
-                item, audit=audit, history=captured
+        if captured.entry_decision is not None and captured.entry_decision is not decision:
+            discovery_rows = list(captured.discovery_history)
+            engine.schedule_observability(
+                lambda discovery_history=discovery_rows, item=observed_discovery: (
+                    record_price_engine_item_audit(
+                        item, audit=audit, history=discovery_history
+                    )
+                )
             )
-        )
+            engine.schedule_observability(
+                lambda entry_history=captured.entry_history, item=captured.entry_decision: (
+                    record_price_engine_item_audit(item, audit=audit, history=entry_history)
+                )
+            )
+        else:
+            engine.schedule_observability(
+                lambda history_rows=history, item=audit_decision: record_price_engine_item_audit(
+                    item, audit=audit, history=history_rows
+                )
+            )
 
     def _persist_hot_promotion(fact: HotPromotionFact) -> None:
         watchlist.record_hot_promotion(
@@ -2543,6 +2570,7 @@ def _persist_decision(
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     write_audit: bool = True,
     pricing_lane: str | None = None,
+    execution_authoritative: bool = False,
 ) -> list[Any] | None:
     if not decision.canonical_market_id:
         return None
@@ -2564,6 +2592,7 @@ def _persist_decision(
             decision,
             refreshed_venues=refreshed_venues,
             pricing_lane=pricing_lane,
+            execution_authoritative=execution_authoritative,
         )
     return history
 
