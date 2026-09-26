@@ -119,6 +119,7 @@ VARIANT_LABELS = {
         "UEFA Nations League 2026/27",
         "UEFA Nations League A",
         "UEFA Nations League B",
+        "UEFA Nations League C",
         "UEFA Nations League D",
     ),
     TargetCompetitionCode.SUPER_LIG: (
@@ -249,7 +250,6 @@ REJECTED_LABELS = (
     "Scottish League Cup",
     "CONCACAF Nations League",
     "UEFA Women's Nations League",
-    "UEFA Nations League C",
     "Volleyball Nations League",
     "UEFA Euro Qualification",
     "Europe WC Qualifiers",

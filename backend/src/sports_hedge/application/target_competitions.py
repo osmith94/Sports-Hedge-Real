@@ -357,14 +357,16 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "unl",
             "uefa nations league 2026/27",
             "uefa nations league 2026 27",
-            # Live Matchbook COMPETITION meta-tags 2026-09-22 (soccer id=15):
-            # Netherlands vs Germany uses "UEFA Nations League A";
-            # Austria vs Israel uses "UEFA Nations League B";
-            # Andorra vs Malta uses "UEFA Nations League D".
-            # League C was not on that open snapshot and is not registered
-            # until an observed COMPETITION tag exists.
+            # Live Matchbook COMPETITION meta-tags:
+            # 2026-09-22: A (Netherlands vs Germany), B (Austria vs Israel),
+            # D (Andorra vs Malta).
+            # 2026-09-26: C is the same UEFA Nations League division tag
+            # (10 open soccer events, including Slovakia vs Moldova). Exact
+            # alias only. Women's, CONCACAF, and Volleyball Nations labels
+            # stay unmatched.
             "uefa nations league a",
             "uefa nations league b",
+            "uefa nations league c",
             "uefa nations league d",
         ),
         polymarket_gamma_series_id="11446",

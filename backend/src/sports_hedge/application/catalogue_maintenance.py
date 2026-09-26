@@ -14,6 +14,7 @@ via `persist_universe_catalogue_pass_offloop`.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -26,6 +27,7 @@ from sports_hedge.application.approved_market_catalogue import (
     FEE_SOURCE_GET_SERIES,
     ApprovedMarketCatalogueRow,
     CatalogueRowState,
+    MarketScope,
     OutcomeNativeId,
     executable_polymarket_token_ids,
     family_period_line_from_key,
@@ -56,6 +58,7 @@ from sports_hedge.persistence.approved_market_catalogue import (
 DISAPPEARED_FAMILY_REASON = "family_not_listed_this_generation"
 TERMINAL_FIXTURE_REASON = "fixture_terminal"
 KALSHI_SERIES_STATUS_OK = "ok"
+CATALOGUE_NATIVE_IDENTITY_CONFLICT = "catalogue_native_identity_conflict"
 
 # Longest suffix first so BTTS/FTTS/TOTAL cannot be confused with GAME.
 _KALSHI_SERIES_FAMILY_SUFFIXES: tuple[tuple[str, str], ...] = (
@@ -292,6 +295,35 @@ def kalshi_constituent_tickers(market: CanonicalMarket) -> list[str]:
     return tickers
 
 
+@dataclass(frozen=True)
+class CatalogueNativeIdentityConflict:
+    """A later write tried to replace a stored venue-native exact id."""
+
+    canonical_event_id: str
+    register_canonical_key: str
+    venue: str
+    field: str
+    existing_native_value: str
+    incoming_native_value: str
+    venue_pair: str | None = None
+    reason: str = CATALOGUE_NATIVE_IDENTITY_CONFLICT
+
+    def audit_detail(self) -> str:
+        return json.dumps(
+            {
+                "reason": self.reason,
+                "canonical_event_id": self.canonical_event_id,
+                "register_canonical_key": self.register_canonical_key,
+                "venue": self.venue,
+                "field": self.field,
+                "existing_native_value": self.existing_native_value,
+                "incoming_native_value": self.incoming_native_value,
+                "venue_pair": self.venue_pair,
+            },
+            sort_keys=True,
+        )
+
+
 def persist_universe_catalogue_pass(
     store: SqliteApprovedMarketCatalogueStore,
     *,
@@ -307,6 +339,7 @@ def persist_universe_catalogue_pass(
     terminal: bool,
     generation_selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
     allow_disappearance: bool = True,
+    identity_conflicts: list[CatalogueNativeIdentityConflict] | None = None,
 ) -> list[ApprovedMarketCatalogueRow]:
     """Upsert ACTIVE rows for registered pairs and invalidate missing families.
 
@@ -334,6 +367,7 @@ def persist_universe_catalogue_pass(
             terminal=terminal,
             generation_selected_codes=generation_selected_codes,
             allow_disappearance=allow_disappearance,
+            identity_conflicts=identity_conflicts,
         )
     )
 
@@ -353,6 +387,7 @@ async def persist_universe_catalogue_pass_offloop(
     terminal: bool,
     generation_selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
     allow_disappearance: bool = True,
+    identity_conflicts: list[CatalogueNativeIdentityConflict] | None = None,
 ) -> list[ApprovedMarketCatalogueRow]:
     """Bounded off-loop wrapper so SQLite catalogue I/O cannot stall HOT."""
 
@@ -371,6 +406,7 @@ async def persist_universe_catalogue_pass_offloop(
         terminal=terminal,
         generation_selected_codes=generation_selected_codes,
         allow_disappearance=allow_disappearance,
+        identity_conflicts=identity_conflicts,
     )
 
 
@@ -389,6 +425,7 @@ def _persist_universe_catalogue_pass_tx(
     terminal: bool,
     generation_selected_codes: list[str] | tuple[str, ...] | frozenset[str] | None = None,
     allow_disappearance: bool = True,
+    identity_conflicts: list[CatalogueNativeIdentityConflict] | None = None,
 ) -> list[ApprovedMarketCatalogueRow]:
     if terminal:
         return tx.mark_fixture_terminal(
@@ -417,6 +454,7 @@ def _persist_universe_catalogue_pass_tx(
                 register_canonical_key=key,
                 now=now,
                 generation_id=generation_id,
+                identity_conflicts=identity_conflicts,
             )
         )
 
@@ -463,6 +501,7 @@ def _upsert_active_pair(
     register_canonical_key: str,
     now: datetime,
     generation_id: str | None,
+    identity_conflicts: list[CatalogueNativeIdentityConflict] | None = None,
 ) -> ApprovedMarketCatalogueRow:
     family, period, line = family_period_line_from_key(register_canonical_key)
     row_id = catalogue_row_id_for(canonical_event_id, register_canonical_key)
@@ -482,6 +521,129 @@ def _upsert_active_pair(
         or (kalshi_event or "")
         or ""
     ).strip() or None
+    pm_event, pm_market, pm_tokens = _polymarket_ids(pair.polymarket, register_canonical_key)
+    conflicts: list[CatalogueNativeIdentityConflict] = []
+    venue_pair = _relationship_venue_pair(pair)
+    merged_scalars = {
+        "matchbook_event_id": _merge_native_scalar(
+            mb_event,
+            None if existing is None else existing.matchbook_event_id,
+            venue=VenueName.MATCHBOOK.value,
+            field="matchbook_event_id",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "matchbook_market_id": _merge_native_scalar(
+            mb_market,
+            None if existing is None else existing.matchbook_market_id,
+            venue=VenueName.MATCHBOOK.value,
+            field="matchbook_market_id",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "kalshi_event_ticker": _merge_native_scalar(
+            event_ticker or kalshi_event,
+            None if existing is None else existing.kalshi_event_ticker,
+            venue=VenueName.KALSHI.value,
+            field="kalshi_event_ticker",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "kalshi_series_ticker": _merge_native_scalar(
+            series_ticker or None,
+            None if existing is None else existing.kalshi_series_ticker,
+            venue=VenueName.KALSHI.value,
+            field="kalshi_series_ticker",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "polymarket_event_id": _merge_native_scalar(
+            pm_event,
+            None if existing is None else existing.polymarket_event_id,
+            venue=VenueName.POLYMARKET.value,
+            field="polymarket_event_id",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "polymarket_market_id": _merge_native_scalar(
+            pm_market,
+            None if existing is None else existing.polymarket_market_id,
+            venue=VenueName.POLYMARKET.value,
+            field="polymarket_market_id",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "polymarket_condition_id": _merge_native_scalar(
+            _polymarket_condition_id(pair.polymarket),
+            None if existing is None else existing.polymarket_condition_id,
+            venue=VenueName.POLYMARKET.value,
+            field="polymarket_condition_id",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+    }
+    merged_lists = {
+        "matchbook_runner_ids": _merge_native_list(
+            mb_runners,
+            [] if existing is None else existing.matchbook_runner_ids,
+            venue=VenueName.MATCHBOOK.value,
+            field="matchbook_runner_ids",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "kalshi_market_tickers": _merge_native_list(
+            tickers,
+            [] if existing is None else existing.kalshi_market_tickers,
+            venue=VenueName.KALSHI.value,
+            field="kalshi_market_tickers",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "kalshi_outcome_ids": _merge_native_list(
+            kalshi_outcomes,
+            [] if existing is None else existing.kalshi_outcome_ids,
+            venue=VenueName.KALSHI.value,
+            field="kalshi_outcome_ids",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+        "polymarket_token_ids": _merge_native_list(
+            pm_tokens,
+            [] if existing is None else existing.polymarket_token_ids,
+            venue=VenueName.POLYMARKET.value,
+            field="polymarket_token_ids",
+            conflicts=conflicts,
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue_pair=venue_pair,
+        ),
+    }
+    if conflicts:
+        if identity_conflicts is not None:
+            identity_conflicts.extend(conflicts)
+        if existing is None:
+            raise RuntimeError("catalogue identity conflict without a stored row")
+        return existing
     snapshot_id = None if existing is None else existing.kalshi_fee_snapshot_id
     if pair.kalshi is not None and (
         _kalshi_payloads_have_fee_evidence(pair.kalshi_event_payload, pair.kalshi_series_payload)
@@ -503,7 +665,6 @@ def _upsert_active_pair(
             )
         tx.insert_fee_snapshot(snapshot)
         snapshot_id = snapshot.snapshot_id
-    pm_event, pm_market, pm_tokens = _polymarket_ids(pair.polymarket, register_canonical_key)
     pm_snapshot_id = None if existing is None else existing.polymarket_fee_snapshot_id
     if pair.polymarket is not None:
         from sports_hedge.fees.polymarket import market_payload_has_fee_evidence
@@ -529,38 +690,30 @@ def _upsert_active_pair(
         home_canonical=home_canonical,
         away_canonical=away_canonical,
         kickoff_utc=kickoff_utc,
-        matchbook_event_id=_prefer(mb_event, None if existing is None else existing.matchbook_event_id),
-        matchbook_market_id=_prefer(mb_market, None if existing is None else existing.matchbook_market_id),
-        matchbook_runner_ids=_prefer_list(
-            mb_runners, [] if existing is None else existing.matchbook_runner_ids
+        matchbook_event_id=merged_scalars["matchbook_event_id"],
+        matchbook_market_id=merged_scalars["matchbook_market_id"],
+        matchbook_runner_ids=merged_lists["matchbook_runner_ids"],
+        kalshi_event_ticker=merged_scalars["kalshi_event_ticker"],
+        kalshi_market_tickers=merged_lists["kalshi_market_tickers"],
+        kalshi_outcome_ids=merged_lists["kalshi_outcome_ids"],
+        kalshi_series_ticker=merged_scalars["kalshi_series_ticker"],
+        polymarket_event_id=merged_scalars["polymarket_event_id"],
+        polymarket_market_id=merged_scalars["polymarket_market_id"],
+        polymarket_condition_id=merged_scalars["polymarket_condition_id"],
+        polymarket_token_ids=merged_lists["polymarket_token_ids"],
+        polymarket_clob_token_ids=[] if existing is None else list(existing.polymarket_clob_token_ids),
+        polymarket_event_slug=None if existing is None else existing.polymarket_event_slug,
+        polymarket_event_ticker=None if existing is None else existing.polymarket_event_ticker,
+        source_venue=None if existing is None else existing.source_venue,
+        market_scope=MarketScope.FIXTURE_MATCH if existing is None else existing.market_scope,
+        season_id=None if existing is None else existing.season_id,
+        competition_code=None if existing is None else existing.competition_code,
+        participant_type=None if existing is None else existing.participant_type,
+        participant_canonical_id=None if existing is None else existing.participant_canonical_id,
+        settlement_fingerprint_version=(
+            None if existing is None else existing.settlement_fingerprint_version
         ),
-        kalshi_event_ticker=_prefer(
-            event_ticker or kalshi_event,
-            None if existing is None else existing.kalshi_event_ticker,
-        ),
-        kalshi_market_tickers=_prefer_list(
-            tickers, [] if existing is None else existing.kalshi_market_tickers
-        ),
-        kalshi_outcome_ids=_prefer_list(
-            kalshi_outcomes, [] if existing is None else existing.kalshi_outcome_ids
-        ),
-        kalshi_series_ticker=_prefer(
-            series_ticker or None,
-            None if existing is None else existing.kalshi_series_ticker,
-        ),
-        polymarket_event_id=_prefer(
-            pm_event, None if existing is None else existing.polymarket_event_id
-        ),
-        polymarket_market_id=_prefer(
-            pm_market, None if existing is None else existing.polymarket_market_id
-        ),
-        polymarket_condition_id=_prefer(
-            _polymarket_condition_id(pair.polymarket),
-            None if existing is None else existing.polymarket_condition_id,
-        ),
-        polymarket_token_ids=_prefer_list(
-            pm_tokens, [] if existing is None else existing.polymarket_token_ids
-        ),
+        expected_settlement_horizon=None if existing is None else existing.expected_settlement_horizon,
         family=family,
         period=period,
         line=line,
@@ -650,17 +803,111 @@ def _polymarket_condition_id(market: CanonicalMarket | None) -> str | None:
     return text or None
 
 
-def _prefer(new: str | None, existing: str | None) -> str | None:
-    incoming = str(new or "").strip()
-    if incoming:
-        return incoming
+def _relationship_venue_pair(pair: CataloguePairIdentity) -> str:
+    names: list[str] = []
+    if pair.matchbook is not None:
+        names.append(VenueName.MATCHBOOK.value)
+    if pair.kalshi is not None:
+        names.append(VenueName.KALSHI.value)
+    if pair.polymarket is not None:
+        names.append(VenueName.POLYMARKET.value)
+    return "/".join(names)
+
+
+def _merge_native_scalar(
+    incoming: str | None,
+    existing: str | None,
+    *,
+    venue: str,
+    field: str,
+    conflicts: list[CatalogueNativeIdentityConflict],
+    canonical_event_id: str,
+    register_canonical_key: str,
+    venue_pair: str | None,
+) -> str | None:
+    """Fill an empty id, keep the same id, or record a conflict.
+
+    A different non-empty incoming value does not replace the stored value.
+    """
+
+    new = str(incoming or "").strip()
     held = str(existing or "").strip()
-    return held or None
+    if not held:
+        return new or None
+    if not new or new == held:
+        return held
+    conflicts.append(
+        CatalogueNativeIdentityConflict(
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue=venue,
+            field=field,
+            existing_native_value=held,
+            incoming_native_value=new,
+            venue_pair=venue_pair,
+        )
+    )
+    return held
 
 
-def _prefer_list(new: list[Any], existing: list[Any]) -> list[Any]:
-    if new:
-        return list(new)
+def _native_list_key(items: list[Any]) -> tuple[Any, ...]:
+    keys: list[Any] = []
+    for item in items:
+        if isinstance(item, OutcomeNativeId):
+            keys.append((str(item.outcome or "").strip(), str(item.native_id or "").strip()))
+        else:
+            keys.append(str(item or "").strip())
+    return tuple(keys)
+
+
+def _native_list_is_empty(items: list[Any]) -> bool:
+    key = _native_list_key(items)
+    if not key:
+        return True
+    for item in key:
+        if isinstance(item, tuple):
+            if any(piece for piece in item):
+                return False
+        elif item:
+            return False
+    return True
+
+
+def _render_native_list(items: list[Any]) -> str:
+    rendered: list[Any] = []
+    for item in _native_list_key(items):
+        rendered.append(list(item) if isinstance(item, tuple) else item)
+    return json.dumps(rendered, separators=(",", ":"))
+
+
+def _merge_native_list(
+    incoming: list[Any],
+    existing: list[Any],
+    *,
+    venue: str,
+    field: str,
+    conflicts: list[CatalogueNativeIdentityConflict],
+    canonical_event_id: str,
+    register_canonical_key: str,
+    venue_pair: str | None,
+) -> list[Any]:
+    """Exact ordered native-id lists. Not an unordered union."""
+
+    if _native_list_is_empty(existing):
+        return list(incoming)
+    if _native_list_is_empty(incoming) or _native_list_key(incoming) == _native_list_key(existing):
+        return list(existing)
+    conflicts.append(
+        CatalogueNativeIdentityConflict(
+            canonical_event_id=canonical_event_id,
+            register_canonical_key=register_canonical_key,
+            venue=venue,
+            field=field,
+            existing_native_value=_render_native_list(existing),
+            incoming_native_value=_render_native_list(incoming),
+            venue_pair=venue_pair,
+        )
+    )
     return list(existing)
 
 

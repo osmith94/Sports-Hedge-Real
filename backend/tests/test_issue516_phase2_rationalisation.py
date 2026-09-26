@@ -155,9 +155,15 @@ def test_composed_catalogue_keeps_nba_ncaab_and_nations_league() -> None:
     nations = resolve_target_competition("UEFA Nations League")
     assert nations is not None
     aliases = {alias.casefold() for alias in nations.aliases}
-    assert {"uefa nations league a", "uefa nations league b", "uefa nations league d"} <= aliases
-    assert "uefa nations league c" not in aliases
-    assert resolve_target_competition("UEFA Nations League C") is None
+    assert {
+        "uefa nations league a",
+        "uefa nations league b",
+        "uefa nations league c",
+        "uefa nations league d",
+    } <= aliases
+    league_c = resolve_target_competition("UEFA Nations League C")
+    assert league_c is not None
+    assert league_c.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE
     assert resolve_target_competition("CONCACAF Nations League") is None
     assert resolve_target_competition("UEFA Women's Nations League") is None
 

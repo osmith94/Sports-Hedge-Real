@@ -87,6 +87,7 @@ from sports_hedge.application.opportunity_viability import (
     UPPER_BOUND_BELOW_MIN_NET,
     assess_identity_viability,
     build_viability_evidence,
+    market_relationship_not_collected,
     catalogue_ready_venues,
     venue_blocked_for_identity,
     get_opportunity_viability_cache,
@@ -2848,6 +2849,11 @@ class CataloguePriceEngine:
                 ],
                 final_reason=reason,
                 registered_relationships=[str(identity.register_canonical_key or "")],
+                evidence_stage="price_engine_skip",
+                relationship_fields_scope="single_catalogue_row_skip_not_universe_search",
+                market_relationship_evidence=market_relationship_not_collected(
+                    "price_engine_skip_not_universe_catalogue"
+                ),
             ),
             no_comparison_reason=reason,
             opportunity_state="not_evaluated",
