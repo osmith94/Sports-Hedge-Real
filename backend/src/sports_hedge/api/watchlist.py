@@ -93,11 +93,16 @@ def tracked_markets(
 ) -> list[NearOpportunity]:
     coordinator = get_live_refresh_coordinator()
     store = coordinator.fixture_current_state()
-    if not store.has_collection():
-        return []
     now = service._clock()
     settings = get_settings()
     radar_kwargs = coordinator.radar_horizon_kwargs(settings)
+    service.note_qualifying_radar_expiry(
+        now,
+        hot_ttl_seconds=int(radar_kwargs["hot_ttl_seconds"]),
+        universe_ttl_seconds=int(radar_kwargs["universe_ttl_seconds"]),
+    )
+    if not store.has_collection():
+        return []
     cohort_ids = store.current_tracked_opportunity_ids(now, **radar_kwargs)
     rows = _read_watchlist(
         service.tracked,

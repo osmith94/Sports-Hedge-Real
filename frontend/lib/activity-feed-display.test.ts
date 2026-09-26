@@ -180,7 +180,7 @@ describe("signal-only Activity feed", () => {
     assert.match(feed, /Promoted to HOT/);
     assert.match(
       feed,
-      /Qualifying opportunity, Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited/,
+      /Qualifying opportunity, radar expired, Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited/,
     );
     assert.match(feed, /data-missed-trigger-event-id/);
     assert.match(feed, /feed-subject/);
@@ -194,6 +194,7 @@ describe("signal-only Activity feed", () => {
       "promoted_to_hot",
       "qualifying_detected",
       "qualifying_lost",
+      "qualifying_expired",
       "paper_eligible",
       "trigger_lost_before_fill",
       "paper_fill_complete",
@@ -206,6 +207,8 @@ describe("signal-only Activity feed", () => {
     assert.equal(isOperatorActivityEvent("paper_eligible"), true);
     assert.equal(isOperatorActivityEvent("qualifying_detected"), true);
     assert.equal(isOperatorActivityEvent("qualifying_lost"), true);
+    assert.equal(isOperatorActivityEvent("qualifying_expired"), true);
+    assert.equal(isOperatorActivityEvent("expired"), false);
     assert.equal(activityHistoryPath("watch:mkt-1"), "/activity/watch%3Amkt-1");
     assert.equal(
       activityHistoryPath("watch:mkt-1", "evt-signal"),

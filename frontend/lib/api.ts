@@ -1361,6 +1361,7 @@ export type WatchlistLifecycleEventType =
   | "promoted_to_hot"
   | "qualifying_detected"
   | "qualifying_lost"
+  | "qualifying_expired"
   | "paper_eligible"
   | "paper_fill_attempted"
   | "paper_fill_partial"

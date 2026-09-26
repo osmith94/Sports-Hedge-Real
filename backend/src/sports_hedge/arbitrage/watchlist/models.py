@@ -77,6 +77,7 @@ class LifecycleEventType(StrEnum):
     PROMOTED_TO_HOT = "promoted_to_hot"
     QUALIFYING_DETECTED = "qualifying_detected"
     QUALIFYING_LOST = "qualifying_lost"
+    QUALIFYING_EXPIRED = "qualifying_expired"
     PAPER_ELIGIBLE = "paper_eligible"
     PAPER_FILL_ATTEMPTED = "paper_fill_attempted"
     PAPER_FILL_PARTIAL = "paper_fill_partial"
@@ -98,6 +99,7 @@ OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES = frozenset(
         LifecycleEventType.PROMOTED_TO_HOT,
         LifecycleEventType.QUALIFYING_DETECTED,
         LifecycleEventType.QUALIFYING_LOST,
+        LifecycleEventType.QUALIFYING_EXPIRED,
         LifecycleEventType.PAPER_ELIGIBLE,
         LifecycleEventType.PAPER_FILL_COMPLETE,
         LifecycleEventType.CLOSED,
@@ -422,6 +424,7 @@ def qualifying_lifecycle_event_id(
     if event_type not in {
         LifecycleEventType.QUALIFYING_DETECTED,
         LifecycleEventType.QUALIFYING_LOST,
+        LifecycleEventType.QUALIFYING_EXPIRED,
     }:
         raise ValueError("qualifying lifecycle id requires a qualifying episode event")
     if episode <= 0:

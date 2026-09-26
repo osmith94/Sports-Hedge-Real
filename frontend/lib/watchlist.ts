@@ -123,6 +123,7 @@ const ACTIVITY_TITLES: Record<WatchlistLifecycleEventType, string> = {
   promoted_to_hot: "Promoted to HOT",
   qualifying_detected: "Qualifying opportunity",
   qualifying_lost: "Qualifying lost",
+  qualifying_expired: "Radar expired",
   paper_eligible: "Paper eligible",
   paper_fill_attempted: "Paper fill attempted",
   paper_fill_partial: "Partial paper fill",
@@ -141,6 +142,7 @@ export const OPERATOR_ACTIVITY_EVENT_TYPES = [
   "promoted_to_hot",
   "qualifying_detected",
   "qualifying_lost",
+  "qualifying_expired",
   "paper_eligible",
   "trigger_lost_before_fill",
   "paper_fill_complete",
@@ -180,6 +182,7 @@ function activityKind(eventType: WatchlistLifecycleEventType): string {
   if (eventType === "promoted_to_hot") return "PROMOTED_TO_HOT";
   if (eventType === "qualifying_detected") return "QUALIFYING_OPPORTUNITY";
   if (eventType === "qualifying_lost") return "QUALIFYING_LOST";
+  if (eventType === "qualifying_expired") return "QUALIFYING_EXPIRED";
   if (eventType === "paper_eligible") return "PAPER_ELIGIBLE";
   if (eventType === "trigger_lost_before_fill") return "TRIGGER_LOST_BEFORE_FILL";
   if (eventType === "paper_fill_complete") return "TRADE_ENTERED";

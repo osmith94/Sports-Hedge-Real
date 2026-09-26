@@ -676,6 +676,60 @@ class WatchlistService:
         self.repository.append_event(event)
         return event
 
+    def note_qualifying_radar_expiry(
+        self,
+        now: datetime,
+        *,
+        hot_ttl_seconds: int | None = None,
+        universe_ttl_seconds: int | None = None,
+    ) -> list[OpportunityLifecycleEvent]:
+        """Close an open qualifying episode when the existing radar TTL has elapsed.
+
+        Does not change opportunity status, classification, quote-freshness gates,
+        or TTL values. Executable quote age alone stays `radar_current` inside the
+        TTL and does not close the episode. Generic `expired` remains a separate
+        terminal status and is not written here.
+        """
+
+        from sports_hedge.application.scan_lanes import (
+            DEFAULT_HOT_TTL_SECONDS,
+            DEFAULT_UNIVERSE_TTL_SECONDS,
+            FRESHNESS_EXPIRED,
+            freshness_class,
+        )
+
+        evaluated = require_aware_instant(now, "now")
+        hot_ttl = DEFAULT_HOT_TTL_SECONDS if hot_ttl_seconds is None else hot_ttl_seconds
+        universe_ttl = (
+            DEFAULT_UNIVERSE_TTL_SECONDS if universe_ttl_seconds is None else universe_ttl_seconds
+        )
+        emitted: list[OpportunityLifecycleEvent] = []
+        for opportunity in self.repository.list_opportunities():
+            if opportunity.status is not OpportunityStatus.TRIGGERED:
+                continue
+            if opportunity.data_kind == "demo_fixture_replay":
+                continue
+            boundary = self.repository.latest_qualifying_boundary(opportunity.opportunity_id)
+            if boundary is None or boundary[0] is not LifecycleEventType.QUALIFYING_DETECTED:
+                continue
+            lane = _radar_lane_for_pricing(boundary[1])
+            if freshness_class(
+                lane=lane,
+                last_scanned_at=opportunity.last_seen_at,
+                now=evaluated,
+                quote_age_ms=opportunity.quote_age_ms,
+                max_quote_age_ms=self.max_quote_age_ms,
+                hot_ttl_seconds=hot_ttl,
+                universe_ttl_seconds=universe_ttl,
+            ) != FRESHNESS_EXPIRED:
+                continue
+            event = self._append_qualifying_radar_expiry(
+                opportunity, evaluated, pricing_lane=boundary[1]
+            )
+            if event is not None:
+                emitted.append(event)
+        return emitted
+
     def expire(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
     ) -> NearOpportunity:
@@ -1015,7 +1069,9 @@ class WatchlistService:
                         if lost is not None:
                             events.append(lost)
 
-        if _entered_qualifying_episode(previous, current):
+        if _entered_qualifying_episode(previous, current) or self._qualifying_episode_closed_by_radar(
+            previous, current
+        ):
             detected = self._qualifying_episode_event(
                 current,
                 observation,
@@ -1139,6 +1195,65 @@ class WatchlistService:
             )
         return emitted
 
+    def _qualifying_episode_closed_by_radar(
+        self,
+        previous: NearOpportunity | None,
+        current: NearOpportunity,
+    ) -> bool:
+        """True when this repricing follows a radar-TTL close of the same TRIGGERED row.
+
+        Status stays TRIGGERED. The next solver-qualified observation is a new episode.
+        """
+
+        if previous is None or previous.status is not OpportunityStatus.TRIGGERED:
+            return False
+        if current.status is not OpportunityStatus.TRIGGERED:
+            return False
+        boundary = self.repository.latest_qualifying_boundary(current.opportunity_id)
+        return boundary is not None and boundary[0] is LifecycleEventType.QUALIFYING_EXPIRED
+
+    def _append_qualifying_radar_expiry(
+        self,
+        opportunity: NearOpportunity,
+        occurred_at: datetime,
+        *,
+        pricing_lane: str | None,
+    ) -> OpportunityLifecycleEvent | None:
+        detected = self.repository.count_events(
+            opportunity.opportunity_id,
+            LifecycleEventType.QUALIFYING_DETECTED,
+        )
+        if detected <= 0:
+            return None
+        if (
+            self.repository.count_events(
+                opportunity.opportunity_id,
+                LifecycleEventType.QUALIFYING_EXPIRED,
+            )
+            >= detected
+        ):
+            return None
+        venues = [venue.value for venue in opportunity.venues]
+        event = self._event(
+            opportunity,
+            LifecycleEventType.QUALIFYING_EXPIRED,
+            detail="radar expired",
+            event_id=qualifying_lifecycle_event_id(
+                opportunity.opportunity_id,
+                LifecycleEventType.QUALIFYING_EXPIRED,
+                detected,
+            ),
+            gross_edge=opportunity.gross_edge,
+            limiting_depth_gbp=opportunity.limiting_depth_gbp,
+            guaranteed_profit_gbp=opportunity.guaranteed_profit_gbp,
+            quote_age_ms=opportunity.quote_age_ms,
+            pricing_lane=pricing_lane,
+            venue_pair=",".join(venues) if venues else None,
+        )
+        event.occurred_at = occurred_at
+        self.repository.append_event(event)
+        return event
+
     def _qualifying_episode_event(
         self,
         opportunity: NearOpportunity,
@@ -1239,6 +1354,20 @@ def _episode_capture_eligible(
         and previous.capture_eligible
     )
     return sticky or observation.eligible_for_paper_simulation
+
+
+def _radar_lane_for_pricing(pricing_lane: str | None):
+    """Map a stored pricing lane onto the radar TTL lane already used by current state.
+
+    HOT uses the hot radar TTL. BACKGROUND pricing is published on the non-hot
+    radar lane, which uses the universe TTL. Missing lane uses that same non-hot TTL.
+    """
+
+    from sports_hedge.application.scan_lanes import ScanLane
+
+    if (pricing_lane or "").strip().lower() == ScanLane.HOT.value:
+        return ScanLane.HOT
+    return ScanLane.UNIVERSE
 
 
 def _entered_qualifying_episode(

@@ -17,7 +17,7 @@ export function ActivityFeed({
         <div>
           <div className="panel-title">Activity feed</div>
           <div className="panel-meta">
-            PAPER operator timeline · Qualifying opportunity, Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited
+            PAPER operator timeline · Qualifying opportunity, radar expired, Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited
           </div>
         </div>
           <span className={usedFixture ? "demo-chip" : "status-badge"}>

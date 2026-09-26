@@ -576,6 +576,33 @@ class SqliteWatchlistRepository:
             ).fetchone()
             return int(row[0] if row is not None else 0)
 
+    def latest_qualifying_boundary(
+        self, opportunity_id: str
+    ) -> tuple[LifecycleEventType, str | None] | None:
+        """Newest qualifying episode boundary for one opportunity. One indexed read."""
+
+        types = (
+            LifecycleEventType.QUALIFYING_DETECTED.value,
+            LifecycleEventType.QUALIFYING_LOST.value,
+            LifecycleEventType.QUALIFYING_EXPIRED.value,
+        )
+        placeholders = ", ".join("?" for _ in types)
+        with self.exclusive():
+            row = self._connection.execute(
+                f"""
+                SELECT event_type, pricing_lane
+                FROM watchlist_lifecycle_events
+                WHERE opportunity_id = ? AND event_type IN ({placeholders})
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (opportunity_id, *types),
+            ).fetchone()
+            if row is None:
+                return None
+            lane = row[1]
+            return LifecycleEventType(row[0]), None if lane in (None, "") else str(lane)
+
     def upsert_paper_fill_attempt(self, attempt: PaperFillAttempt) -> None:
         with self.exclusive():
             self._connection.execute(

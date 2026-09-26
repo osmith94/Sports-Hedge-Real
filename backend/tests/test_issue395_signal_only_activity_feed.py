@@ -374,6 +374,7 @@ def test_watchlist_activity_api_operator_signal_hides_noise() -> None:
             LifecycleEventType.PROMOTED_TO_HOT,
             LifecycleEventType.QUALIFYING_DETECTED,
             LifecycleEventType.QUALIFYING_LOST,
+            LifecycleEventType.QUALIFYING_EXPIRED,
             LifecycleEventType.PAPER_ELIGIBLE,
             LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
             LifecycleEventType.PAPER_FILL_COMPLETE,

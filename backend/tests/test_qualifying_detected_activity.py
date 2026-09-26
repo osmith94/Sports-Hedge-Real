@@ -15,9 +15,21 @@ from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
 from sports_hedge.api.paper import _persist_decision
-from sports_hedge.api.watchlist import get_watchlist_service
+from sports_hedge.api.watchlist import get_watchlist_service, tracked_markets
+from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
+from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
+from sports_hedge.application.scan_lanes import (
+    DEFAULT_HOT_TTL_SECONDS,
+    DEFAULT_UNIVERSE_TTL_SECONDS,
+    FRESHNESS_RADAR_CURRENT,
+    ScanLane,
+    freshness_class,
+)
+from sports_hedge.matching.markets import MarketMatchResult
+from sports_hedge.paper.models import PaperScanDecision
 from sports_hedge.arbitrage.watchlist.economics import classify_status
 from sports_hedge.arbitrage.watchlist.models import (
+    OPERATOR_ACTIVITY_EVENT_TYPES,
     LifecycleEventType,
     OpportunityStatus,
     qualifying_lifecycle_event_id,
@@ -301,3 +313,173 @@ def test_qualifying_is_emitted_from_watchlist_observe_before_capture() -> None:
     capture_at = source.index("persist_triggered_chain")
     assert observe_at < capture_at
     assert "pricing_lane=pricing_lane" in source
+
+
+def test_radar_ttl_expiry_closes_qualifying_episode_without_a_new_observation() -> None:
+    """Radar TTL drop is an expiry close, not an economic qualifying_lost.
+
+    Quote age inside the radar TTL stays radar_current and does not close the
+    episode. One qualifying_expired is written per open episode. Status stays
+    TRIGGERED so a later solver-qualified observation can open a new episode.
+    """
+
+    service = WatchlistService(SqliteWatchlistRepository())
+    watched = service.observe(_qualified(pricing_lane="hot", quote_age_ms=50_000))
+    opportunity_id = watched.opportunity_id
+    assert opportunity_id == "watch:mkt-mkd"
+    assert watched.status is OpportunityStatus.TRIGGERED
+    detected = _qualifying_events(service, opportunity_id)
+    assert len(detected) == 1
+    original = detected[0]
+
+    inside_ttl = OBSERVED + timedelta(seconds=10)
+    assert (
+        freshness_class(
+            lane=ScanLane.HOT,
+            last_scanned_at=watched.last_seen_at,
+            now=inside_ttl,
+            quote_age_ms=50_000,
+            max_quote_age_ms=service.max_quote_age_ms,
+        )
+        == FRESHNESS_RADAR_CURRENT
+    )
+    assert (
+        service.note_qualifying_radar_expiry(
+            inside_ttl,
+            hot_ttl_seconds=DEFAULT_HOT_TTL_SECONDS,
+            universe_ttl_seconds=DEFAULT_UNIVERSE_TTL_SECONDS,
+        )
+        == []
+    )
+
+    store = FixtureCurrentStateStore()
+    kickoff = OBSERVED + timedelta(minutes=30)
+    fixture = DiscoveredFixture(
+        source_event_id="src-mkd",
+        canonical_event_id="evt-mkd-sui",
+        home_team="North Macedonia",
+        away_team="Switzerland",
+        competition="World Cup Qualifying",
+        kickoff_utc=kickoff,
+        last_seen_at=OBSERVED,
+        market_evaluation_state="evaluated",
+    )
+    report = CollectionReport(
+        started_at=OBSERVED,
+        completed_at=OBSERVED,
+        discovered_fixtures=[fixture],
+        paper_decisions=[
+            PaperScanDecision(
+                canonical_event_id="evt-mkd-sui",
+                canonical_market_id="mkt-mkd",
+                fixture_canonical_event_id="evt-mkd-sui",
+                market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=[]),
+                scanned_at=OBSERVED,
+                eligible_for_paper_simulation=False,
+            )
+        ],
+        scan_lane=ScanLane.HOT.value,
+    )
+    store.upsert_from_report(report, scan_lane=ScanLane.HOT, now=OBSERVED)
+    assert opportunity_id in store.current_tracked_opportunity_ids(inside_ttl)
+    expired_at = OBSERVED + timedelta(seconds=DEFAULT_HOT_TTL_SECONDS)
+    assert opportunity_id not in store.current_tracked_opportunity_ids(expired_at)
+    persisted = service.repository.get(opportunity_id)
+    assert persisted is not None
+    assert persisted.status is OpportunityStatus.TRIGGERED
+    assert (
+        service.repository.count_events(opportunity_id, LifecycleEventType.QUALIFYING_EXPIRED) == 0
+    )
+
+    closed = service.note_qualifying_radar_expiry(
+        expired_at,
+        hot_ttl_seconds=DEFAULT_HOT_TTL_SECONDS,
+        universe_ttl_seconds=DEFAULT_UNIVERSE_TTL_SECONDS,
+    )
+    assert len(closed) == 1
+    expiry = closed[0]
+    assert expiry.event_type is LifecycleEventType.QUALIFYING_EXPIRED
+    assert expiry.detail == "radar expired"
+    assert expiry.status is OpportunityStatus.TRIGGERED
+    assert expiry.pricing_lane == "hot"
+    assert expiry.gross_edge == GROSS
+    assert expiry.event_id == qualifying_lifecycle_event_id(
+        opportunity_id,
+        LifecycleEventType.QUALIFYING_EXPIRED,
+        1,
+    )
+    assert service.repository.get(opportunity_id).status is OpportunityStatus.TRIGGERED
+    assert [item.event_type for item in service.operator_activity(opportunity_id=opportunity_id)] == [
+        LifecycleEventType.QUALIFYING_EXPIRED,
+        LifecycleEventType.QUALIFYING_DETECTED,
+    ]
+    assert (
+        service.note_qualifying_radar_expiry(
+            expired_at,
+            hot_ttl_seconds=DEFAULT_HOT_TTL_SECONDS,
+            universe_ttl_seconds=DEFAULT_UNIVERSE_TTL_SECONDS,
+        )
+        == []
+    )
+    still = _qualifying_events(service, opportunity_id)
+    assert len(still) == 1
+    assert still[0].event_id == original.event_id
+    assert still[0].gross_edge == original.gross_edge == GROSS
+    assert still[0].limiting_depth_gbp == EXECUTABLE
+    assert still[0].guaranteed_profit_gbp == GUARANTEED
+
+    requalified_at = expired_at + timedelta(seconds=5)
+    service.observe(
+        _qualified(pricing_lane="hot", quote_age_ms=800, observed_at=requalified_at)
+    )
+    detected_again = _qualifying_events(service, opportunity_id)
+    assert len(detected_again) == 2
+    assert detected_again[0].event_id == qualifying_lifecycle_event_id(
+        opportunity_id,
+        LifecycleEventType.QUALIFYING_DETECTED,
+        2,
+    )
+    assert (
+        service.note_qualifying_radar_expiry(
+            expired_at,
+            hot_ttl_seconds=DEFAULT_HOT_TTL_SECONDS,
+            universe_ttl_seconds=DEFAULT_UNIVERSE_TTL_SECONDS,
+        )
+        == []
+    )
+    assert (
+        service.repository.count_events(opportunity_id, LifecycleEventType.QUALIFYING_EXPIRED) == 1
+    )
+    second_expiry = requalified_at + timedelta(seconds=DEFAULT_HOT_TTL_SECONDS)
+    again = service.note_qualifying_radar_expiry(
+        second_expiry,
+        hot_ttl_seconds=DEFAULT_HOT_TTL_SECONDS,
+        universe_ttl_seconds=DEFAULT_UNIVERSE_TTL_SECONDS,
+    )
+    assert len(again) == 1
+    assert again[0].event_id == qualifying_lifecycle_event_id(
+        opportunity_id,
+        LifecycleEventType.QUALIFYING_EXPIRED,
+        2,
+    )
+    assert (
+        service.note_qualifying_radar_expiry(
+            second_expiry,
+            hot_ttl_seconds=DEFAULT_HOT_TTL_SECONDS,
+            universe_ttl_seconds=DEFAULT_UNIVERSE_TTL_SECONDS,
+        )
+        == []
+    )
+    assert "note_qualifying_radar_expiry" in inspect.getsource(tracked_markets)
+
+
+def test_generic_expired_stays_hidden_unless_it_closes_a_qualifying_episode() -> None:
+    service = WatchlistService(SqliteWatchlistRepository())
+    watched = service.observe(_qualified(solver_is_arbitrage=False, market_id="mkt-plain"))
+    assert watched.status is not OpportunityStatus.TRIGGERED
+    service.expire(watched.opportunity_id, occurred_at=OBSERVED, detail="watchlist expired")
+    types = [event.event_type for event in service.activity(opportunity_id=watched.opportunity_id)]
+    assert LifecycleEventType.EXPIRED in types
+    assert LifecycleEventType.QUALIFYING_EXPIRED not in types
+    assert service.operator_activity(opportunity_id=watched.opportunity_id) == []
+    assert LifecycleEventType.EXPIRED not in OPERATOR_ACTIVITY_EVENT_TYPES
