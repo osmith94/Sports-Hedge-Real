@@ -56,6 +56,8 @@ def test_registry_is_one_version_with_mlb_atp_and_wta() -> None:
     for code in ("mlb", "atp", "wta"):
         assert catalog[code]["selectable"] is True
         assert catalog[code]["default_selected"] is False
+    assert catalog["mlb"]["paper_executable"] is True
+    for code in ("atp", "wta"):
         assert catalog[code]["paper_executable"] is False
     assert catalog["atp"]["selector_label"] == "ATP (Hangzhou, Chengdu)"
     assert catalog["wta"]["selector_label"] == "WTA (Singapore, Seoul)"
