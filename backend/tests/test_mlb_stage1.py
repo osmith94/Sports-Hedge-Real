@@ -1,10 +1,11 @@
-"""MLB Stage 1: identity and discovery, with settlement fail-closed."""
+"""MLB Stage 1: identity, structural PAPER keys, and unchanged safety gates."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +18,9 @@ from sports_hedge.application.catalogue_maintenance import family_key_from_kalsh
 from sports_hedge.application.collector import (
     DEFAULT_PROVIDER_CONCURRENCY,
     matchbook_scope_discovery_params,
+    universe_catalogue_pairs,
 )
+from sports_hedge.application.complete_set import scan_eligible_pair
 from sports_hedge.application.fixture_clusters import (
     VenueEvent,
     _compatible_index_pair,
@@ -38,12 +41,15 @@ from sports_hedge.application.target_competitions import (
     scope_matchbook_event,
     scope_polymarket_event,
 )
+from sports_hedge.catalogue.admission import catalogue_allows_live_execution
 from sports_hedge.catalogue.classify import classify_pair
 from sports_hedge.catalogue.states import CatalogueApprovalState
+from sports_hedge.config import Settings
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.approved_register import registered_canonical_key
 from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.mlb.constants import (
     CANONICAL_MLB_GAME_WINNER,
     CANONICAL_MLB_TOTAL_RUNS,
@@ -176,6 +182,61 @@ def _moneyline_markets():
     return kalshi_market, pm_market, mb_market
 
 
+def _total_market(venue: str, line: str):
+    _unused, polymarket, matchbook = _moneyline_markets()
+    if venue == "kalshi":
+        payload = _kalshi_game(f"KXMLBTOTAL-26SEP241235STLPIT-{line}", KICKOFF)
+        payload["series_ticker"] = "KXMLBTOTAL"
+        payload["event_ticker"] = "KXMLBTOTAL-26SEP241235STLPIT"
+        event = kalshi_mlb_event(payload)
+        return kalshi_mlb_markets(
+            event,
+            [
+                {
+                    "ticker": f"KXMLBTOTAL-26SEP241235STLPIT-{line}",
+                    "title": f"Over {line} runs scored",
+                    "floor_strike": line,
+                }
+            ],
+            event_payload=payload,
+        )[0]
+    if venue == "polymarket":
+        return polymarket_mlb_market(
+            polymarket.event,
+            {
+                "id": f"pm-total-{line}",
+                "sportsMarketType": "totals",
+                "question": f"Total runs {line}",
+                "line": line,
+                "outcomes": ["Over", "Under"],
+                "clobTokenIds": [f"token-over-{line}", f"token-under-{line}"],
+            },
+        )
+    return matchbook_mlb_market(
+        matchbook.event,
+        {
+            "id": f"mb-total-{line}",
+            "name": "Total",
+            "market-type": "total",
+            "handicap": line,
+            "runners": [
+                {"id": f"over-{line}", "name": f"Over {line}"},
+                {"id": f"under-{line}", "name": f"Under {line}"},
+            ],
+        },
+    )
+
+
+def _catalogue_pair(left, right, match):
+    return (
+        left.source_venue,
+        right.source_venue,
+        SimpleNamespace(canonical=left),
+        SimpleNamespace(canonical=right),
+        match,
+    )
+
+
 def test_three_venues_cluster_on_curated_aliases() -> None:
     kalshi, polymarket, matchbook = _moneyline_markets()
     assert kalshi.event.home_team == polymarket.event.home_team == matchbook.event.home_team == PIT
@@ -192,8 +253,12 @@ def test_three_venues_cluster_on_curated_aliases() -> None:
 
 
 def test_doubleheader_game_keys_never_cross_cluster() -> None:
-    first = kalshi_mlb_event(_kalshi_game("KXMLBGAME-26SEP241235STLPIT", KICKOFF, title_suffix="Game 1"))
-    second = kalshi_mlb_event(_kalshi_game("KXMLBGAME-26SEP241910STLPIT", GAME2, title_suffix="Game 2"))
+    first = kalshi_mlb_event(
+        _kalshi_game("KXMLBGAME-26SEP241235STLPIT", KICKOFF, title_suffix="Game 1")
+    )
+    second = kalshi_mlb_event(
+        _kalshi_game("KXMLBGAME-26SEP241910STLPIT", GAME2, title_suffix="Game 2")
+    )
     close = kalshi_mlb_event(
         _kalshi_game("KXMLBGAME-26SEP241238STLPIT", "2026-09-24T16:38:00Z", title_suffix="Game 2")
     )
@@ -208,8 +273,12 @@ def test_doubleheader_game_keys_never_cross_cluster() -> None:
     assert matcher.match(missing, first).reasons == ["mlb_game_identity_ambiguous"]
     assert same_hot_scheduling_unit(first, close) is False
     assert same_hot_scheduling_unit(first, first.model_copy()) is True
-    left = _index_record(0, VenueEvent(venue=VenueName.KALSHI, raw={}, canonical=first, source_event_id="g1"))
-    right = _index_record(1, VenueEvent(venue=VenueName.POLYMARKET, raw={}, canonical=second, source_event_id="g2"))
+    left = _index_record(
+        0, VenueEvent(venue=VenueName.KALSHI, raw={}, canonical=first, source_event_id="g1")
+    )
+    right = _index_record(
+        1, VenueEvent(venue=VenueName.POLYMARKET, raw={}, canonical=second, source_event_id="g2")
+    )
     assert _compatible_index_pair(left, right, window_seconds=60 * 60 * 12) is False
 
 
@@ -245,42 +314,54 @@ def test_non_mlb_baseball_fails_scope_closed() -> None:
     with pytest.raises(VenueNormalizationError):
         polymarket_mlb_event(
             {
-                **_polymarket_event("props", KICKOFF, slug="mlb-player-props-2026-09-24", title="player props"),
+                **_polymarket_event(
+                    "props", KICKOFF, slug="mlb-player-props-2026-09-24", title="player props"
+                ),
             }
         )
 
 
-def test_only_stage1_families_are_structural_and_none_are_executable() -> None:
+def test_structural_game_winner_and_half_run_totals_are_paper_keys() -> None:
     kalshi, polymarket, matchbook = _moneyline_markets()
     for market in (kalshi, polymarket, matchbook):
         assert market.family is MarketFamily.GAME_WINNER
-    assert registered_canonical_key(kalshi, polymarket) is None
-    assert registered_canonical_key(kalshi, matchbook) is None
-    assert registered_canonical_key(polymarket, matchbook) is None
+    assert registered_canonical_key(kalshi, polymarket) == CANONICAL_MLB_GAME_WINNER
+    assert registered_canonical_key(kalshi, matchbook) == CANONICAL_MLB_GAME_WINNER
+    assert registered_canonical_key(polymarket, matchbook) == CANONICAL_MLB_GAME_WINNER
     assessment = classify_pair(kalshi, polymarket)
-    assert assessment.state is CatalogueApprovalState.UNSUPPORTED
-    assert assessment.reason == MLB_SETTLEMENT_NOT_EXECUTABLE
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.execution_eligible is False
-    total_payload = _kalshi_game("KXMLBTOTAL-26SEP241235STLPIT", KICKOFF)
-    total_payload["series_ticker"] = "KXMLBTOTAL"
-    total_event = kalshi_mlb_event(total_payload)
-    over = kalshi_mlb_markets(
-        total_event,
-        [{"ticker": "KXMLBTOTAL-26SEP241235STLPIT-7", "title": "Over 7.5 runs scored", "floor_strike": "7.5"}],
-    )[0]
-    other = kalshi_mlb_markets(
-        total_event,
-        [{"ticker": "KXMLBTOTAL-26SEP241235STLPIT-8", "title": "Over 8.5 runs scored", "floor_strike": "8.5"}],
-    )[0]
-    assert over.family is MarketFamily.TOTAL_RUNS
-    assert registered_canonical_key(over, other) is None
-    line_assessment = classify_pair(over, other)
+    assert catalogue_allows_live_execution(kalshi, polymarket) is False
+    assert Settings().sports_hedge_execution_enabled is False
+
+    same_line_kalshi = _total_market("kalshi", "7.5")
+    same_line_polymarket = _total_market("polymarket", "7.5")
+    same_line_matchbook = _total_market("matchbook", "7.5")
+    assert same_line_kalshi.family is MarketFamily.TOTAL_RUNS
+    assert (
+        registered_canonical_key(same_line_kalshi, same_line_polymarket)
+        == f"{CANONICAL_MLB_TOTAL_RUNS}:7.5"
+    )
+    assert (
+        registered_canonical_key(same_line_polymarket, same_line_matchbook)
+        == f"{CANONICAL_MLB_TOTAL_RUNS}:7.5"
+    )
+
+    other_line = _total_market("polymarket", "8.5")
+    assert registered_canonical_key(same_line_kalshi, other_line) is None
+    line_assessment = classify_pair(same_line_kalshi, other_line)
     assert line_assessment.reason == MLB_LINE_MISMATCH_REASON
-    with pytest.raises(VenueNormalizationError):
-        kalshi_mlb_markets(
-            total_event,
-            [{"ticker": "KXMLBTOTAL-26SEP241235STLPIT-7", "title": "Over 7 runs scored", "floor_strike": "7"}],
+    assert (
+        scan_eligible_pair(
+            same_line_kalshi, other_line, MarketMatcher().match(same_line_kalshi, other_line)
         )
+        is False
+    )
+
+    whole = same_line_kalshi.model_copy(update={"line": Decimal(7)})
+    assert registered_canonical_key(whole, same_line_polymarket) is None
+    with pytest.raises(VenueNormalizationError):
+        _total_market("kalshi", "7")
     with pytest.raises(VenueNormalizationError):
         polymarket_mlb_market(
             polymarket.event,
@@ -292,6 +373,13 @@ def test_only_stage1_families_are_structural_and_none_are_executable() -> None:
                 "clobTokenIds": ["token-a", "token-b"],
             },
         )
+    spread = kalshi.model_copy(update={"family": MarketFamily.POINT_SPREAD, "line": Decimal("1.5")})
+    spread_other = polymarket.model_copy(
+        update={"family": MarketFamily.POINT_SPREAD, "line": Decimal("1.5")}
+    )
+    assert registered_canonical_key(spread, spread_other) is None
+    props = kalshi.model_copy(update={"family": MarketFamily.PLAYER_PROPS})
+    assert registered_canonical_key(props, polymarket) is None
     with pytest.raises(VenueNormalizationError):
         polymarket_mlb_market(
             polymarket.event,
@@ -305,9 +393,58 @@ def test_only_stage1_families_are_structural_and_none_are_executable() -> None:
         )
 
 
+def test_valid_mlb_pair_is_catalogued_and_doubleheaders_stay_rejected() -> None:
+    kalshi, polymarket, _matchbook = _moneyline_markets()
+    matched = MarketMatcher().match(kalshi, polymarket)
+    assert matched.matched is True
+    assert scan_eligible_pair(kalshi, polymarket, matched) is True
+    pair = _catalogue_pair(kalshi, polymarket, matched)
+    assert universe_catalogue_pairs([pair]) == [pair]
+
+    first = kalshi_mlb_event(
+        _kalshi_game("KXMLBGAME-26SEP241235STLPIT", KICKOFF, title_suffix="Game 1")
+    )
+    game1 = kalshi_mlb_markets(
+        first,
+        [
+            {"ticker": "KXMLBGAME-26SEP241235STLPIT-PIT", "yes_sub_title": "Pittsburgh wins"},
+            {"ticker": "KXMLBGAME-26SEP241235STLPIT-STL", "yes_sub_title": "St. Louis wins"},
+        ],
+    )[0]
+    game2_event = polymarket_mlb_event(
+        _polymarket_event(
+            "pm-game2",
+            GAME2,
+            slug="mlb-stl-pit-2026-09-24-game-2",
+            title="Cardinals vs Pirates Game 2",
+        )
+    )
+    game2 = polymarket_mlb_market(
+        game2_event,
+        {
+            "id": "pm-game2-ml",
+            "sportsMarketType": "moneyline",
+            "question": "Cardinals vs Pirates Game 2",
+            "outcomes": ["Cardinals", "Pirates"],
+            "clobTokenIds": ["token-stl-g2", "token-pit-g2"],
+        },
+    )
+    doubleheader = MarketMatcher().match(game1, game2)
+    assert doubleheader.matched is False
+    assert "mlb_doubleheader_or_start_mismatch" in doubleheader.reasons
+    assert scan_eligible_pair(game1, game2, doubleheader) is False
+    assert universe_catalogue_pairs([_catalogue_pair(game1, game2, doubleheader)]) == []
+
+
 def test_kalshi_prefixes_do_not_admit_neighbours_or_soccer_suffixes() -> None:
-    assert resolve_target_competition_from_kalshi_ticker("KXMLBGAME-26SEP241235STLPIT").code is TargetCompetitionCode.MLB
-    assert resolve_target_competition_from_kalshi_ticker("KXMLBTOTAL-26SEP241235STLPIT-7").code is TargetCompetitionCode.MLB
+    assert (
+        resolve_target_competition_from_kalshi_ticker("KXMLBGAME-26SEP241235STLPIT").code
+        is TargetCompetitionCode.MLB
+    )
+    assert (
+        resolve_target_competition_from_kalshi_ticker("KXMLBTOTAL-26SEP241235STLPIT-7").code
+        is TargetCompetitionCode.MLB
+    )
     for ticker in (
         "KXMLBSPREAD-26SEP241235STLPIT",
         "KXMLBF5-26SEP241235STLPIT",
@@ -319,21 +456,26 @@ def test_kalshi_prefixes_do_not_admit_neighbours_or_soccer_suffixes() -> None:
     ):
         resolved = resolve_target_competition_from_kalshi_ticker(ticker)
         assert resolved is None or resolved.code is not TargetCompetitionCode.MLB
-        assert scope_kalshi_event({"series_ticker": ticker, "title": "MLB"}, selected_codes=["mlb"]).allowed is False
+        assert (
+            scope_kalshi_event(
+                {"series_ticker": ticker, "title": "MLB"}, selected_codes=["mlb"]
+            ).allowed
+            is False
+        )
     assert family_key_from_kalshi_series("KXMLBGAME-26SEP241235STLPIT") == CANONICAL_MLB_GAME_WINNER
     assert family_key_from_kalshi_series("KXMLBTOTAL-26SEP241235STLPIT") == CANONICAL_MLB_TOTAL_RUNS
     assert family_key_from_kalshi_series("KXMLBSPREAD-26SEP241235STLPIT") is None
     assert family_key_from_kalshi_series("KXEPLTOTAL-26SEP24") == "TOTAL_GOALS_FT"
 
 
-def test_mlb_is_selectable_not_default_and_not_paper_executable() -> None:
+def test_mlb_is_selectable_not_default_and_paper_executable() -> None:
     catalog = {row["code"]: row for row in operator_competition_catalog()}
     assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT == 37
     assert OPERATOR_COMPETITION_REGISTRY_VERSION == 9
     row = catalog["mlb"]
     assert row["selectable"] is True
     assert row["default_selected"] is False
-    assert row["paper_executable"] is False
+    assert row["paper_executable"] is True
     assert row["group_id"] == "mlb"
     assert TargetCompetitionCode.MLB not in DEFAULT_OPERATOR_COMPETITION_CODES
     assert polymarket_series_ids_for_codes(["mlb"]) == ["3"]
@@ -373,14 +515,14 @@ def test_ambiguous_and_historical_team_labels_fail_closed() -> None:
     assert scheduling_team_key("Cardinals") != STL
 
 
-def test_universe_does_not_price_books_and_background_uses_exact_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_universe_does_not_price_books_and_background_uses_exact_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import sports_hedge.application.catalogue_maintenance as maintenance
 
     source = inspect.getsource(maintenance)
     assert "get_order_book" not in source
     assert "list_events" not in source
-    kalshi, _polymarket, _matchbook = _moneyline_markets()
-    assert registered_canonical_key(kalshi, kalshi) is None
 
     class KalshiBooks:
         def __init__(self) -> None:

@@ -1,4 +1,9 @@
-"""MLB settlement evidence gate. Incomplete or conflicting rules stay non-executable."""
+"""MLB fail-closed labels for pairs the structural register does not admit.
+
+Owner-approved PAPER comparison of GAME_WINNER and exact x.5 TOTAL_RUNS is the
+register gate. This module still names family, line, and unsupported-shape
+rejections. It does not add a second settlement model.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +22,9 @@ from sports_hedge.mlb.detect import is_mlb_canonical_event, is_mlb_market_family
 # Kalshi BASEBALLGAMEWIN.pdf includes extra innings and a 48-hour fair-price
 # postpone/cancel path. Polymarket moneyline/total text leaves extra innings
 # unstated, keeps postponements open until completion, and uses 50-50 on cancel.
-# Matchbook market payloads have no settlement text. No pair is executable.
+# Matchbook market payloads have no settlement text. PAPER comparison of a
+# structurally registered pair is an owner decision in the register, not a
+# claim that these census texts are independently proven.
 MLB_SETTLEMENT_EVIDENCE_REASON = MLB_SETTLEMENT_NOT_EXECUTABLE
 
 
@@ -39,15 +46,13 @@ def mlb_structural_settlement(*, family: MarketFamily, line=None) -> SettlementF
 
 
 def mlb_market_settlement_executable(market: CanonicalMarket) -> bool:
-    """No MLB family is executable until cross-venue rules are proven equivalent."""
+    """Single-market settlement proof. PAPER admission is the register, not this flag."""
 
     del market
     return False
 
 
-def mlb_pair_non_executable_reason(
-    left: CanonicalMarket, right: CanonicalMarket
-) -> str | None:
+def mlb_pair_non_executable_reason(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     if not is_mlb_canonical_event(left.event) and not is_mlb_canonical_event(right.event):
         return None
     if not is_mlb_market_family(left.family) or not is_mlb_market_family(right.family):

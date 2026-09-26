@@ -1508,7 +1508,6 @@ def operator_competition_catalog() -> list[dict[str, Any]]:
                 "paper_executable": selectable
                 and item.code
                 not in {
-                    TargetCompetitionCode.MLB,
                     TargetCompetitionCode.ATP,
                     TargetCompetitionCode.WTA,
                 },
