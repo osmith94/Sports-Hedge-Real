@@ -387,6 +387,28 @@ describe("dual cadence operator copy", () => {
       },
     });
     assert.doesNotMatch(fastScanCopy(failed).detail, /waiting for startup universe/);
+    const priced = status({
+      startup_pricing_ready: true,
+      startup_phase: "RUNNING",
+      background: {
+        cadence_seconds: 10,
+        last_plan_reason: "background_due",
+        worker_state: "waiting",
+        cycle_in_progress: false,
+        evaluated_count: 38,
+      },
+      price_engine: {
+        background: {
+          evaluated: 38,
+          working_set: 155,
+        },
+      },
+    });
+    assert.doesNotMatch(backgroundPriceCopy(priced).detail, /waiting for startup universe/);
+    assert.match(backgroundPriceCopy(priced).detail, /155 ACTIVE/);
+    assert.match(backgroundPriceCopy(priced).detail, /38 evaluated/);
+    assert.doesNotMatch(backgroundPriceCopy(priced).detail, /in progress/);
+    assert.doesNotMatch(dualScanStatusLines(priced).join("\n"), /waiting for startup universe/);
   });
 
   it("says Paused for UNIVERSE instead of a ticking next-due countdown", () => {

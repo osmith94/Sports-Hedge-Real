@@ -424,16 +424,67 @@ def get_paper_journal_holder() -> PaperOperationsService:
     )
 
 
+def _unresolved_depends(value: Any) -> bool:
+    """True when a FastAPI Depends marker was passed in as a real service."""
+
+    from fastapi.params import Depends as DependsMarker
+
+    if isinstance(value, DependsMarker):
+        return True
+    repository = getattr(value, "repository", None)
+    return isinstance(repository, DependsMarker)
+
+
 def get_paper_operations_service(
     watchlist: WatchlistService = Depends(get_watchlist_service),
     alerts: PriorityAlertService = Depends(get_priority_alert_service),
 ) -> PaperOperationsService:
     holder = get_paper_journal_holder()
+    if _unresolved_depends(watchlist) or _unresolved_depends(alerts):
+        # FastAPI resolves these defaults only inside a request. A direct call
+        # would replace the process-cached watchlist with a Depends marker.
+        raise TypeError(
+            "get_paper_operations_service received an unresolved FastAPI Depends "
+            "marker; server-owned code must use server_owned_paper_operations()"
+        )
     holder.watchlist = watchlist
     holder.alerts = alerts
     # Process-cached holder must not disagree with /health and live-refresh.
     holder.settings = get_settings()
     return holder
+
+
+def server_owned_paper_operations() -> PaperOperationsService:
+    """Process-owned paper chain for heartbeats and scheduler workers.
+
+    Request injection may call ``get_paper_operations_service`` because FastAPI
+    resolves its Depends defaults first. Calling that factory with no request
+    does not. When the live factory still declares Depends defaults, return the
+    journal holder instead of invoking it. Tests that replace the factory with
+    a concrete callable (no Depends defaults) still receive that callable.
+
+    Settings are refreshed on the holder so a cleared settings cache cannot
+    leave paper operations on the object captured at first construction.
+    Watchlist, alerts, ledger, and catalogue are left as the holder built them.
+    """
+
+    import inspect
+
+    from fastapi.params import Depends as DependsMarker
+
+    factory = get_paper_operations_service
+    try:
+        defaults = [
+            parameter.default
+            for parameter in inspect.signature(factory).parameters.values()
+        ]
+    except (TypeError, ValueError):
+        defaults = []
+    if any(isinstance(default, DependsMarker) for default in defaults):
+        holder = get_paper_journal_holder()
+        holder.settings = get_settings()
+        return holder
+    return factory()
 
 
 @lru_cache

@@ -1505,23 +1505,9 @@ class LiveRefreshCoordinator:
         return frozenset(ids)
 
     def _server_owned_paper_operations(self):
-        import inspect
+        from sports_hedge.api.paper import server_owned_paper_operations
 
-        from fastapi.params import Depends as DependsMarker
-
-        from sports_hedge.api import paper as paper_api
-
-        factory = paper_api.get_paper_operations_service
-        try:
-            defaults = [
-                parameter.default
-                for parameter in inspect.signature(factory).parameters.values()
-            ]
-        except (TypeError, ValueError):
-            defaults = []
-        if any(isinstance(default, DependsMarker) for default in defaults):
-            return paper_api.get_paper_journal_holder()
-        return factory()
+        return server_owned_paper_operations()
 
     def _reconstruct_price_engine_for_scope(self) -> None:
         engine = self._price_engine
@@ -2603,6 +2589,22 @@ class LiveRefreshCoordinator:
                 else self._effective_background_reprice_after_seconds()
             ),
         }
+        current_lane = (
+            self.status.background
+            if priority is PriceEnginePriority.BACKGROUND
+            else self.status.hot
+        )
+        if (
+            current_lane.last_plan_reason == STARTUP_UNIVERSE_PENDING
+            and not self._startup_pricing_gated_unlocked()
+        ):
+            # A real slice has started after the barrier opened. Do not keep
+            # publishing the startup wait reason over current engine truth.
+            lane_update["last_plan_reason"] = (
+                "background_due"
+                if priority is PriceEnginePriority.BACKGROUND
+                else "hot_due"
+            )
         if priority is PriceEnginePriority.BACKGROUND:
             lane_update["next_due_at"] = self._next_background_due
             lane_update["operator_summary"] = _background_operator_summary(
@@ -5606,9 +5608,7 @@ class LiveRefreshCoordinator:
                 or dict(self.status.background.operation_health),
                 "venue_health": dict(engine_status.background.venue_health)
                 or dict(self.status.background.venue_health),
-                "worker_state": WORKER_RUNNING
-                if self._background_in_progress
-                else self.status.background.worker_state,
+                "worker_state": self._background_public_worker_state_unlocked(),
             }
             if self._startup_pricing_gated_unlocked() and not self._operator_scanner_stopped:
                 hot_update.update(self._apply_gated_pricing_lane_unlocked("hot"))
@@ -5715,13 +5715,7 @@ class LiveRefreshCoordinator:
 
     def _recent_active_trade_timeline(self) -> list[ActiveTradeTimelineItem]:
         try:
-            from sports_hedge.api.paper import get_paper_operations_service
-            from sports_hedge.api.priority_alerts import get_priority_alert_service
-            from sports_hedge.api.watchlist import get_watchlist_service
-
-            operations = get_paper_operations_service(
-                get_watchlist_service(), get_priority_alert_service()
-            )
+            operations = self._server_owned_paper_operations()
             return operations.recent_active_trade_timeline(limit=12)
         except Exception:
             return list(self.status.active_trade_timeline)
@@ -5960,6 +5954,79 @@ class LiveRefreshCoordinator:
             )
             self._apply_universe_honesty_unlocked()
 
+    def _background_public_worker_state_unlocked(self) -> str:
+        """Public BACKGROUND worker state.
+
+        ``running`` means a pricing slice is in progress. The worker task
+        being alive between slices is ``waiting``.
+        """
+
+        if self._background_in_progress:
+            return WORKER_RUNNING
+        if self.status.background.worker_state == WORKER_RUNNING:
+            return WORKER_WAITING
+        return self.status.background.worker_state
+
+    def _mark_background_slice_started_unlocked(self, reason: str) -> None:
+        """Publish the plan that is actually running.
+
+        The startup barrier reason must not survive a genuine BACKGROUND slice.
+        """
+
+        self._background_in_progress = True
+        background = self.status.background
+        diagnostics = background.last_diagnostics or {}
+        self.status = self.status.model_copy(
+            update={
+                "background": background.model_copy(
+                    update={
+                        "last_heartbeat_at": self.now(),
+                        "last_plan_reason": reason,
+                        "worker_state": WORKER_RUNNING,
+                        "cycle_in_progress": True,
+                        "operator_summary": _background_operator_summary(
+                            next_due=self._next_background_due,
+                            working_set=int(diagnostics.get("working_set") or 0),
+                            evaluated=int(background.evaluated_count or 0),
+                            leftover=int(
+                                diagnostics.get("not_started_this_cadence")
+                                or background.not_evaluated_count
+                                or 0
+                            ),
+                            in_progress=True,
+                        ),
+                    }
+                )
+            }
+        )
+
+    def _mark_background_slice_finished_unlocked(self) -> None:
+        """A finished slice is not an active pricing call."""
+
+        self._background_in_progress = False
+        background = self.status.background
+        update: dict[str, Any] = {"cycle_in_progress": False}
+        if background.worker_state == WORKER_RUNNING:
+            update["worker_state"] = WORKER_WAITING
+        if background.last_plan_reason not in {"background_paused", "operator_stopped"}:
+            summary = background.operator_summary or ""
+            if "in progress" in summary or background.worker_state == WORKER_RUNNING:
+                diagnostics = background.last_diagnostics or {}
+                update["operator_summary"] = _background_operator_summary(
+                    next_due=self._next_background_due,
+                    working_set=int(diagnostics.get("working_set") or 0),
+                    evaluated=int(background.evaluated_count or 0),
+                    leftover=int(
+                        diagnostics.get("not_started_this_cadence")
+                        or background.not_evaluated_count
+                        or 0
+                    ),
+                    in_progress=False,
+                )
+        self.status = self.status.model_copy(
+            update={"background": background.model_copy(update=update)}
+        )
+
     async def _background_loop(self, tick) -> None:
         while not self._stop.is_set():
             if self._operator_scanner_stopped:
@@ -6032,7 +6099,7 @@ class LiveRefreshCoordinator:
                         )
             if plan.lane == "background":
                 with self._state_lock:
-                    self._background_in_progress = True
+                    self._mark_background_slice_started_unlocked(plan.reason)
                 try:
                     await self._invoke_tick(tick, plan)
                 except asyncio.CancelledError:
@@ -6048,7 +6115,7 @@ class LiveRefreshCoordinator:
                             )
                 finally:
                     with self._state_lock:
-                        self._background_in_progress = False
+                        self._mark_background_slice_finished_unlocked()
             delay = min(self._seconds_until_background(), 30.0)
             await self._sleep_interruptible(delay)
 
@@ -6161,13 +6228,7 @@ class LiveRefreshCoordinator:
         """Persisted open-trade GBP lock. Read-only; never a venue call."""
 
         try:
-            from sports_hedge.api.paper import get_paper_operations_service
-            from sports_hedge.api.priority_alerts import get_priority_alert_service
-            from sports_hedge.api.watchlist import get_watchlist_service
-
-            operations = get_paper_operations_service(
-                get_watchlist_service(), get_priority_alert_service()
-            )
+            operations = self._server_owned_paper_operations()
             trades = operations.list_active_trades()
         except Exception:
             return None
@@ -6329,9 +6390,6 @@ class LiveRefreshCoordinator:
         A failed CURRENT refresh never buys from a stale prior qualifying plan.
         """
 
-        from sports_hedge.api.paper import get_paper_operations_service
-        from sports_hedge.api.priority_alerts import get_priority_alert_service
-        from sports_hedge.api.watchlist import get_watchlist_service
         from sports_hedge.application.price_engine import (
             PriceEngineItemStatus,
             PriceEngineRuntimeItem,
@@ -6348,9 +6406,7 @@ class LiveRefreshCoordinator:
 
         started = self.now()
         cadence = active_trade_cadence_seconds()
-        operations = get_paper_operations_service(
-            get_watchlist_service(), get_priority_alert_service()
-        )
+        operations = self._server_owned_paper_operations()
         jobs: list[Any] = []
         for trade_id in plan.identity_scope or []:
             trade = None
@@ -6640,17 +6696,12 @@ def _collection_task_result(task: asyncio.Task[Any]) -> CollectionReport:
 def _paper_settlement_dependencies() -> tuple[Any, Any]:
     """Ledger-backed services. First use opens the SQLite ledger and catalogue."""
 
-    from sports_hedge.api.paper import get_paper_operations_service
-    from sports_hedge.api.priority_alerts import get_priority_alert_service
-    from sports_hedge.api.watchlist import get_watchlist_service
+    from sports_hedge.api.paper import server_owned_paper_operations
     from sports_hedge.persistence.approved_market_catalogue import (
         get_approved_market_catalogue_store,
     )
 
-    operations = get_paper_operations_service(
-        get_watchlist_service(), get_priority_alert_service()
-    )
-    return operations, get_approved_market_catalogue_store()
+    return server_owned_paper_operations(), get_approved_market_catalogue_store()
 
 
 async def _await_collection_runner(runner, timeout: float | None) -> CollectionReport:

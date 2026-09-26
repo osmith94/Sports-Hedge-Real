@@ -67,6 +67,8 @@ HOT_REASON_NET_PROXIMITY_PREFIX = "NET PROXIMITY"
 HOT_REASON_RECENTLY_QUALIFYING_EXECUTION_MISS = "RECENTLY QUALIFYING EXECUTION MISS"
 
 WORKER_IDLE = "idle"
+# RUNNING means this lane's pricing slice is in progress.
+# A live worker between slices is WAITING, not RUNNING.
 WORKER_RUNNING = "running"
 WORKER_WAITING = "waiting"
 WORKER_DEGRADED = "degraded"

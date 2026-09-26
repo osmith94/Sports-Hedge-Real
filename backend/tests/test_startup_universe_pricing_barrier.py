@@ -10,6 +10,7 @@ import asyncio
 import inspect
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,12 +22,15 @@ from sports_hedge.application.approved_market_catalogue import (
     CatalogueRowState,
 )
 from sports_hedge.application.live_refresh import DualCadencePlan, ExplicitCollectBusy, LiveRefreshCoordinator
+from sports_hedge.application.price_engine import PriceEnginePriority
 from sports_hedge.application.scan_lanes import (
+    STARTUP_PHASE_RUNNING,
     STARTUP_PRICING_GATED_SLEEP_SECONDS,
     STARTUP_READINESS_COLD_UNREADY,
     STARTUP_READINESS_FRESH_GENERATION_READY,
     STARTUP_READINESS_WARM_CATALOGUE_READY,
     STARTUP_UNIVERSE_PENDING,
+    WORKER_RUNNING,
     ScanLane,
 )
 from sports_hedge.application.universe_checkpoint import SWEEP_RETRY_WAIT, SeriesWorkUnit
@@ -541,6 +545,73 @@ def test_clear_and_update_provider_backoff_stays_gated() -> None:
     assert coordinator.startup_pricing_readiness() == STARTUP_READINESS_COLD_UNREADY
     assert coordinator._universe_retry_at is not None
     assert coordinator.plan_universe_tick(now=NOW).reason == "universe_provider_backoff"
+
+
+def test_open_background_slice_stops_publishing_startup_universe_pending() -> None:
+    """A real BACKGROUND slice replaces the startup wait reason.
+
+    Opening the barrier is not enough by itself. Engine slice status must
+    publish background_due once startup is already open.
+    """
+
+    coordinator = _coordinator()
+    assert coordinator.status.background.last_plan_reason == STARTUP_UNIVERSE_PENDING
+    coordinator.mark_startup_pricing_ready()
+    assert coordinator.startup_pricing_ready() is True
+    assert coordinator.status.startup_phase == STARTUP_PHASE_RUNNING
+    assert coordinator.status.background.last_plan_reason == STARTUP_UNIVERSE_PENDING
+
+    result = SimpleNamespace(
+        issues=[],
+        persist_failures=[],
+        viability_diagnostics=lambda: {},
+    )
+    coordinator._background_in_progress = True
+    coordinator._apply_price_engine_slice_status(
+        PriceEnginePriority.BACKGROUND,
+        result,
+    )
+    assert coordinator.status.background.last_plan_reason == "background_due"
+    assert "waiting for startup universe" not in (
+        coordinator.status.background.operator_summary or ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_background_loop_publishes_due_reason_and_idle_worker_state() -> None:
+    coordinator = _coordinator()
+    coordinator.mark_startup_pricing_ready()
+    coordinator._next_background_due = coordinator.now()
+    during: dict[str, object] = {}
+
+    async def tick(plan=None) -> None:
+        assert getattr(plan, "reason", None) == "background_due"
+        during["reason"] = coordinator.status.background.last_plan_reason
+        during["cycle"] = coordinator.status.background.cycle_in_progress
+        during["worker"] = coordinator.status.background.worker_state
+        coordinator._stop.set()
+
+    task = asyncio.create_task(coordinator._background_loop(tick))
+    await asyncio.wait_for(task, timeout=2)
+    assert during == {
+        "reason": "background_due",
+        "cycle": True,
+        "worker": WORKER_RUNNING,
+    }
+    finished = coordinator.status.background
+    assert finished.last_plan_reason != STARTUP_UNIVERSE_PENDING
+    assert finished.cycle_in_progress is False
+    assert finished.worker_state != WORKER_RUNNING
+    assert "waiting for startup universe" not in (finished.operator_summary or "")
+    heartbeat = coordinator.public_heartbeat()
+    assert heartbeat.startup_pricing_ready is True
+    assert heartbeat.startup_phase == STARTUP_PHASE_RUNNING
+    assert heartbeat.background.last_plan_reason != STARTUP_UNIVERSE_PENDING
+    assert heartbeat.background.cycle_in_progress is False
+    assert heartbeat.background.worker_state != WORKER_RUNNING
+    assert "waiting for startup universe" not in (
+        heartbeat.background.operator_summary or ""
+    )
 
 
 def test_scheduler_planning_does_not_read_catalogue_under_state_lock() -> None:
