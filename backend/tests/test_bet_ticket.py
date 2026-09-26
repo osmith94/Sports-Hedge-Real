@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -356,9 +356,22 @@ def test_recommend_and_prepare_api_keep_paper_boundary(tmp_path: Path) -> None:
         assert opportunity_id not in {
             item["opportunity_id"] for item in tracked_empty.json()
         }
-        coordinator.record_report(
-            _report(decision.canonical_market_id, when=decision.scanned_at)
+        report = _report(decision.canonical_market_id, when=decision.scanned_at)
+        # The shared helper pins kickoff at 2026-09-26 13:00 UTC. Tracked radar
+        # classifies that fixture as HOT once wall-clock evaluation is inside the
+        # post-kickoff unknown window, and a UNIVERSE-lane observation is then
+        # absent from the current board. This test checks the paper bet boundary
+        # on the tracked row, so the recorded kickoff stays ahead of the scan.
+        kickoff_ahead = decision.scanned_at + timedelta(days=2)
+        report = report.model_copy(
+            update={
+                "discovered_fixtures": [
+                    fixture.model_copy(update={"kickoff_utc": kickoff_ahead})
+                    for fixture in report.discovered_fixtures
+                ]
+            }
         )
+        coordinator.record_report(report)
         tracked = client.get("/paper/watchlist/tracked")
         assert tracked.status_code == 200
         rows = {item["opportunity_id"]: item for item in tracked.json()}
