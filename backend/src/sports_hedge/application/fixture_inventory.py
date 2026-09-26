@@ -35,9 +35,63 @@ from sports_hedge.fees.labels import operator_fee_label
 from sports_hedge.fees.polymarket import polymarket_cost_from_market
 from sports_hedge.fees.resolver import MATCHBOOK_OVERRIDE_TIER, UnknownRequiredCostError, VenueCostResolver
 from sports_hedge.matching.bulk_market_pairs import greedy_unique_market_matches
-from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult, memoize_market_matches
+from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.markets import (
+    MarketMatcher,
+    MarketMatchResult,
+    economic_match_fingerprint,
+    memoize_market_matches,
+)
 from sports_hedge.normalization.venues import matchbook_raw_market_type
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
+
+
+def _load_attachment_dependencies():
+    """Import Kalshi-attachment modules before the first universe slice.
+
+    Catalogue admission and the sport registers import themselves on first
+    use. Doing that inside ``assemble_fixture_inventory`` puts the import on
+    the event-loop slice for the first fixture. Loading them with this
+    module keeps the same work at process import.
+    """
+
+    from sports_hedge.catalogue.admission import assess_catalogue_admission
+    from sports_hedge.catalogue.registry import target_market_families
+    from sports_hedge.mlb.register import mlb_canonical_key_for_market
+    from sports_hedge.mlb.settlement import mlb_pair_non_executable_reason
+    from sports_hedge.nba.detect import NBA_MARKET_FAMILIES
+    from sports_hedge.nba.register import nba_canonical_key_for_market
+    from sports_hedge.nba.settlement import nba_market_uses_paper_caveat
+    from sports_hedge.ncaab.detect import NCAAB_MARKET_FAMILIES
+    from sports_hedge.ncaab.register import ncaab_canonical_key_for_market
+    from sports_hedge.nfl.detect import NFL_MARKET_FAMILIES
+    from sports_hedge.nfl.register import nfl_canonical_key_for_market
+    from sports_hedge.nfl.settlement import nfl_market_uses_paper_caveat
+    from sports_hedge.tennis.register import tennis_registered_canonical_key
+    from sports_hedge.tennis.settlement import tennis_executable_block_reason
+
+    return (
+        assess_catalogue_admission,
+        target_market_families,
+        mlb_canonical_key_for_market,
+        mlb_pair_non_executable_reason,
+        NBA_MARKET_FAMILIES,
+        nba_canonical_key_for_market,
+        nba_market_uses_paper_caveat,
+        NCAAB_MARKET_FAMILIES,
+        ncaab_canonical_key_for_market,
+        NFL_MARKET_FAMILIES,
+        nfl_canonical_key_for_market,
+        nfl_market_uses_paper_caveat,
+        tennis_registered_canonical_key,
+        tennis_executable_block_reason,
+    )
+
+
+(
+    assess_catalogue_admission,
+    *_ATTACHMENT_DEPENDENCIES,
+) = _load_attachment_dependencies()
 
 
 class InventoryComparisonStatus(StrEnum):
@@ -333,6 +387,11 @@ def _assemble_fixture_inventory(
             )
         else:
             unmatched_kalshi.append(item)
+    # One structural index and equivalence cache for this fixture. Selection
+    # still follows list order: first equivalent Kalshi leg, otherwise the
+    # first related leg when the row is not already comparable.
+    sources = _InventorySources(matchbook_markets, polymarket_markets)
+    attachment_index = _KalshiAttachmentIndex(unmatched_kalshi, matcher, sources)
     attached: set[int] = set()
     for row in rows:
         kalshi_index = _matching_kalshi_index(
@@ -342,6 +401,7 @@ def _assemble_fixture_inventory(
             matchbook_markets=matchbook_markets,
             polymarket_markets=polymarket_markets,
             exclude=attached,
+            attachment_index=attachment_index,
         )
         if kalshi_index is None:
             continue
@@ -357,6 +417,7 @@ def _assemble_fixture_inventory(
             venue_costs=venue_costs,
             fx_snapshots=fx_snapshots,
             cost_resolver=cost_resolver,
+            attachment_index=attachment_index,
         )
     leftover_kalshi = [
         item for index, item in enumerate(unmatched_kalshi) if index not in attached
@@ -370,7 +431,7 @@ def _assemble_fixture_inventory(
         for row_index, row in enumerate(leftover_pm_only):
             if row_index in used_pm_rows:
                 continue
-            pm_item = _inventory_from_facts(row.polymarket, VenueName.POLYMARKET, polymarket_markets)
+            pm_item = sources.item_for(row.polymarket, VenueName.POLYMARKET, polymarket_markets)
             if pm_item is None or pm_item.canonical is None or kalshi_item.canonical is None:
                 continue
             match = matcher.match(pm_item.canonical, kalshi_item.canonical)
@@ -1090,8 +1151,6 @@ def _kalshi_catalogue_admission(
 ):
     if kalshi_item.canonical is None:
         return None
-    from sports_hedge.catalogue.admission import assess_catalogue_admission
-
     for canonical in _row_canonicals(
         row,
         matchbook_markets=matchbook_markets,
@@ -1106,13 +1165,17 @@ def _row_canonicals(
     *,
     matchbook_markets: list[InventoryMarket],
     polymarket_markets: list[InventoryMarket],
+    sources: _InventorySources | None = None,
 ) -> list[CanonicalMarket]:
     canonicals: list[CanonicalMarket] = []
     for facts, venue, source in (
         (row.matchbook, VenueName.MATCHBOOK, matchbook_markets),
         (row.polymarket, VenueName.POLYMARKET, polymarket_markets),
     ):
-        item = _inventory_from_facts(facts, venue, source)
+        if sources is None:
+            item = _inventory_from_facts(facts, venue, source)
+        else:
+            item = sources.item_for(facts, venue, source)
         if item is not None and item.canonical is not None:
             canonicals.append(item.canonical)
     return canonicals
@@ -1156,17 +1219,304 @@ def _kalshi_match_results(
     *,
     matchbook_markets: list[InventoryMarket],
     polymarket_markets: list[InventoryMarket],
+    attachment_index: _KalshiAttachmentIndex | None = None,
 ) -> list[MarketMatchResult]:
     if kalshi_item.canonical is None:
         return []
+    canonicals = _row_canonicals(
+        row,
+        matchbook_markets=matchbook_markets,
+        polymarket_markets=polymarket_markets,
+    )
+    if attachment_index is None:
+        return [matcher.match(canonical, kalshi_item.canonical) for canonical in canonicals]
     return [
-        matcher.match(canonical, kalshi_item.canonical)
-        for canonical in _row_canonicals(
+        attachment_index.equivalent_result(canonical, kalshi_item.canonical)
+        for canonical in canonicals
+    ]
+
+
+_SETTLEMENT_EXEMPT_KALSHI_FAMILIES = {
+    MarketFamily.MATCH_RESULT.value,
+    MarketFamily.TOTAL_GOALS.value,
+    MarketFamily.BOTH_TEAMS_TO_SCORE.value,
+    MarketFamily.FIRST_TEAM_TO_SCORE.value,
+}
+
+
+class _InventorySources:
+    """First-hit source lookup for one fixture inventory build.
+
+    ``_inventory_from_facts`` returns the first list item with the same venue
+    and source id. Repeating that scan for every row and Kalshi candidate is
+    the same answer as this map.
+    """
+
+    def __init__(
+        self,
+        matchbook_markets: list[InventoryMarket],
+        polymarket_markets: list[InventoryMarket],
+    ) -> None:
+        self.matchbook_markets = matchbook_markets
+        self.polymarket_markets = polymarket_markets
+        self._matchbook = _first_source_hits(matchbook_markets, VenueName.MATCHBOOK)
+        self._polymarket = _first_source_hits(polymarket_markets, VenueName.POLYMARKET)
+
+    def item_for(
+        self,
+        facts: VenueMarketFacts | None,
+        venue: VenueName,
+        source: list[InventoryMarket],
+    ) -> InventoryMarket | None:
+        if facts is None:
+            return None
+        if venue is VenueName.MATCHBOOK and source is self.matchbook_markets:
+            return self._matchbook.get(facts.source_market_id)
+        if venue is VenueName.POLYMARKET and source is self.polymarket_markets:
+            return self._polymarket.get(facts.source_market_id)
+        return _inventory_from_facts(facts, venue, source)
+
+
+def _first_source_hits(
+    markets: list[InventoryMarket],
+    venue: VenueName,
+) -> dict[str, InventoryMarket]:
+    found: dict[str, InventoryMarket] = {}
+    for item in markets:
+        if item.venue is not venue:
+            continue
+        found.setdefault(item.source_market_id, item)
+    return found
+
+
+class _KalshiAttachmentIndex:
+    """Fixture-local Kalshi candidates and equivalence cache.
+
+    Buckets keep ascending source indexes, so the first hit is the same leg
+    the full list scan would have chosen. Equivalence is cached only for the
+    stock ``MarketMatcher`` and ``EventMatcher`` pair, using the same event
+    identity and economic fingerprint as the match memo. Other matchers call
+    ``match`` on every related candidate.
+    """
+
+    def __init__(
+        self,
+        kalshi_markets: list[InventoryMarket],
+        matcher: MarketMatcher,
+        sources: _InventorySources,
+    ) -> None:
+        self.markets = kalshi_markets
+        self.matcher = matcher
+        self.sources = sources
+        self._cacheable = (
+            type(matcher) is MarketMatcher and type(matcher.event_matcher) is EventMatcher
+        )
+        self._equivalent: dict[tuple[object, ...], MarketMatchResult] = {}
+        self._fingerprints: dict[int, tuple[object, ...]] = {}
+        self._plans: dict[tuple[object, ...], tuple[list[int], list[int]]] = {}
+        self._cursors: dict[tuple[object, ...], tuple[int, int]] = {}
+        self._catalogue: dict[tuple[object, ...], Any] = {}
+        self._owners: list[Any] = []
+        self._row_canonicals: dict[int, list[CanonicalMarket]] = {}
+        self._by_family: dict[str, list[int]] = {}
+        self._by_family_period: dict[tuple[str, str], list[int]] = {}
+        self._by_family_line: dict[tuple[str, Decimal], list[int]] = {}
+        self._by_family_period_line: dict[tuple[str, str, Decimal], list[int]] = {}
+        for index, item in enumerate(kalshi_markets):
+            canonical = item.canonical
+            if canonical is None:
+                continue
+            family = canonical.family.value
+            period = canonical.period.value
+            self._by_family.setdefault(family, []).append(index)
+            self._by_family_period.setdefault((family, period), []).append(index)
+            if canonical.line is not None:
+                line = canonical.line
+                self._by_family_line.setdefault((family, line), []).append(index)
+                self._by_family_period_line.setdefault((family, period, line), []).append(index)
+
+    def candidates(self, row: FixtureMarketInventoryRow) -> list[int]:
+        family = row.family
+        if not family:
+            return []
+        if row.period:
+            if row.line is not None:
+                return self._by_family_period_line.get((family, row.period, row.line), [])
+            return self._by_family_period.get((family, row.period), [])
+        if row.line is not None:
+            return self._by_family_line.get((family, row.line), [])
+        return self._by_family.get(family, [])
+
+    def canonicals_for(self, row: FixtureMarketInventoryRow) -> list[CanonicalMarket]:
+        cached = self._row_canonicals.get(id(row))
+        if cached is not None:
+            return cached
+        canonicals = _row_canonicals(
             row,
+            matchbook_markets=self.sources.matchbook_markets,
+            polymarket_markets=self.sources.polymarket_markets,
+            sources=self.sources,
+        )
+        self._row_canonicals[id(row)] = canonicals
+        self._owners.append(row)
+        return canonicals
+
+    def fingerprint(self, market: CanonicalMarket) -> tuple[object, ...]:
+        cached = self._fingerprints.get(id(market))
+        if cached is None:
+            cached = economic_match_fingerprint(market)
+            self._fingerprints[id(market)] = cached
+            self._owners.append(market)
+        return cached
+
+    def equivalent_result(self, left: CanonicalMarket, right: CanonicalMarket) -> MarketMatchResult:
+        if not self._cacheable:
+            return self.matcher.match(left, right)
+        key = (
+            id(left.event),
+            self.fingerprint(left),
+            id(right.event),
+            self.fingerprint(right),
+        )
+        cached = self._equivalent.get(key)
+        if cached is not None:
+            return cached
+        result = self.matcher.match(left, right)
+        self._equivalent[key] = result
+        self._owners.append(left)
+        self._owners.append(right)
+        return result
+
+    def equivalent(self, left: CanonicalMarket, right: CanonicalMarket) -> bool:
+        return self.equivalent_result(left, right).matched
+
+    def select(self, row: FixtureMarketInventoryRow, exclude: set[int]) -> int | None:
+        if row.family is None or (row.matchbook is None and row.polymarket is None):
+            return None
+        if not self._cacheable:
+            return self._select_walk(row, exclude)
+        canonicals = self.canonicals_for(row)
+        if not canonicals:
+            return self._select_walk(row, exclude)
+        identity = (
+            row.family,
+            row.period or "",
+            None if row.line is None else row.line,
+            tuple((id(market.event), self.fingerprint(market)) for market in canonicals),
+        )
+        plan = self._plans.get(identity)
+        if plan is None:
+            plan = self._plan(row, canonicals)
+            self._plans[identity] = plan
+            self._owners.append(row)
+        equivalent_indexes, related_indexes = plan
+        # Exclusions only grow during one inventory build, so each identity
+        # can resume after the leg it already considered.
+        equivalent_cursor, related_cursor = self._cursors.get(identity, (0, 0))
+        while (
+            equivalent_cursor < len(equivalent_indexes)
+            and equivalent_indexes[equivalent_cursor] in exclude
+        ):
+            equivalent_cursor += 1
+        if equivalent_cursor < len(equivalent_indexes):
+            self._cursors[identity] = (equivalent_cursor, related_cursor)
+            return equivalent_indexes[equivalent_cursor]
+        if inventory_is_comparable_opportunity(row.comparison_status):
+            self._cursors[identity] = (equivalent_cursor, related_cursor)
+            return None
+        while related_cursor < len(related_indexes) and related_indexes[related_cursor] in exclude:
+            related_cursor += 1
+        self._cursors[identity] = (equivalent_cursor, related_cursor)
+        if related_cursor < len(related_indexes):
+            return related_indexes[related_cursor]
+        return None
+
+    def _plan(
+        self,
+        row: FixtureMarketInventoryRow,
+        canonicals: list[CanonicalMarket],
+    ) -> tuple[list[int], list[int]]:
+        equivalent_indexes: list[int] = []
+        related_indexes: list[int] = []
+        for index in self.candidates(row):
+            item = self.markets[index]
+            if item.canonical is None or not self._is_related(row, item):
+                continue
+            if any(self.equivalent(canonical, item.canonical) for canonical in canonicals):
+                equivalent_indexes.append(index)
+            else:
+                related_indexes.append(index)
+        return equivalent_indexes, related_indexes
+
+    def _select_walk(self, row: FixtureMarketInventoryRow, exclude: set[int]) -> int | None:
+        comparable = inventory_is_comparable_opportunity(row.comparison_status)
+        canonicals = self.canonicals_for(row)
+        first_related: int | None = None
+        for index in self.candidates(row):
+            if index in exclude:
+                continue
+            item = self.markets[index]
+            if item.canonical is None or not self._is_related(row, item):
+                continue
+            if any(self.equivalent(canonical, item.canonical) for canonical in canonicals):
+                return index
+            if comparable:
+                continue
+            if first_related is None:
+                first_related = index
+        return first_related
+
+    def _is_related(self, row: FixtureMarketInventoryRow, item: InventoryMarket) -> bool:
+        # Match result, totals, BTTS, and FTTS stay related across settlement
+        # keys. The structural buckets already applied family, period, and
+        # line, so those families do not need another settlement pass.
+        if row.family in _SETTLEMENT_EXEMPT_KALSHI_FAMILIES:
+            return item.canonical is not None
+        return _kalshi_related_to_row(row, item)
+
+    def catalogue_for(
+        self,
+        row: FixtureMarketInventoryRow,
+        kalshi_item: InventoryMarket,
+        *,
+        matchbook_markets: list[InventoryMarket],
+        polymarket_markets: list[InventoryMarket],
+    ) -> Any:
+        if not self._cacheable or kalshi_item.canonical is None:
+            return _kalshi_catalogue_admission(
+                row,
+                kalshi_item,
+                matchbook_markets=matchbook_markets,
+                polymarket_markets=polymarket_markets,
+            )
+        canonicals = self.canonicals_for(row)
+        if not canonicals:
+            return _kalshi_catalogue_admission(
+                row,
+                kalshi_item,
+                matchbook_markets=matchbook_markets,
+                polymarket_markets=polymarket_markets,
+            )
+        left = canonicals[0]
+        right = kalshi_item.canonical
+        key = (
+            id(left.event),
+            self.fingerprint(left),
+            id(right.event),
+            self.fingerprint(right),
+        )
+        if key in self._catalogue:
+            return self._catalogue[key]
+        admission = _kalshi_catalogue_admission(
+            row,
+            kalshi_item,
             matchbook_markets=matchbook_markets,
             polymarket_markets=polymarket_markets,
         )
-    ]
+        self._catalogue[key] = admission
+        self._owners.append(left)
+        self._owners.append(right)
+        return admission
 
 
 def _matching_kalshi_index(
@@ -1177,35 +1527,20 @@ def _matching_kalshi_index(
     matchbook_markets: list[InventoryMarket],
     polymarket_markets: list[InventoryMarket],
     exclude: set[int] | None = None,
+    attachment_index: _KalshiAttachmentIndex | None = None,
 ) -> int | None:
-    if row.family is None:
-        return None
-    skipped = exclude or set()
     # The first equivalent Kalshi leg in list order wins. A non-equivalent
     # leg is used only when no equivalent leg exists, and only when this row
     # is not already a comparable opportunity. Stopping at the first
     # equivalent leg is the same answer as scanning the rest.
-    comparable = inventory_is_comparable_opportunity(row.comparison_status)
-    first_related: int | None = None
-    for index, item in enumerate(kalshi_markets):
-        if index in skipped:
-            continue
-        if not _kalshi_related_to_row(row, item):
-            continue
-        matches = _kalshi_match_results(
-            row,
-            item,
+    skipped = exclude or set()
+    if attachment_index is None:
+        attachment_index = _KalshiAttachmentIndex(
+            kalshi_markets,
             matcher,
-            matchbook_markets=matchbook_markets,
-            polymarket_markets=polymarket_markets,
+            _InventorySources(matchbook_markets, polymarket_markets),
         )
-        if any(match.matched for match in matches):
-            return index
-        if comparable:
-            continue
-        if first_related is None:
-            first_related = index
-    return first_related
+    return attachment_index.select(row, skipped)
 
 
 def _clear_stale_venue_only(row: FixtureMarketInventoryRow) -> None:
@@ -1235,6 +1570,7 @@ def _attach_kalshi(
     venue_costs: list[VenueCostSnapshot] | None,
     fx_snapshots: list[FxRateSnapshot] | None,
     cost_resolver: VenueCostResolver | None,
+    attachment_index: _KalshiAttachmentIndex | None = None,
 ) -> None:
     pair_summaries: list[InventoryPairResult] = []
     best_decision: PaperScanDecision | None = None
@@ -1277,6 +1613,7 @@ def _attach_kalshi(
         matcher,
         matchbook_markets=matchbook_markets,
         polymarket_markets=polymarket_markets,
+        attachment_index=attachment_index,
     )
     proven = any(match.matched for match in matches)
     row.kalshi = _facts_from_inventory(
@@ -1314,12 +1651,20 @@ def _attach_kalshi(
                 )
         return
     _clear_stale_venue_only(row)
-    catalogue = _kalshi_catalogue_admission(
-        row,
-        kalshi_item,
-        matchbook_markets=matchbook_markets,
-        polymarket_markets=polymarket_markets,
-    )
+    if attachment_index is None:
+        catalogue = _kalshi_catalogue_admission(
+            row,
+            kalshi_item,
+            matchbook_markets=matchbook_markets,
+            polymarket_markets=polymarket_markets,
+        )
+    else:
+        catalogue = attachment_index.catalogue_for(
+            row,
+            kalshi_item,
+            matchbook_markets=matchbook_markets,
+            polymarket_markets=polymarket_markets,
+        )
     if catalogue is not None and not catalogue.allowed:
         catalogue_reason = catalogue.rejection_reason or "catalogue_review_required"
         reason = catalogue.assessment.reason or catalogue_reason
