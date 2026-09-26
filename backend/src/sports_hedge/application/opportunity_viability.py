@@ -636,6 +636,89 @@ def venue_blocked_for_identity(
     )
 
 
+IDENTITY_RELATIONSHIP_SCOPE = "identity_only_not_catalogue"
+POST_MARKET_RELATIONSHIP_SCOPE = "post_market_catalogue"
+PRE_MARKET_RELATIONSHIP_SCOPE = "pre_market_not_catalogue"
+
+
+def market_relationship_not_collected(reason: str) -> dict[str, Any]:
+    """Market pairing did not run. Counts stay unset so they are not a real zero."""
+
+    return {
+        "evidence_stage": "not_collected",
+        "status": "not_collected",
+        "reason": reason,
+        "venue_pairs": [],
+        "discovered_archetypes": [],
+        "registered_relationships": [],
+        "attempted_relationships": [],
+        "selected_relationship_count": None,
+        "persisted_catalogue_keys": [],
+        "persisted_catalogue_count": None,
+    }
+
+
+def build_market_relationship_evidence(
+    venue_pairs: list[dict[str, Any]],
+    *,
+    discovered_archetypes: list[str],
+    persisted_catalogue_keys: list[str] | None,
+) -> dict[str, Any]:
+    """Post-market relationship evidence.
+
+    ``attempted_relationships`` lists venue pairs whose matcher was actually
+    invoked. A pair with no shared register key is not recorded as attempted.
+    ``selected_relationship_count`` of 0 means pairing ran and kept nothing.
+    ``persisted_catalogue_count`` is None when this pass did not write the
+    catalogue.
+    """
+
+    attempted: list[str] = []
+    registered: list[str] = []
+    selected = 0
+    for item in venue_pairs:
+        selected += int(item.get("selected_count") or 0)
+        if item.get("matcher_invoked"):
+            pair = str(item.get("venue_pair") or "")
+            if pair and pair not in attempted:
+                attempted.append(pair)
+        for key in item.get("registered_keys") or []:
+            text = str(key)
+            if text and text not in registered:
+                registered.append(text)
+    return {
+        "evidence_stage": "post_market",
+        "status": "collected",
+        "reason": None,
+        "venue_pairs": list(venue_pairs),
+        "discovered_archetypes": list(discovered_archetypes),
+        "registered_relationships": registered,
+        "attempted_relationships": attempted,
+        "selected_relationship_count": selected,
+        "persisted_catalogue_keys": list(persisted_catalogue_keys or []),
+        "persisted_catalogue_count": (
+            None if persisted_catalogue_keys is None else len(persisted_catalogue_keys)
+        ),
+    }
+
+
+def identity_viability_evidence(
+    canonical_event_id: str,
+    venues_present: list[str],
+) -> dict[str, Any]:
+    """Identity-stage diagnostic. Empty relationship lists are not catalogue truth."""
+
+    return build_viability_evidence(
+        canonical_event_id,
+        venues_present=venues_present,
+        evidence_stage="identity",
+        relationship_fields_scope=IDENTITY_RELATIONSHIP_SCOPE,
+        market_relationship_evidence=market_relationship_not_collected(
+            "identity_stage_before_market_processing"
+        ),
+    )
+
+
 def build_viability_evidence(
     canonical_event_id: str,
     *,
@@ -646,6 +729,9 @@ def build_viability_evidence(
     attempted_relationships: list[str] | None = None,
     registered_relationships: list[str] | None = None,
     structural_rejections: list[str] | None = None,
+    evidence_stage: str = "unspecified",
+    relationship_fields_scope: str = "unspecified",
+    market_relationship_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Operator diagnostic. Distinguishes event, market, and provider evidence."""
 
@@ -709,6 +795,9 @@ def build_viability_evidence(
         "registered_relationships": list(registered_relationships or []),
         "structural_rejections": list(structural_rejections or []),
         "final_reason": final_reason,
+        "evidence_stage": evidence_stage,
+        "relationship_fields_scope": relationship_fields_scope,
+        "market_relationship_evidence": market_relationship_evidence,
     }
 
 
