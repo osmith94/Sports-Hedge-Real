@@ -17,8 +17,10 @@ Matchbook tennis Moneyline (sport-id 9) event/market payloads contain no
 retirement, walkover, void or postponement rule text.
 
 Fair-price versus explicit 50-50, the unstable postponement window, and the
-absent Matchbook rule are not the same settlement contract. Match Winner stays
-non-executable.
+absent Matchbook rule were captured as different exceptional contracts. Owner
+decision 2026-09-26: those differences do not block PAPER comparison of a
+structurally identical singles Match Winner. Live execution stays disabled.
+The historical reason string remains readable on old audit rows.
 """
 
 from __future__ import annotations
