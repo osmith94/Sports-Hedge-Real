@@ -66,7 +66,8 @@ Partial rows remain visible and disabled. Identifiers were not guessed.
   `uwcl` Women's Champions League, `tur2` Turkey 1. Lig, `conl` CONCACAF Nations League,
   Nations League group/champion/relegation events with `series=null`.
 - Matchbook labels still unmatched: EFL Trophy / Vertu Trophy, club friendlies, women's/youth cups,
-  UEFA Women's Nations League, CONCACAF Nations League, UEFA Nations League C
-  (not on the 2026-09-22 open snapshot; do not invent from the A/B/D tag family).
+  UEFA Women's Nations League, CONCACAF Nations League.
+  UEFA Nations League C is an exact Matchbook alias of UEFA Nations League,
+  observed 2026-09-26 alongside A/B/D. It is not a separate competition.
 
 Default selected startup scope remains the original eight competitions. NFL, NBA, NCAA Men's Basketball, MLB, ATP, and WTA are selectable and are not default. ATP, WTA, and MLB are discovery-selectable and are not paper-executable. ATP/WTA tournament coverage is the evidence-backed allowlist only (Hangzhou, Chengdu, Singapore, Seoul).

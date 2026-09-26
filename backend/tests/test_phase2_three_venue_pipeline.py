@@ -24,6 +24,10 @@ from sports_hedge.application.opportunity_viability import (
     identity_viability_evidence,
     market_relationship_not_collected,
 )
+from sports_hedge.application.target_competitions import (
+    TargetCompetitionCode,
+    resolve_target_competition,
+)
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -479,3 +483,35 @@ def test_catalogue_row_identity_is_still_event_plus_canonical_key() -> None:
     assert first != second
     assert catalogue_row_id_for("evt:eng-esp", "MATCH_RESULT_FT") == first
 
+
+@pytest.mark.parametrize(
+    "label",
+    (
+        "UEFA Nations League A",
+        "UEFA Nations League B",
+        "UEFA Nations League C",
+        "UEFA Nations League D",
+    ),
+)
+def test_nations_league_division_aliases_resolve(label: str) -> None:
+    resolved = resolve_target_competition(label)
+    assert resolved is not None
+    assert resolved.code is TargetCompetitionCode.UEFA_NATIONS_LEAGUE
+
+
+@pytest.mark.parametrize(
+    "label",
+    (
+        "CONCACAF Nations League",
+        "UEFA Women's Nations League",
+        "Volleyball Nations League",
+        "Six Nations",
+        "Gulf Cup of Nations",
+        "Africa Cup of Nations Qualification",
+    ),
+)
+def test_unrelated_nations_labels_stay_rejected(label: str) -> None:
+    resolved = resolve_target_competition(label)
+    if resolved is None:
+        return
+    assert resolved.code is not TargetCompetitionCode.UEFA_NATIONS_LEAGUE

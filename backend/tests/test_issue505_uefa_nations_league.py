@@ -405,6 +405,7 @@ def test_nations_league_is_selectable_under_uefa_and_not_default() -> None:
         "UEFA Nations League 2026/27",
         "UEFA Nations League A",
         "UEFA Nations League B",
+        "UEFA Nations League C",
         "UEFA Nations League D",
     ),
 )
@@ -420,7 +421,6 @@ def test_observed_nations_league_aliases_resolve(label: str) -> None:
         "CONCACAF Nations League",
         "Concacaf Nations League",
         "UEFA Women's Nations League",
-        "UEFA Nations League C",
         "Volleyball Nations League",
         "International Friendlies",
         "UEFA Euro Qualification",
@@ -464,6 +464,7 @@ def test_matchbook_live_division_tags_scope_when_selected() -> None:
     for competition in (
         "UEFA Nations League A",
         "UEFA Nations League B",
+        "UEFA Nations League C",
         "UEFA Nations League D",
     ):
         decision = scope_matchbook_event(
@@ -482,11 +483,11 @@ def test_matchbook_live_division_tags_scope_when_selected() -> None:
         selected_codes=SCOPE,
     )
     assert concacaf.allowed is False
-    league_c = scope_matchbook_event(
-        _mb_event("10", "Georgia vs Bulgaria", "UEFA Nations League C"),
+    unrelated = scope_matchbook_event(
+        _mb_event("10", "Georgia vs Bulgaria", "Volleyball Nations League"),
         selected_codes=SCOPE,
     )
-    assert league_c.allowed is False
+    assert unrelated.allowed is False
 
 
 def test_polymarket_fixture_series_and_outrights() -> None:
