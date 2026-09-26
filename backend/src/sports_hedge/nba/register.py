@@ -1,8 +1,8 @@
 """Owner-gated NBA PAPER register.
 
-Normal-completion PAPER equivalence is admitted only for evidence-backed
-Kalshi↔Polymarket GAME_WINNER. Spreads, totals, and every Matchbook pair stay
-fail-closed until NBA game-book / OT-wording evidence exists.
+PAPER admission is Kalshi↔Polymarket GAME_WINNER only. Spreads, totals, and
+every Matchbook pair stay fail-closed because ordinary full-game/OT game-book
+evidence is not established. Exceptional lifecycle is not the block.
 """
 
 from __future__ import annotations

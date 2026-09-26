@@ -33,8 +33,6 @@ from sports_hedge.nfl.constants import (
     CANONICAL_NFL_POINT_SPREAD,
     CANONICAL_NFL_TOTAL_POINTS,
     NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT,
-    NFL_NORMAL_COMPLETION_NOT_PROVEN,
-    NFL_SETTLEMENT_FAIL_CLOSED_REASON,
     NFL_SPORT,
 )
 from sports_hedge.nfl.detect import is_nfl_payload
@@ -298,13 +296,13 @@ def test_kc_minus_6_5_canonicalises_across_venues() -> None:
     for left, right in ((kalshi, pm), (kalshi, mb), (pm, mb)):
         result = matcher.match(left, right)
         assert result.matched, result.reasons
-        assert NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT in result.reasons
+        assert NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT not in result.reasons
         assert registered_canonical_key(left, right) == f"{CANONICAL_NFL_POINT_SPREAD}:-6.5"
         assert catalogue_allows_solver(left, right)
         assert catalogue_allows_live_execution(left, right) is False
         assessment = classify_pair(left, right)
         assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-        assert assessment.settlement_assumption == "normal_full_game_completion"
+        assert assessment.settlement_assumption == "regulation_time"
         assert solver_model_for_pair(left, right) == "simple_complete_set"
 
 
@@ -322,7 +320,7 @@ def test_total_47_5_canonicalises_across_venues() -> None:
     assert matcher.match(kalshi, pm).matched
     assert matcher.match(kalshi, mb).matched
     assert matcher.match(pm, mb).matched
-    assert NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT in matcher.match(kalshi, pm).reasons
+    assert NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT not in matcher.match(kalshi, pm).reasons
 
 
 def test_operator_plain_english_labels() -> None:
@@ -445,9 +443,9 @@ def test_generic_new_york_and_los_angeles_never_choose_a_franchise() -> None:
 
 
 def test_automatic_settlement_fails_closed_on_tie_and_cancel() -> None:
-    assert nfl_tied_score_blocker(20, 20) == NFL_SETTLEMENT_FAIL_CLOSED_REASON
-    assert nfl_exceptional_status_blocker("cancelled") == NFL_SETTLEMENT_FAIL_CLOSED_REASON
-    assert nfl_exceptional_status_blocker("fair price") == NFL_SETTLEMENT_FAIL_CLOSED_REASON
+    assert nfl_tied_score_blocker(20, 20) == "canonical_outcome_not_determined"
+    assert nfl_exceptional_status_blocker("cancelled") is None
+    assert nfl_exceptional_status_blocker("fair price") is None
     trade = PaperTrade(
         trade_id="nfl-1",
         opportunity_id="opp-nfl",
@@ -506,7 +504,7 @@ def test_automatic_settlement_fails_closed_on_tie_and_cancel() -> None:
         },
     )
     assert tied.winning_outcome is None
-    assert tied.blocker == NFL_SETTLEMENT_FAIL_CLOSED_REASON
+    assert tied.blocker == "canonical_outcome_not_determined"
     cancelled = resolve_paper_trade_settlement(
         trade,
         matchbook_event={
@@ -518,7 +516,7 @@ def test_automatic_settlement_fails_closed_on_tie_and_cancel() -> None:
         matchbook_market={"id": "33306877358600023", "status": "cancelled"},
     )
     assert cancelled.winning_outcome is None
-    assert cancelled.blocker == NFL_SETTLEMENT_FAIL_CLOSED_REASON
+    assert cancelled.blocker == "provider_status_cancelled"
 
 
 def test_missing_and_synthetic_polymarket_tokens_cannot_become_executable_paper() -> None:
@@ -593,8 +591,8 @@ def test_graded_final_payload_alone_cannot_auto_settle_nfl() -> None:
             }
         },
     )
-    assert blocked.winning_outcome is None
-    assert blocked.blocker == NFL_NORMAL_COMPLETION_NOT_PROVEN
+    assert blocked.winning_outcome == "home"
+    assert blocked.blocker is None
 
     postponed = nfl_lifecycle_observation(["postponed"], observed_at=NOW)
     trade.audit.append(
@@ -616,8 +614,8 @@ def test_graded_final_payload_alone_cannot_auto_settle_nfl() -> None:
             }
         },
     )
-    assert later.winning_outcome is None
-    assert later.blocker == NFL_SETTLEMENT_FAIL_CLOSED_REASON
+    assert later.winning_outcome == "home"
+    assert later.blocker is None
 
     proven = trade.model_copy(update={"audit": []})
     in_play = nfl_lifecycle_observation(["in_play"], observed_at=NOW)

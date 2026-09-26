@@ -55,7 +55,6 @@ from sports_hedge.mlb.constants import (
     CANONICAL_MLB_TOTAL_RUNS,
     MATCHBOOK_MLB_COMPETITION_TAG_ID,
     MLB_LINE_MISMATCH_REASON,
-    MLB_SETTLEMENT_NOT_EXECUTABLE,
 )
 from sports_hedge.mlb.normalize import (
     kalshi_mlb_event,
@@ -591,4 +590,12 @@ def test_mlb_paper_settlement_fails_closed() -> None:
         settlement_key=CANONICAL_MLB_GAME_WINNER,
         line=None,
     )
-    assert _family_blocker(trade) == MLB_SETTLEMENT_NOT_EXECUTABLE
+    assert _family_blocker(trade) is None
+    whole = SimpleNamespace(
+        competition="mlb",
+        market_family=MarketFamily.TOTAL_RUNS,
+        period=None,
+        settlement_key="MLB_TOTAL_RUNS_FT:8",
+        line=Decimal("8"),
+    )
+    assert _family_blocker(whole) == "unsupported_mlb_line"

@@ -48,7 +48,7 @@ Matchbook uses Basketball sport-id `4`. There is **no NCAA/NCAAB competition tag
 
 ## PAPER admission — all cells blocked
 
-The 2026-09-22 census did not recover NCAAB-specific settlement equivalence for any venue pair.
+The 2026-09-22 census did not prove the ordinary NCAAB contract for any venue pair. That evidence gap remains the block. Exceptional lifecycle differences are not a separate PAPER gate.
 
 | Pair | GAME_WINNER | x.5 SPREAD | x.5 TOTAL |
 |---|---|---|---|
@@ -61,7 +61,7 @@ The 2026-09-22 census did not recover NCAAB-specific settlement equivalence for 
 
 This does **not** copy NBA PR #506 settlement behaviour.
 
-Audit marker: `exceptional_settlement_mismatch_possible`. Not live-execution-grade.
+The remaining block is ordinary-contract evidence (`ncaab_venue_pair_family_not_evidence_backed` / runtime `not_registered`), not exceptional settlement. New trades do not emit `exceptional_settlement_mismatch_possible`. Historical rows that stored that string stay readable. Live execution stays disabled.
 
 ---
 

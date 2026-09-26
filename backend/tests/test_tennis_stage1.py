@@ -296,20 +296,20 @@ def test_atp_wta_and_singles_boundaries_fail_closed() -> None:
     assert kalshi_scope.reason == "tennis_tournament_not_admitted"
 
 
-def test_match_winner_stays_non_executable_with_explicit_reason() -> None:
+def test_match_winner_is_paper_admitted_without_retirement_block() -> None:
     left, right = _pair_markets()
     assert registered_canonical_key(left, right) == CANONICAL_TENNIS_MATCH_WINNER
     matched = MarketMatcher().match(left, right)
     assert matched.matched is True
-    assert TENNIS_RETIREMENT_SETTLEMENT_NOT_EQUIVALENT in matched.reasons
-    assert OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in matched.reasons
+    assert TENNIS_RETIREMENT_SETTLEMENT_NOT_EQUIVALENT not in matched.reasons
+    assert OWNER_APPROVED_PAPER_EQUIVALENCE_REASON in matched.reasons
     admission = assess_catalogue_admission(left, right)
-    assert admission.allowed is False
-    assert admission.paper_mode_admitted is False
+    assert admission.allowed is True
+    assert admission.paper_mode_admitted is True
     assert admission.live_execution_eligible is False
-    assert admission.rejection_reason == TENNIS_RETIREMENT_SETTLEMENT_NOT_EQUIVALENT
-    assert paper_assumed_solver_model(left, right) is None
-    assert scan_eligible_pair(left, right, matched) is False
+    assert admission.rejection_reason is None
+    assert paper_assumed_solver_model(left, right) == "simple_complete_set"
+    assert scan_eligible_pair(left, right, matched) is True
     identity = pair_identity_from_markets(left, right)
     assert identity is not None
     assert identity.register_canonical_key == CANONICAL_TENNIS_MATCH_WINNER
@@ -338,22 +338,21 @@ def test_middle_name_alias_is_evidence_backed_only() -> None:
     assert left.home_team == right.home_team
 
 
-def test_universe_does_not_price_depth_for_non_executable_tennis() -> None:
+def test_universe_prices_depth_for_paper_tennis_match_winner() -> None:
     left, right = _pair_markets()
     matched = MarketMatcher().match(left, right)
-    assert scan_eligible_pair(left, right, matched) is False
+    assert scan_eligible_pair(left, right, matched) is True
     from sports_hedge.application.collector import _kalshi_markets_needing_depth, _NormalizedMarket
 
+    kalshi_leg = _NormalizedMarket(raw={}, canonical=right)
     pair = (
         VenueName.MATCHBOOK,
         VenueName.KALSHI,
         _NormalizedMarket(raw={}, canonical=left),
-        _NormalizedMarket(raw={}, canonical=right),
+        kalshi_leg,
         matched,
     )
-    eligible = [pair] if scan_eligible_pair(left, right, matched) else []
-    assert eligible == []
-    assert _kalshi_markets_needing_depth(eligible) == []
+    assert _kalshi_markets_needing_depth([pair]) == [kalshi_leg]
 
 
 def test_provider_concurrency_and_tennis_discovery_scope() -> None:
@@ -373,8 +372,8 @@ def test_provider_concurrency_and_tennis_discovery_scope() -> None:
     assert len(catalog) == PRINCIPAL_OPERATOR_COMPETITION_COUNT == 37
     assert OPERATOR_COMPETITION_REGISTRY_VERSION == 9
     assert catalog["atp"]["selectable"] is True
-    assert catalog["atp"]["paper_executable"] is False
-    assert catalog["wta"]["paper_executable"] is False
+    assert catalog["atp"]["paper_executable"] is True
+    assert catalog["wta"]["paper_executable"] is True
     assert catalog["atp"]["default_selected"] is False
     assert "atp" not in default_operator_competition_code_values()
     assert selected_includes_tennis(["atp"]) is True

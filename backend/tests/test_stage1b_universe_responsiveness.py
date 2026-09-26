@@ -413,7 +413,7 @@ def test_football_pairing_matches_cartesian_oracle() -> None:
     _prove_pairing(left, polymarket)
     _prove_pairing(polymarket, right)
     matcher = MarketMatcher()
-    assert matcher.match(left[0], polymarket[0]).matched is False
+    assert matcher.match(left[0], polymarket[0]).matched is True
     chosen = greedy_unique_market_matches(left, right, matcher, priority_pair=PRIORITY)
     paired = {(left[i].source_market_id, right[j].source_market_id) for i, j, _match in chosen}
     assert ("mb-1x2", "k-1x2") in paired

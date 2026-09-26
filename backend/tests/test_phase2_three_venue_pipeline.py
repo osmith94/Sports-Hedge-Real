@@ -333,7 +333,7 @@ def test_three_england_spain_binaries_promote_to_one_match_result() -> None:
     ]
     assert promoted[0].family is MarketFamily.MATCH_RESULT
     assert promoted[0].period is FootballPeriod.FULL_TIME
-    assert canonical_key_for_market(promoted[0]) is None
+    assert canonical_key_for_market(promoted[0]) == "MATCH_RESULT_FT"
 
 
 def test_adversarial_wording_is_not_promoted_to_1x2() -> None:
@@ -380,7 +380,7 @@ def test_polymarket_structured_full_time_total_normalizes(line: str) -> None:
         CanonicalOutcome.OVER,
         CanonicalOutcome.UNDER,
     }
-    assert canonical_key_for_market(market) is None
+    assert canonical_key_for_market(market) == f"TOTAL_GOALS_FT:{line}"
 
 
 @pytest.mark.parametrize(
@@ -448,17 +448,22 @@ def test_matchbook_kalshi_selection_is_unchanged_when_polymarket_markets_exist()
     with_pm_present = _pair_keys(left, right)
     assert with_pm_present == without_pm
     assert len(without_pm) == 8
-    assert all(canonical_key_for_market(market) is None for market in extra)
+    assert [canonical_key_for_market(market) for market in extra] == [
+        "MATCH_RESULT_FT",
+        "BTTS_FT",
+        "TOTAL_GOALS_FT:2.5",
+    ]
     matcher = _MatcherCallCounter(MarketMatcher())
     chosen = greedy_unique_market_matches(extra, right, matcher)
-    assert chosen == []
-    assert matcher.calls == 0
+    assert len(chosen) == 3
+    assert matcher.calls > 0
     for market in extra:
-        assert registered_canonical_key(left[0], market) is None
-        assert registered_canonical_key(market, right[0]) is None
+        assert registered_canonical_key(left[0], market) is None or market.family is MarketFamily.MATCH_RESULT
+        same_family = next(item for item in right if item.family is market.family and item.line == market.line)
+        assert registered_canonical_key(market, same_family) == canonical_key_for_market(market)
 
 
-def test_promoted_polymarket_match_result_is_not_register_eligible() -> None:
+def test_promoted_polymarket_match_result_is_register_eligible() -> None:
     normalizer = PolymarketNormalizer()
     event = normalizer.normalize_event(ENGLAND_SPAIN)
     payloads = [
@@ -470,10 +475,12 @@ def test_promoted_polymarket_match_result_is_not_register_eligible() -> None:
     assert len(promoted) == 1
     left, right = _mb_k_board()
     match = MarketMatcher().match(left[0], promoted[0])
-    assert scan_eligible_pair(left[0], promoted[0], match) is False
-    assert scan_eligible_pair(promoted[0], right[0], MarketMatcher().match(promoted[0], right[0])) is False
-    assert APPROVED_PAPER_VENUE_PAIR == frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
-    assert VenueName.POLYMARKET not in APPROVED_PAPER_VENUE_PAIR
+    assert scan_eligible_pair(left[0], promoted[0], match) is True
+    assert scan_eligible_pair(promoted[0], right[0], MarketMatcher().match(promoted[0], right[0])) is True
+    assert registered_canonical_key(left[0], promoted[0]) == "MATCH_RESULT_FT"
+    assert APPROVED_PAPER_VENUE_PAIR == frozenset(
+        {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
+    )
 
 
 def test_catalogue_row_identity_is_still_event_plus_canonical_key() -> None:

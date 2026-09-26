@@ -3840,12 +3840,7 @@ class PaperOperationsService:
                 detail="paper trade opened; guaranteed opening profit is recorded only after the complete hedge validates",
             )
         ]
-        from sports_hedge.nba.constants import NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT
-        from sports_hedge.nba.labels import NBA_SETTLEMENT_CAVEAT_OPERATOR_TEXT
-        from sports_hedge.ncaab.constants import NCAAB_EXCEPTIONAL_SETTLEMENT_CAVEAT, NCAAB_PAIR_UNAPPROVED_REASON
-        from sports_hedge.ncaab.labels import NCAAB_SETTLEMENT_CAVEAT_OPERATOR_TEXT
-        from sports_hedge.nfl.constants import NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT
-        from sports_hedge.nfl.labels import NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT
+        from sports_hedge.ncaab.constants import NCAAB_PAIR_UNAPPROVED_REASON
 
         if is_ncaab_paper_trade(opportunity) or "ncaa" in str(opportunity.competition or "").casefold():
             audit.append(
@@ -3853,25 +3848,7 @@ class PaperOperationsService:
                     event_id=f"{paper_trade_id(plan.opportunity_id)}:{NCAAB_PAIR_UNAPPROVED_REASON}",
                     occurred_at=occurred_at,
                     event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail=f"{NCAAB_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NCAAB_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
-                )
-            )
-        elif competition_name == "NFL":
-            audit.append(
-                PaperTradeAuditEvent(
-                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}",
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail=f"{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
-                )
-            )
-        elif competition_name == "NBA":
-            audit.append(
-                PaperTradeAuditEvent(
-                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT}",
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail=f"{NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NBA_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
+                    detail=NCAAB_PAIR_UNAPPROVED_REASON,
                 )
             )
         return PaperTrade(

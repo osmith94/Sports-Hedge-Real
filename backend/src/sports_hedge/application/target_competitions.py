@@ -1507,12 +1507,7 @@ def operator_competition_catalog() -> list[dict[str, Any]]:
                 "unavailable_reason": competition_unavailable_reason(item),
                 "market_scope": "FIXTURE_MATCH",
                 "observation_only": False,
-                "paper_executable": selectable
-                and item.code
-                not in {
-                    TargetCompetitionCode.ATP,
-                    TargetCompetitionCode.WTA,
-                },
+                "paper_executable": selectable,
             }
         )
     return rows

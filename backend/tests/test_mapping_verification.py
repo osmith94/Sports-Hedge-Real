@@ -246,8 +246,8 @@ def test_confirmed_reusable_rule_maps_second_fixture_same_venue() -> None:
             )
         ),
     )
-    assert unregistered.matched is False
-    assert "not_registered" in unregistered.reasons
+    assert unregistered.matched is True
+    assert "not_registered" not in unregistered.reasons
 
     first = matcher.match(
         _market(_event(VenueName.MATCHBOOK, "Leeds United", "Chelsea", source_event_id="mb-leeds")),

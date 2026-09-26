@@ -543,7 +543,11 @@ async def test_collector_elapsed_collection_time_is_included_in_matchbook_retrie
 async def test_collector_missing_polymarket_timestamp_is_not_fresh() -> None:
     report = await _collect(MissingTimestampPolymarket())
     assert report.paper_decisions
-    decision = report.paper_decisions[0]
+    decision = next(
+        item
+        for item in report.paper_decisions
+        if {cost.venue for cost in item.venue_costs} == {VenueName.MATCHBOOK, VenueName.KALSHI}
+    )
     assert decision.quote_age_ms is not None
     assert "unknown_quote_age" not in decision.rejection_reasons
     assert "missing_quote_timestamp" not in decision.rejection_reasons
@@ -562,6 +566,10 @@ async def test_collector_mixed_book_ages_use_oldest_required_quote() -> None:
 async def test_collector_future_book_timestamp_is_unknown() -> None:
     report = await _collect(FutureTimestampPolymarket())
     assert report.paper_decisions
-    decision = report.paper_decisions[0]
+    decision = next(
+        item
+        for item in report.paper_decisions
+        if {cost.venue for cost in item.venue_costs} == {VenueName.MATCHBOOK, VenueName.KALSHI}
+    )
     assert decision.quote_age_ms is not None
     assert decision.eligible_for_paper_simulation is True

@@ -5,7 +5,6 @@ import { getActiveTradeEvents, getPaperTrade } from "../../../lib/api";
 import { ActiveTradeLog } from "../../../components/active-trade-log";
 import { money } from "../../../lib/format";
 import { HydratedRelativeTime } from "../../../components/hydrated-relative-time";
-import { NBA_SETTLEMENT_CAVEAT_TEXT, NFL_SETTLEMENT_CAVEAT_TEXT, tradeShowsNbaSettlementCaveat, tradeShowsNflSettlementCaveat } from "../../../lib/paper-trade-display";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +36,6 @@ export default async function PaperTradeDetailPage({
             PAPER MODE persisted record. Solver {trade.solver_model ?? "n/a"}. Provenance{" "}
             {trade.provenance}. No venue orders are placed. Simulated internal, paper-simulated
             external, and operator-confirmed external fills stay distinct.
-            {tradeShowsNflSettlementCaveat(trade) ? ` ${NFL_SETTLEMENT_CAVEAT_TEXT}` : tradeShowsNbaSettlementCaveat(trade) ? ` ${NBA_SETTLEMENT_CAVEAT_TEXT}` : ""}
           </p>
         </div>
         <Link href="/paper" className="demo-label">Back to trade book</Link>

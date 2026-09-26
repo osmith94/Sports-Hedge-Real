@@ -149,7 +149,7 @@ def validate_manual_settlement_outcome(trade: PaperTrade, winning_outcome: str) 
         "tied",
         "push",
     }:
-        return NFL_EXCEPTIONAL_TIE_BLOCKER
+        return "canonical_outcome_not_determined"
     space = canonical_result_space(trade)
     if space.unsupported_reason:
         return space.unsupported_reason

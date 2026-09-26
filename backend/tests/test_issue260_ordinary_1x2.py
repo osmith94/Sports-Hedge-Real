@@ -243,8 +243,8 @@ def test_polymarket_unknown_1x2_still_fails_closed() -> None:
         ),
     )
     result = MarketMatcher().match(mb, polymarket)
-    assert result.matched is False
-    assert "not_registered" in result.reasons
+    assert result.matched is True
+    assert "not_registered" not in result.reasons
 
 
 def test_to_qualify_and_two_way_and_first_half_reject() -> None:

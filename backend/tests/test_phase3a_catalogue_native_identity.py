@@ -1,7 +1,8 @@
 """Phase 3A: one catalogue row keeps venue-native ids unless they are empty.
 
-Synthetic fixture markets. Not live quotes. Polymarket is still outside the
-Approved Register; these rows are built directly to test identity merge.
+Synthetic fixture markets. Not live quotes. Polymarket football rows that
+normalize to a registered canonical key are PAPER-admitted. These rows are
+built directly to test identity merge and native-id conflict protection.
 """
 
 from __future__ import annotations
@@ -314,8 +315,10 @@ def test_one_row_prepares_matchbook_kalshi_and_polymarket_combinations() -> None
             ("away", "713856789012345678903"),
         ],
     )
-    assert canonical_key_for_market(identity_row) is None
-    assert APPROVED_PAPER_VENUE_PAIR == frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
+    assert canonical_key_for_market(identity_row) == "MATCH_RESULT_FT"
+    assert APPROVED_PAPER_VENUE_PAIR == frozenset(
+        {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
+    )
     identity = DerivedPriceEngineItem(
         catalogue_row_id=catalogue_row_id_for(EVENT_ID, KEY),
         content_version=1,

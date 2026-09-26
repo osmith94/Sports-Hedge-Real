@@ -11,6 +11,10 @@ const BLOCKER_LABELS: Record<string, string> = {
   nfl_exceptional_tie_fail_closed: "NFL exceptional tie — fail closed",
   nba_exceptional_settlement_fail_closed: "NBA exceptional lifecycle — fail closed",
   nba_normal_completion_not_proven: "NBA normal completion not proven",
+  exceptional_settlement_mismatch_possible: "Historical exceptional settlement caveat",
+  canonical_outcome_not_determined: "Canonical outcome not determined",
+  mlb_settlement_equivalence_not_proven: "Historical MLB settlement equivalence not proven",
+  tennis_retirement_settlement_not_equivalent: "Historical tennis retirement settlement block",
   void_matchbook_runner: "Voided Matchbook runner",
 };
 
@@ -35,7 +39,7 @@ export function settlementReconciliationLabel(trade: PaperTrade): string | null 
 export function blockerLabel(reason: string): string {
   if (BLOCKER_LABELS[reason]) return BLOCKER_LABELS[reason];
   if (reason.startsWith("provider_status_")) {
-    return `Exceptional lifecycle · ${reason.slice("provider_status_".length).replaceAll("_", " ")}`;
+    return `Provider status · ${reason.slice("provider_status_".length).replaceAll("_", " ")}`;
   }
   return reason.replaceAll("_", " ");
 }

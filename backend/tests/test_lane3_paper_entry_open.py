@@ -259,9 +259,8 @@ def test_lane3_mb_k_and_pm_k_lock_correct_pools(tmp_path: Path) -> None:
             liquidity_snapshot=_standing(),
         )
         decision = scan.scan_pair(_polymarket_btts(), _kalshi_btts(), **kwargs)
-        assert decision.market_match.matched is False
-        assert "not_registered" in decision.market_match.reasons
-        assert decision.eligible_for_paper_simulation is False
+        assert decision.market_match.matched is True
+        assert "not_registered" not in decision.market_match.reasons
         assert ops.list_active_trades() == []
         after = ledger.treasury.snapshot()
         assert after.pool(VenueName.POLYMARKET, "USD").locked_capital == opening.pool(

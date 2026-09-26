@@ -2,7 +2,7 @@
 
 Fixture/demo books only. Proves the reviewed workstreams still agree after
 merge: post-kickoff IN PLAY, execution reprice, MLB PAPER admission, and
-Polymarket catalogue identity that stays outside the football Approved Register.
+structurally equivalent Polymarket football pairs inside the Approved Register.
 """
 
 from __future__ import annotations
@@ -373,14 +373,15 @@ def test_mlb_paper_admission_still_reprices_and_stays_off_live_execution() -> No
     assert execution_reprice_permitted(stale) is True
 
 
-def test_football_polymarket_stays_outside_the_approved_register() -> None:
-    """Case E: football PM pairs do not become executable register keys."""
+def test_football_polymarket_structural_pairs_are_paper_admitted() -> None:
+    """Case E: structurally equivalent football PM pairs are PAPER-admitted."""
 
-    assert APPROVED_PAPER_VENUE_PAIR == frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
-    assert VenueName.POLYMARKET not in APPROVED_PAPER_VENUE_PAIR
+    assert APPROVED_PAPER_VENUE_PAIR == frozenset(
+        {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
+    )
     assert registered_canonical_key(_mb(), _kalshi()) == "MATCH_RESULT_FT"
-    assert registered_canonical_key(_mb(), _polymarket()) is None
-    assert registered_canonical_key(_polymarket(), _kalshi()) is None
+    assert registered_canonical_key(_mb(), _polymarket()) == "MATCH_RESULT_FT"
+    assert registered_canonical_key(_polymarket(), _kalshi()) == "MATCH_RESULT_FT"
     catalog = {item["code"]: item for item in operator_competition_catalog()}
     assert catalog[TargetCompetitionCode.PREMIER_LEAGUE.value]["paper_executable"] is True
     assert Settings().sports_hedge_execution_enabled is False

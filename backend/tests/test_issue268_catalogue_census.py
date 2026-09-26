@@ -154,15 +154,16 @@ def test_corpus_classifications_match_expected_states() -> None:
             assert assessment.solver_model is not None
             assert assessment.settlement_complete is True
             assert assessment.execution_eligible is False
-            if {entry.left.venue, entry.right.venue} == {
-                VenueName.MATCHBOOK,
-                VenueName.KALSHI,
-            }:
+            from sports_hedge.matching.approved_register import registered_structural_match
+
+            left_market = normalize_payload_side(entry.left)
+            right_market = normalize_payload_side(entry.right)
+            if registered_structural_match(left_market, right_market):
                 assert assessment.paper_mode_admitted is True
                 assert assessment.matcher_matched is True
+                assert assessment.execution_eligible is False
             else:
                 assert assessment.paper_mode_admitted is False
-                assert assessment.matcher_matched is False
         elif entry.known_kind == "paper_assumed":
             assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
             assert assessment.settlement_complete is False
@@ -249,15 +250,15 @@ def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
         confidence=0.99,
     )
     assessment = classify_pair(left, right)
-    assert assessment.state is CatalogueApprovalState.UNSUPPORTED
-    assert assessment.reason == "not_registered"
-    assert assessment.matcher_matched is False
-    assert assessment.paper_mode_admitted is False
+    assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert assessment.reason == "paper_assumed_equivalent"
+    assert assessment.matcher_matched is True
+    assert assessment.paper_mode_admitted is True
+    assert assessment.execution_eligible is False
 
 
 def test_unregistered_examples_are_not_runtime_review_loops() -> None:
     ids = {
-        "bad-1x2-mb-pm-unknown-settlement",
         "bad-ftts-missing-no-goal-both",
         "review-team-total-mb-pm",
     }
@@ -271,6 +272,7 @@ def test_unregistered_examples_are_not_runtime_review_loops() -> None:
         "bad-totals-k-ambiguous-rules",
         "bad-ftts-k-unproven-regulation",
         "bad-1x2-mb-k-cancel-reschedule-fair-price",
+        "bad-1x2-mb-pm-unknown-settlement",
     }
     for entry_id in paper_assumed_ids:
         assessment = classify_payload_pair(by_id[entry_id].left, by_id[entry_id].right)
@@ -351,12 +353,12 @@ def test_family_coverage_report_has_no_silent_regressions() -> None:
     assert report.unexpected_known_good_regressions == 0
     assert report.unexpected_known_bad_approvals == 0
     assert report.known_good_retained == 14
-    assert report.paper_assumed_count == 5
+    assert report.paper_assumed_count == 6
     assert report.matcher_catalogue_conflicts == 0
     assert report.conflict_entry_ids == []
     assert report.families["match_result_1x2"].after_approved == 3
-    assert report.families["match_result_1x2"].paper_assumed_equivalent == 2
-    assert report.families["match_result_1x2"].before_solver_admitted == 3
+    assert report.families["match_result_1x2"].paper_assumed_equivalent == 3
+    assert report.families["match_result_1x2"].before_solver_admitted == 6
     assert report.families["both_teams_to_score"].paper_assumed_equivalent == 1
     assert report.families["total_goals_half_line"].paper_assumed_equivalent == 1
     assert report.families["first_team_to_score"].paper_assumed_equivalent == 1
@@ -420,22 +422,25 @@ def _scan_service() -> tuple[PaperScanService, SqliteMarketIntelligenceRepositor
     return PaperScanService(MarketIntelligenceService(repository)), repository
 
 
-def test_independently_proven_unregistered_pair_is_not_paper_admitted() -> None:
+def test_independently_proven_registered_pair_is_paper_admitted() -> None:
     entry = next(item for item in census_corpus() if item.entry_id == "good-1x2-mb-pm")
     left = normalize_payload_side(entry.left)
     right = normalize_payload_side(entry.right)
     match = MarketMatcher().match(left, right)
-    assert match.matched is False
-    assert "not_registered" in match.reasons
+    assert match.matched is True
+    assert "not_registered" not in match.reasons
     assessment = classify_payload_pair(entry.left, entry.right)
     assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
-    assert assessment.paper_mode_admitted is False
-    assert catalogue_allows_solver(left, right) is False
-    assert scan_eligible_pair(left, right, match) is False
+    assert assessment.paper_mode_admitted is True
+    assert assessment.execution_eligible is False
+    assert catalogue_allows_solver(left, right) is True
+    assert catalogue_allows_live_execution(left, right) is True
+    assert Settings().sports_hedge_execution_enabled is False
+    assert scan_eligible_pair(left, right, match) is True
     admission = assess_catalogue_admission(left, right)
-    assert admission.allowed is False
-    assert admission.paper_mode_admitted is False
-    assert admission.rejection_reason == "catalogue_not_registered"
+    assert admission.allowed is True
+    assert admission.paper_mode_admitted is True
+    assert admission.live_execution_eligible is False
 
     service, repository = _scan_service()
     try:
@@ -468,10 +473,10 @@ def test_independently_proven_unregistered_pair_is_not_paper_admitted() -> None:
             ],
             maximum_execution_risk=100,
         )
-        assert decision.market_match.matched is False
-        assert "not_registered" in decision.market_match.reasons
+        assert decision.market_match.matched is True
+        assert "not_registered" not in decision.market_match.reasons
         assert decision.mapping_review_candidate is None
-        assert "market_not_equivalent" in decision.rejection_reasons
+        assert "market_not_equivalent" not in decision.rejection_reasons
         assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()

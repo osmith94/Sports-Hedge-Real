@@ -18,10 +18,8 @@ from sports_hedge.domain.football import (
 from sports_hedge.nfl.constants import (
     NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT,
     NFL_LIFECYCLE_AUDIT_KIND,
-    NFL_NORMAL_COMPLETION_NOT_PROVEN,
     NFL_NOT_LIVE_EXECUTION_REASON,
     NFL_PAPER_NORMAL_COMPLETION_REASON,
-    NFL_SETTLEMENT_FAIL_CLOSED_REASON,
 )
 from sports_hedge.nfl.detect import is_nfl_canonical_event, is_nfl_market_family
 
@@ -133,7 +131,13 @@ def nfl_paper_settlement(
 
 
 def nfl_paper_audit_reasons() -> list[str]:
-    return list(NFL_PAPER_AUDIT_REASONS)
+    """New PAPER rows record the live-execution boundary only.
+
+    Historical trades may still store ``exceptional_settlement_mismatch_possible``
+    and the normal-completion reason. Those strings stay readable.
+    """
+
+    return [NFL_NOT_LIVE_EXECUTION_REASON]
 
 
 def is_nfl_paper_trade(trade) -> bool:
@@ -152,18 +156,9 @@ def is_nfl_paper_trade(trade) -> bool:
 
 
 def nfl_exceptional_status_blocker(*values: object) -> str | None:
-    """Fail closed when provider evidence names an exceptional lifecycle."""
+    """Exceptional lifecycle tokens do not block PAPER settlement by themselves."""
 
-    for value in values:
-        text = str(value or "").strip().casefold()
-        if not text:
-            continue
-        if text in _EXCEPTIONAL_STATUS_TOKENS:
-            return NFL_SETTLEMENT_FAIL_CLOSED_REASON
-        compact = text.replace("_", " ")
-        for token in _EXCEPTIONAL_STATUS_TOKENS:
-            if token in compact:
-                return NFL_SETTLEMENT_FAIL_CLOSED_REASON
+    del values
     return None
 
 
@@ -171,7 +166,7 @@ def nfl_tied_score_blocker(home_score: int | None, away_score: int | None) -> st
     if home_score is None or away_score is None:
         return None
     if home_score == away_score:
-        return NFL_SETTLEMENT_FAIL_CLOSED_REASON
+        return "canonical_outcome_not_determined"
     return None
 
 
@@ -247,13 +242,7 @@ def nfl_automatic_settlement_lifecycle_blocker(
     normal observation and never records postpone/suspend/cancel/tie/50-50.
     """
 
-    history = list(nfl_lifecycle_observations_from_trade(trade))
-    current = nfl_lifecycle_observation(current_tokens)
-    all_observations = [*history, current]
-    if any(item.phase == NFL_LIFECYCLE_EXCEPTIONAL for item in all_observations):
-        return NFL_SETTLEMENT_FAIL_CLOSED_REASON
-    if not any(item.phase == NFL_LIFECYCLE_PRE_RESULT for item in history):
-        return NFL_NORMAL_COMPLETION_NOT_PROVEN
+    del trade, current_tokens
     return None
 
 

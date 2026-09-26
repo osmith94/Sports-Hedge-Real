@@ -39,8 +39,13 @@ describe("settlement reconciliation display", () => {
     expect(settlementReconciliationLabel(row)).toBe(
       "Auto-settlement blocked · Incomplete provider result",
     );
-    expect(blockerLabel("provider_status_postponed")).toBe("Exceptional lifecycle · postponed");
+    expect(blockerLabel("provider_status_postponed")).toBe("Provider status · postponed");
     expect(blockerLabel("provider_unavailable")).toBe("Provider unavailable");
+    expect(blockerLabel("exceptional_settlement_mismatch_possible")).toBe(
+      "Historical exceptional settlement caveat",
+    );
+    expect(blockerLabel("nfl_exceptional_tie_fail_closed")).toBe("NFL exceptional tie — fail closed");
+    expect(blockerLabel("canonical_outcome_not_determined")).toBe("Canonical outcome not determined");
   });
 
   it("operator failsafe asks for a canonical result, not source/source id", () => {

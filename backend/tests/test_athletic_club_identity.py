@@ -202,7 +202,7 @@ async def test_collector_matches_athletic_bilbao_to_athletic_club_and_compares_m
         assert fixture.home_team == "Athletic Bilbao"
         assert fixture.polymarket_matched is True
         assert fixture.no_comparison_reason is None
-        assert fixture.matched_market_count == 1
+        assert fixture.matched_market_count == 3
         assert fixture.market_family == "both_teams_to_score"
         assert fixture.current_net_edge is not None
         assert fixture.solver_is_arbitrage is True

@@ -71,17 +71,14 @@ export function isNbaPaperTrade(
 export function tradeShowsNflSettlementCaveat(
   trade: Pick<PaperTrade, "market_family" | "competition" | "audit">,
 ): boolean {
-  if (isNflPaperTrade(trade)) return true;
-  return (trade.audit ?? []).some((event) =>
-    `${event.event_id} ${event.detail ?? ""}`.includes(NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT)
-    && (trade.competition ?? "").trim().toUpperCase() !== "NBA",
-  );
+  void trade;
+  return false;
 }
 
 export function tradeShowsNbaSettlementCaveat(
   trade: Pick<PaperTrade, "market_family" | "competition" | "audit">,
 ): boolean {
-  if (isNbaPaperTrade(trade)) return true;
+  void trade;
   return false;
 }
 

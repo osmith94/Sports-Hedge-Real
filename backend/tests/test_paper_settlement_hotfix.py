@@ -23,7 +23,6 @@ from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.paper.canonical_results import (
-    NFL_EXCEPTIONAL_TIE_BLOCKER,
     PAPER_MANUAL_SETTLEMENT_SOURCE,
     canonical_result_space,
     manual_settlement_source_id,
@@ -542,7 +541,7 @@ def test_manual_nfl_game_winner_rejects_tie(tmp_path: Path) -> None:
             profit_commission_cost(VenueName.MATCHBOOK, Decimal("0.02"), captured_at=NOW)
         ]
         _persist_open(ops, trade)
-        with pytest.raises(PaperOperationsError, match=NFL_EXCEPTIONAL_TIE_BLOCKER):
+        with pytest.raises(PaperOperationsError, match="canonical_outcome_not_determined"):
             ops.settle_manual_result(
                 trade.trade_id,
                 PaperManualSettlementRequest(winning_outcome="draw"),

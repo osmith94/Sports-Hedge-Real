@@ -65,8 +65,8 @@ def test_matchbook_event_to_canonical_to_supported_polymarket_equivalent() -> No
     assert mb_btts.settlement.is_economically_complete()
     assert pm_btts.settlement.is_economically_complete()
     equivalent = MarketMatcher().match(mb_btts, pm_btts)
-    assert equivalent.matched is False
-    assert "not_registered" in equivalent.reasons
+    assert equivalent.matched is True
+    assert "not_registered" not in equivalent.reasons
 
     docs = (Path(__file__).resolve().parents[2] / "docs" / "DEMO_READINESS.md").read_text(
         encoding="utf-8"

@@ -61,7 +61,7 @@ def mlb_pair_non_executable_reason(left: CanonicalMarket, right: CanonicalMarket
         return "market_family_mismatch"
     if left.line != right.line:
         return "mlb_total_line_mismatch"
-    return MLB_SETTLEMENT_EVIDENCE_REASON
+    return "mlb_structural_identity_not_admitted"
 
 
 def is_mlb_paper_trade(trade) -> bool:

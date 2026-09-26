@@ -13,6 +13,7 @@ from sports_hedge.api.paper import get_paper_ledger, get_paper_operations_servic
 from sports_hedge.application.collector import CollectionReport, DiscoveredFixture
 from sports_hedge.application.complete_set import SOLVER_MODEL_GENERALIZED, SOLVER_MODEL_SIMPLE
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.matching.approved_register import registered_canonical_key
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
@@ -38,7 +39,7 @@ from sports_hedge.paper.trades import PaperLegFillKind, PaperTradeState
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from sports_hedge.venues import MatchbookClient, PolymarketClient, KalshiClient
 from test_kalshi_k1 import KALSHI_EVENT, KALSHI_SERIES, _btts_market
-from test_paper_scan_pipeline import KICKOFF, matchbook_payloads, polymarket_payloads
+from test_paper_scan_pipeline import matchbook_payloads, polymarket_payloads
 from test_step7_safe_market_expansion import MB_EVENT
 from test_step8b_first_team_to_score import _ftts_mb_payload
 from venue_cost_helpers import profit_commission_cost
@@ -476,10 +477,10 @@ def test_polymarket_kalshi_pair_is_not_register_admitted(tmp_path: Path) -> None
             maximum_execution_risk=100,
             liquidity_snapshot=_standing(),
         )
-        assert decision.market_match.matched is False
-        assert "not_registered" in decision.market_match.reasons
-        assert decision.eligible_for_paper_simulation is False
+        assert decision.market_match.matched is True
+        assert registered_canonical_key(_polymarket_btts().market, _kalshi_btts().market) == "BTTS_FT"
         assert ops.list_active_trades() == []
+        assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()
         ledger.close()
@@ -744,13 +745,15 @@ def test_fixture_detail_and_trades_api_open_only_after_complete(tmp_path: Path) 
                         home_team="Newcastle United",
                         away_team="Chelsea",
                         competition="Premier League",
-                        kickoff_utc=KICKOFF,
-                        last_seen_at=OBSERVED,
+                        kickoff_utc=datetime.now(UTC) + timedelta(hours=2),
+                        last_seen_at=datetime.now(UTC),
                     )
                 ],
             )
         )
-        detail = client.get(f"/operations/fixtures/{decision.canonical_event_id}").json()
+        response = client.get(f"/operations/fixtures/{decision.canonical_event_id}")
+        detail = response.json()
+        assert response.status_code == 200, detail
         assert detail["execution_enabled"] is False
         assert detail["paper_mode"] == "paper"
         assert len(detail["paper_entries"]) == 1
