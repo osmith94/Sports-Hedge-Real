@@ -223,7 +223,12 @@ async def test_unbounded_universe_kalshi_series_slower_than_drain_succeeds() -> 
     assert series
     assert all(row.get("status") != "discovery_timeout" for row in series)
     assert all(row.get("status") == "ok" for row in series)
-    assert all(item >= SLOW_BUT_VALID_SECONDS for item in kalshi.call_elapsed)
+    assert kalshi.call_elapsed
+    # The fake records time.monotonic() around asyncio.sleep(0.12). Windows
+    # IOCP waits are millisecond timeouts and can wake about one timer tick
+    # before that clock has advanced by the requested float. A skipped or
+    # drain-length call stays at or below 50ms; a completed slow call does not.
+    assert all(item > PROVIDER_CANCEL_DRAIN_SECONDS for item in kalshi.call_elapsed)
     assert report.raw_kalshi_events >= 1
 
 
