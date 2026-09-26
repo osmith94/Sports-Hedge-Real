@@ -1359,6 +1359,8 @@ export type WatchlistLifecycleEventType =
   | "trigger_crossed"
   | "trigger_lost_before_fill"
   | "promoted_to_hot"
+  | "qualifying_detected"
+  | "qualifying_lost"
   | "paper_eligible"
   | "paper_fill_attempted"
   | "paper_fill_partial"
@@ -1469,6 +1471,12 @@ export type OpportunityLifecycleEvent = {
   capture_eligible?: boolean | null;
   attempt_id?: string | null;
   append_seq?: number | null;
+  gross_edge?: string | number | null;
+  limiting_depth_gbp?: string | number | null;
+  guaranteed_profit_gbp?: string | number | null;
+  quote_age_ms?: number | null;
+  pricing_lane?: string | null;
+  venue_pair?: string | null;
 };
 
 export async function runPaperCollection(

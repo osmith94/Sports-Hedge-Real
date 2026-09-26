@@ -1658,6 +1658,7 @@ def _persist_collection_report(
         (report.scan_diagnostics or {}).get(PRICE_ENGINE_ITEM_COMPLETION_CAPTURE)
     )
     if not already_captured:
+        lane = getattr(scan_lane, "value", scan_lane)
         for decision in report.paper_decisions:
             _persist_decision(
                 decision,
@@ -1666,6 +1667,7 @@ def _persist_collection_report(
                 watchlist=watchlist,
                 operations=operations,
                 refreshed_venues=report.enabled_venues,
+                pricing_lane=None if lane is None else str(lane),
             )
     _run_paper_position_management(report, operations=operations)
 
@@ -2531,7 +2533,12 @@ def _persist_decision(
     )
     if write_audit and audit is not None and history:
         audit.append_scan(build_paper_scan_record(decision, history))
-    watchlist.observe_paper_decision(decision, history, quote_age_ms=quote_age_ms)
+    watchlist.observe_paper_decision(
+        decision,
+        history,
+        quote_age_ms=quote_age_ms,
+        pricing_lane=pricing_lane,
+    )
     if operations is not None:
         operations.persist_triggered_chain(
             decision,

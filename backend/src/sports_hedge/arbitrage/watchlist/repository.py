@@ -226,6 +226,12 @@ class SqliteWatchlistRepository:
             "trigger_net_edge": "TEXT",
             "min_net_edge_scope": "TEXT",
             "min_net_edge_source": "TEXT",
+            "gross_edge": "TEXT",
+            "limiting_depth_gbp": "TEXT",
+            "guaranteed_profit_gbp": "TEXT",
+            "quote_age_ms": "INTEGER",
+            "pricing_lane": "TEXT",
+            "venue_pair": "TEXT",
         }
         for name, ddl in event_extras.items():
             if name not in event_columns:
@@ -420,8 +426,10 @@ class SqliteWatchlistRepository:
                     current_net_edge, distance_to_trigger_pp, detail,
                     fixture_label, market_family, canonical_event_id,
                     canonical_market_id, capture_eligible, attempt_id,
-                    trigger_net_edge, min_net_edge_scope, min_net_edge_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trigger_net_edge, min_net_edge_scope, min_net_edge_source,
+                    gross_edge, limiting_depth_gbp, guaranteed_profit_gbp,
+                    quote_age_ms, pricing_lane, venue_pair
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -441,6 +449,12 @@ class SqliteWatchlistRepository:
                     _stringify(event.trigger_net_edge),
                     event.min_net_edge_scope,
                     event.min_net_edge_source,
+                    _stringify(event.gross_edge),
+                    _stringify(event.limiting_depth_gbp),
+                    _stringify(event.guaranteed_profit_gbp),
+                    event.quote_age_ms,
+                    event.pricing_lane,
+                    event.venue_pair,
                 ),
             )
             self._commit()
@@ -547,6 +561,20 @@ class SqliteWatchlistRepository:
                 parameters,
             ).fetchall()
             return [_event_from_row(row) for row in rows]
+
+    def count_events(self, opportunity_id: str, event_type: LifecycleEventType) -> int:
+        """Indexed count for one opportunity. Used only at episode boundaries."""
+
+        with self.exclusive():
+            row = self._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM watchlist_lifecycle_events
+                WHERE opportunity_id = ? AND event_type = ?
+                """,
+                (opportunity_id, event_type.value),
+            ).fetchone()
+            return int(row[0] if row is not None else 0)
 
     def upsert_paper_fill_attempt(self, attempt: PaperFillAttempt) -> None:
         with self.exclusive():
@@ -720,6 +748,12 @@ def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
         trigger_net_edge=_decimal(_row_get(row, "trigger_net_edge")),
         min_net_edge_scope=_row_get(row, "min_net_edge_scope"),
         min_net_edge_source=_row_get(row, "min_net_edge_source"),
+        gross_edge=_decimal(_row_get(row, "gross_edge")),
+        limiting_depth_gbp=_decimal(_row_get(row, "limiting_depth_gbp")),
+        guaranteed_profit_gbp=_decimal(_row_get(row, "guaranteed_profit_gbp")),
+        quote_age_ms=_optional_int(_row_get(row, "quote_age_ms")),
+        pricing_lane=_row_get(row, "pricing_lane"),
+        venue_pair=_row_get(row, "venue_pair"),
     )
 
 

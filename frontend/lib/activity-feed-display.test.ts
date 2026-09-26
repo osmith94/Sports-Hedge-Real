@@ -180,7 +180,7 @@ describe("signal-only Activity feed", () => {
     assert.match(feed, /Promoted to HOT/);
     assert.match(
       feed,
-      /Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited/,
+      /Qualifying opportunity, Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited/,
     );
     assert.match(feed, /data-missed-trigger-event-id/);
     assert.match(feed, /feed-subject/);
@@ -192,6 +192,8 @@ describe("signal-only Activity feed", () => {
     assert.match(api, /paper_eligible/);
     assert.deepEqual([...OPERATOR_ACTIVITY_EVENT_TYPES], [
       "promoted_to_hot",
+      "qualifying_detected",
+      "qualifying_lost",
       "paper_eligible",
       "trigger_lost_before_fill",
       "paper_fill_complete",
@@ -202,6 +204,8 @@ describe("signal-only Activity feed", () => {
     assert.equal(isOperatorActivityEvent("trigger_crossed"), false);
     assert.equal(isOperatorActivityEvent("promoted_to_hot"), true);
     assert.equal(isOperatorActivityEvent("paper_eligible"), true);
+    assert.equal(isOperatorActivityEvent("qualifying_detected"), true);
+    assert.equal(isOperatorActivityEvent("qualifying_lost"), true);
     assert.equal(activityHistoryPath("watch:mkt-1"), "/activity/watch%3Amkt-1");
     assert.equal(
       activityHistoryPath("watch:mkt-1", "evt-signal"),
@@ -297,5 +301,70 @@ describe("signal-only Activity feed", () => {
       ),
       true,
     );
+  });
+
+  it("renders a qualifying opportunity separately from paper eligible", () => {
+    const items = activityFromWatchlist([
+      event({
+        event_id: "qualify-1",
+        event_type: "qualifying_detected",
+        occurred_at: "2026-09-20T12:00:00Z",
+        status: "TRIGGERED",
+        capture_eligible: false,
+        fixture_label: "North Macedonia v Switzerland",
+        market_family: "total_goals",
+        current_net_edge: "0.0363",
+        gross_edge: "0.0492",
+        limiting_depth_gbp: "206.91",
+        guaranteed_profit_gbp: "19.73",
+        venue_pair: "matchbook,kalshi",
+        pricing_lane: "background",
+        quote_age_ms: 800,
+        detail: "solver_qualified",
+      }),
+      event({
+        event_id: "eligible-1",
+        event_type: "paper_eligible",
+        occurred_at: "2026-09-20T12:00:01Z",
+        status: "TRIGGERED",
+        capture_eligible: true,
+        fixture_label: "North Macedonia v Switzerland",
+        market_family: "total_goals",
+        detail: "capture_eligible_triggered",
+      }),
+      event({
+        event_id: "lost-econ",
+        event_type: "qualifying_lost",
+        occurred_at: "2026-09-20T12:01:00Z",
+        capture_eligible: false,
+        fixture_label: "North Macedonia v Switzerland",
+        market_family: "total_goals",
+        detail: "qualifying lost · net edge below threshold",
+      }),
+      event({
+        event_id: "enter-1",
+        event_type: "paper_fill_complete",
+        occurred_at: "2026-09-20T12:02:00Z",
+        fixture_label: "North Macedonia v Switzerland",
+        market_family: "total_goals",
+      }),
+    ]);
+    assert.deepEqual(
+      items.map((item) => item.title),
+      ["Qualifying opportunity", "Paper eligible", "Qualifying lost", "Trade entered"],
+    );
+    assert.deepEqual(
+      items.map((item) => item.kind),
+      ["QUALIFYING_OPPORTUNITY", "PAPER_ELIGIBLE", "QUALIFYING_LOST", "TRADE_ENTERED"],
+    );
+    assert.equal(items[0]?.kind.replaceAll("_", " "), "QUALIFYING OPPORTUNITY");
+    assert.equal(items[0]?.subject, "North Macedonia v Switzerland · total goals");
+    assert.equal(
+      items[0]?.detail,
+      "MB / K · gross 4.92% · net 3.63% · executable £206.91 · guaranteed £19.73 · BACKGROUND pricing",
+    );
+    assert.equal(items[1]?.title, "Paper eligible");
+    assert.equal(items[2]?.detail, "qualifying lost · net edge below threshold");
+    assert.equal(items[3]?.title, "Trade entered");
   });
 });

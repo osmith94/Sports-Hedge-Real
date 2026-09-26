@@ -199,6 +199,7 @@ def test_trigger_lost_before_fill_stays_on_operator_feed() -> None:
     assert types == [
         LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
         LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
     ]
     lost = service.operator_activity()[0]
     assert lost.fixture_label == "Brentford v Chelsea"
@@ -238,6 +239,7 @@ def test_completed_paper_entry_renders_one_trade_entered_and_closed_renders_exit
         LifecycleEventType.CLOSED,
         LifecycleEventType.PAPER_FILL_COMPLETE,
         LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
     ]
     assert all(event.fixture_label == "Brentford v Chelsea" for event in operator)
     assert all(event.market_family == "both_teams_to_score" for event in operator)
@@ -286,13 +288,16 @@ def test_operator_activity_keeps_newest_first_chronology() -> None:
     assert [event.event_type for event in operator] == [
         LifecycleEventType.PAPER_FILL_COMPLETE,
         LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
         LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
         LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
     ]
     assert operator[0].occurred_at > operator[1].occurred_at
     assert operator[1].opportunity_id == other.opportunity_id
-    assert operator[2].opportunity_id == first.opportunity_id
+    assert operator[2].opportunity_id == other.opportunity_id
     assert operator[3].opportunity_id == first.opportunity_id
+    assert operator[4].opportunity_id == first.opportunity_id
     assert first.opportunity_id != other.opportunity_id
 
 
@@ -356,13 +361,19 @@ def test_watchlist_activity_api_operator_signal_hides_noise() -> None:
         )
         assert operator.status_code == 200
         operator_types = [item["event_type"] for item in operator.json()]
-        assert operator_types == ["trigger_lost_before_fill", "paper_eligible"]
+        assert operator_types == [
+            "trigger_lost_before_fill",
+            "paper_eligible",
+            "qualifying_detected",
+        ]
         payload = operator.json()[0]
         assert payload["fixture_label"] == "Brentford v Chelsea"
         assert payload["market_family"] == "both_teams_to_score"
         assert payload["capture_eligible"] is True
         assert OPERATOR_ACTIVITY_EVENT_TYPES == {
             LifecycleEventType.PROMOTED_TO_HOT,
+            LifecycleEventType.QUALIFYING_DETECTED,
+            LifecycleEventType.QUALIFYING_LOST,
             LifecycleEventType.PAPER_ELIGIBLE,
             LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
             LifecycleEventType.PAPER_FILL_COMPLETE,
@@ -519,7 +530,13 @@ def test_economic_only_trigger_lost_stays_in_audit_not_operator_feed() -> None:
     assert LifecycleEventType.TRIGGER_CROSSED in {
         event.event_type for event in service.activity(opportunity_id=triggered.opportunity_id)
     }
-    assert service.operator_activity() == []
+    operator_types = [event.event_type for event in service.operator_activity()]
+    assert operator_types == [
+        LifecycleEventType.QUALIFYING_LOST,
+        LifecycleEventType.QUALIFYING_DETECTED,
+    ]
+    assert LifecycleEventType.TRIGGER_LOST_BEFORE_FILL not in operator_types
+    assert LifecycleEventType.PAPER_ELIGIBLE not in operator_types
 
 
 def test_sticky_capture_eligible_during_triggered_episode_is_operator_visible() -> None:
@@ -542,6 +559,7 @@ def test_sticky_capture_eligible_during_triggered_episode_is_operator_visible() 
     assert [event.event_type for event in operator] == [
         LifecycleEventType.TRIGGER_LOST_BEFORE_FILL,
         LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
     ]
     assert operator[0].capture_eligible is True
     assert operator[1].capture_eligible is True
@@ -571,7 +589,8 @@ def test_durable_fill_attempt_start_suppresses_trigger_lost() -> None:
     types = {event.event_type for event in service.activity(opportunity_id=triggered.opportunity_id)}
     assert LifecycleEventType.TRIGGER_LOST_BEFORE_FILL not in types
     assert [event.event_type for event in service.operator_activity()] == [
-        LifecycleEventType.PAPER_ELIGIBLE
+        LifecycleEventType.PAPER_ELIGIBLE,
+        LifecycleEventType.QUALIFYING_DETECTED,
     ]
 
 
@@ -589,6 +608,7 @@ def test_operator_cards_carry_fixture_and_market_and_hide_trigger_crossed() -> N
     operator = service.operator_activity()
     assert {event.event_type for event in operator} == {
         LifecycleEventType.PROMOTED_TO_HOT,
+        LifecycleEventType.QUALIFYING_DETECTED,
         LifecycleEventType.PAPER_ELIGIBLE,
     }
     assert all(event.fixture_label == "Brentford v Chelsea" for event in operator)

@@ -36,6 +36,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     hot_promotion_opportunity_id,
     lifecycle_identity_from_opportunity,
     paper_fill_lifecycle_event_id,
+    qualifying_lifecycle_event_id,
     strike_distance_narrative,
     OpportunityObservationPoint,
 )
@@ -81,12 +82,14 @@ class WatchlistService:
         *,
         quote_age_ms: int | None = None,
         quote_age_basis: str | None = None,
+        pricing_lane: str | None = None,
     ) -> NearOpportunity | None:
         observation = observation_from_paper_decision(
             decision,
             history,
             quote_age_ms=quote_age_ms,
             quote_age_basis=quote_age_basis,
+            pricing_lane=pricing_lane,
         )
         if observation is None:
             return None
@@ -1002,6 +1005,25 @@ class WatchlistService:
                             capture_eligible=previous.capture_eligible,
                         )
                     )
+                    if not previous.capture_eligible:
+                        lost = self._qualifying_episode_event(
+                            current,
+                            observation,
+                            LifecycleEventType.QUALIFYING_LOST,
+                            detail=_qualifying_lost_detail(current),
+                        )
+                        if lost is not None:
+                            events.append(lost)
+
+        if _entered_qualifying_episode(previous, current):
+            detected = self._qualifying_episode_event(
+                current,
+                observation,
+                LifecycleEventType.QUALIFYING_DETECTED,
+                detail="solver_qualified",
+            )
+            if detected is not None:
+                events.append(detected)
 
         if _entered_capture_eligible_triggered_episode(previous, current):
             events.append(
@@ -1117,6 +1139,43 @@ class WatchlistService:
             )
         return emitted
 
+    def _qualifying_episode_event(
+        self,
+        opportunity: NearOpportunity,
+        observation: WatchObservation,
+        event_type: LifecycleEventType,
+        *,
+        detail: str,
+    ) -> OpportunityLifecycleEvent | None:
+        """Durable qualifying episode boundary. Count is the persisted episode index."""
+
+        detected = self.repository.count_events(
+            opportunity.opportunity_id,
+            LifecycleEventType.QUALIFYING_DETECTED,
+        )
+        episode = (
+            detected + 1 if event_type is LifecycleEventType.QUALIFYING_DETECTED else detected
+        )
+        if episode <= 0:
+            return None
+        venues = [venue.value for venue in opportunity.venues]
+        return self._event(
+            opportunity,
+            event_type,
+            detail=detail,
+            event_id=qualifying_lifecycle_event_id(
+                opportunity.opportunity_id,
+                event_type,
+                episode,
+            ),
+            gross_edge=opportunity.gross_edge,
+            limiting_depth_gbp=opportunity.limiting_depth_gbp,
+            guaranteed_profit_gbp=opportunity.guaranteed_profit_gbp,
+            quote_age_ms=opportunity.quote_age_ms,
+            pricing_lane=observation.pricing_lane,
+            venue_pair=",".join(venues) if venues else None,
+        )
+
     def _event(
         self,
         opportunity: NearOpportunity,
@@ -1124,7 +1183,20 @@ class WatchlistService:
         *,
         detail: str | None,
         capture_eligible: bool | None = None,
+        event_id: str | None = None,
+        gross_edge: Decimal | None = None,
+        limiting_depth_gbp: Decimal | None = None,
+        guaranteed_profit_gbp: Decimal | None = None,
+        quote_age_ms: int | None = None,
+        pricing_lane: str | None = None,
+        venue_pair: str | None = None,
     ) -> OpportunityLifecycleEvent:
+        identity = lifecycle_identity_from_opportunity(
+            opportunity, capture_eligible=capture_eligible
+        )
+        payload: dict[str, object] = {}
+        if event_id is not None:
+            payload["event_id"] = event_id
         return OpportunityLifecycleEvent(
             opportunity_id=opportunity.opportunity_id,
             occurred_at=opportunity.last_seen_at,
@@ -1133,9 +1205,14 @@ class WatchlistService:
             current_net_edge=opportunity.current_net_edge,
             distance_to_trigger_pp=opportunity.distance_to_trigger_pp,
             detail=detail,
-            **lifecycle_identity_from_opportunity(
-                opportunity, capture_eligible=capture_eligible
-            ),
+            gross_edge=gross_edge,
+            limiting_depth_gbp=limiting_depth_gbp,
+            guaranteed_profit_gbp=guaranteed_profit_gbp,
+            quote_age_ms=quote_age_ms,
+            pricing_lane=pricing_lane,
+            venue_pair=venue_pair,
+            **identity,
+            **payload,
         )
 
     def _fill_attempt_started(self, opportunity_id: str) -> bool:
@@ -1162,6 +1239,30 @@ def _episode_capture_eligible(
         and previous.capture_eligible
     )
     return sticky or observation.eligible_for_paper_simulation
+
+
+def _entered_qualifying_episode(
+    previous: NearOpportunity | None,
+    current: NearOpportunity,
+) -> bool:
+    """True when this observation opens a solver-qualified TRIGGERED episode.
+
+    QUALIFYING is the economic trigger (`solver_is_arbitrage` and net edge at
+    or above the configured minimum). It is not paper-capture eligibility.
+    The previous row is the durable episode boundary, including after restart.
+    """
+
+    if current.status != OpportunityStatus.TRIGGERED:
+        return False
+    return previous is None or previous.status != OpportunityStatus.TRIGGERED
+
+
+def _qualifying_lost_detail(current: NearOpportunity) -> str:
+    if current.rejection_reasons:
+        reason = ", ".join(reason.replace("_", " ") for reason in current.rejection_reasons)
+    else:
+        reason = current.status.value.lower()
+    return f"qualifying lost · {reason}"
 
 
 def _entered_capture_eligible_triggered_episode(

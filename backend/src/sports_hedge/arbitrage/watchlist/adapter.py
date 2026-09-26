@@ -22,6 +22,7 @@ def observation_from_paper_decision(
     *,
     quote_age_ms: int | None = None,
     quote_age_basis: str | None = None,
+    pricing_lane: str | None = None,
 ) -> WatchObservation | None:
     """Map a paper scan onto the watchlist ingest contract without changing solver gates."""
 
@@ -188,6 +189,7 @@ def observation_from_paper_decision(
         mapping_reasons=list(decision.market_match.reasons),
         mapping_provenance=decision.market_match.provenance,
         mapping_review_candidate=mapping_candidate,
+        pricing_lane=_pricing_lane(pricing_lane),
     )
 
 
@@ -211,3 +213,10 @@ def _currency_for_venue(
 
 def _dedupe(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def _pricing_lane(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text or None

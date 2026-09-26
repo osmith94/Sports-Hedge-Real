@@ -75,6 +75,8 @@ class LifecycleEventType(StrEnum):
     TRIGGER_CROSSED = "trigger_crossed"
     TRIGGER_LOST_BEFORE_FILL = "trigger_lost_before_fill"
     PROMOTED_TO_HOT = "promoted_to_hot"
+    QUALIFYING_DETECTED = "qualifying_detected"
+    QUALIFYING_LOST = "qualifying_lost"
     PAPER_ELIGIBLE = "paper_eligible"
     PAPER_FILL_ATTEMPTED = "paper_fill_attempted"
     PAPER_FILL_PARTIAL = "paper_fill_partial"
@@ -94,6 +96,8 @@ class LifecycleEventType(StrEnum):
 OPERATOR_ACTIVITY_UNCONDITIONAL_EVENT_TYPES = frozenset(
     {
         LifecycleEventType.PROMOTED_TO_HOT,
+        LifecycleEventType.QUALIFYING_DETECTED,
+        LifecycleEventType.QUALIFYING_LOST,
         LifecycleEventType.PAPER_ELIGIBLE,
         LifecycleEventType.PAPER_FILL_COMPLETE,
         LifecycleEventType.CLOSED,
@@ -174,6 +178,7 @@ class WatchObservation(BaseModel):
     mapping_reasons: list[str] = Field(default_factory=list)
     mapping_provenance: MappingProvenance | None = None
     mapping_review_candidate: MappingReviewCandidate | None = None
+    pricing_lane: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> WatchObservation:
@@ -274,6 +279,12 @@ class OpportunityLifecycleEvent(BaseModel):
     capture_eligible: bool | None = None
     attempt_id: str | None = None
     append_seq: int | None = None
+    gross_edge: Decimal | None = None
+    limiting_depth_gbp: Decimal | None = None
+    guaranteed_profit_gbp: Decimal | None = None
+    quote_age_ms: int | None = Field(default=None, ge=0)
+    pricing_lane: str | None = None
+    venue_pair: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> OpportunityLifecycleEvent:
@@ -399,6 +410,23 @@ def hot_promotion_lifecycle_event_id(canonical_event_id: str, episode: int) -> s
     """One durable id per real BACKGROUND→HOT promotion episode."""
 
     return f"{canonical_event_id}:promoted_to_hot:{episode}"
+
+
+def qualifying_lifecycle_event_id(
+    opportunity_id: str,
+    event_type: LifecycleEventType,
+    episode: int,
+) -> str:
+    """One durable id per qualifying episode. Replay of that episode is a no-op."""
+
+    if event_type not in {
+        LifecycleEventType.QUALIFYING_DETECTED,
+        LifecycleEventType.QUALIFYING_LOST,
+    }:
+        raise ValueError("qualifying lifecycle id requires a qualifying episode event")
+    if episode <= 0:
+        raise ValueError("qualifying episode must be positive")
+    return f"{opportunity_id}:{event_type.value}:{episode}"
 
 
 def format_hot_promotion_detail(
