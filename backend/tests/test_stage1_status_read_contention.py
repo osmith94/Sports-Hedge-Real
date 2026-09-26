@@ -12,6 +12,7 @@ the startup UNIVERSE barrier, and scanner economics are unchanged.
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -187,6 +188,12 @@ async def test_public_status_projects_outside_the_fixture_lock(
             stop.wait(POLL_INTERVAL_S)
 
     poller = threading.Thread(target=poll, name="status-poll", daemon=True)
+    # Same pre-window as #572: collect and freeze objects retained by earlier
+    # tests so a gen2 scan of that heap is not charged to this measurement.
+    # Objects allocated by the scan below stay unfrozen, and the heartbeat
+    # assertion is still raw wall-clock lateness.
+    gc.collect()
+    gc.freeze()
     heartbeat = HeartbeatProbe(interval_s=0.05).start()
     poller.start()
     published: list[int] = []
@@ -213,6 +220,8 @@ async def test_public_status_projects_outside_the_fixture_lock(
         stop.set()
         poller.join(timeout=5)
         await heartbeat.stop()
+        gc.unfreeze()
+        gc.collect()
         repository.close()
 
     wait = LOOP_ACTIVITY.lock_waits.get("fixture_current_state")
