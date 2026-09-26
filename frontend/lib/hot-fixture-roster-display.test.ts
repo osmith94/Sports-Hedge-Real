@@ -385,6 +385,45 @@ describe("HOT Zone evaluation state and HOT pricing summary", () => {
     assert.doesNotMatch(panel, /<summary>/);
   });
 
+  it("puts active post-kickoff IN PLAY rows in the main HOT pricing roster", () => {
+    const active = fixture({
+      canonical_event_id: "evt/cze-cro",
+      home_team: "Czech Republic",
+      away_team: "Croatia",
+      competition: "World Cup",
+      in_running: false,
+      hot_reasons: [HOT_REASON_IN_PLAY],
+      market_evaluation_state: "evaluated",
+      matched_equivalent_count: 5,
+    });
+    const live = status({
+      hot: { cadence_seconds: 30, evaluated_count: 1 },
+      discovered_fixtures: [active],
+      hot_roster: [
+        {
+          canonical_event_id: active.canonical_event_id,
+          home_team: active.home_team,
+          away_team: active.away_team,
+          competition: active.competition,
+          kickoff_utc: active.kickoff_utc,
+          in_running: false,
+          hot_reasons: [HOT_REASON_IN_PLAY],
+          market_evaluation_state: "evaluated",
+          matched_equivalent_count: 5,
+          scan_lane: "hot",
+        },
+      ],
+    });
+    assert.deepEqual(hotPricingFixtures(live).map((item) => item.canonical_event_id), ["evt/cze-cro"]);
+    assert.equal(hotPricingCount(live), 1);
+    assert.deepEqual(postKickoffPendingFixtures(live), []);
+    const row = hotFixtureRows(live).find((item) => item.id === "evt/cze-cro");
+    assert.equal(row?.name, "Czech Republic v Croatia");
+    assert.deepEqual(row?.reasons, [HOT_REASON_IN_PLAY]);
+    assert.equal(row?.equivalentLabel, "5");
+    assert.match(row?.evaluationLabel || "", /^evaluated/);
+  });
+
   it("keeps post-kickoff pending fixtures out of the HOT pricing count", () => {
     const live = status({
       hot: { cadence_seconds: 30, fixture_count: 1, evaluated_count: 0 },
