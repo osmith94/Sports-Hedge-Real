@@ -178,7 +178,7 @@ A 45s HOT collector budget would also fail the 30s HOT cadence: one slow HOT cyc
 | Envelope | #157 leftover reserve (4s, from the 25s) + coordinator grace (5s) ⇒ worst-case end-to-end **~30s**. Collector cluster work ≤ 21s. |
 | Self-overlap | **Forbidden.** Do not start a second HOT while one is in progress. If a cycle hits the envelope, skip the missed slot and run the next due after return. |
 | Cohort | (a) truthful provider in-play (`in_running is True`); (b) `kickoff_utc` in `(now, now + 60 minutes]`; (c) kickoff-passed + unknown in-play **only while** `(now - kickoff_utc) ≤ 3h` (§5.4); **(d) Issue #200:** any still-current fixture whose latest valid merged current-state proves a qualifying/executable arb, even if kickoff is days away. Kickoff/in-play are additional HOT reasons, not requirements that suppress a live arb. |
-| In-play labelling | `in_running is True` is the only live label. Kickoff proximity / post-kickoff unknown may keep HOT **membership** but must not set `in_running` or live scores. |
+| In-play labelling | Provider `in_running is True` is a live label and is never inferred. Post-kickoff plus a successful current evaluation with matched equivalents still present may also show operator IN PLAY without writing `in_running` or live scores. Kickoff proximity / post-kickoff unknown without that evaluation may keep HOT **membership** but must not set `in_running`. A successful post-kickoff evaluation with zero matched equivalents leaves current HOT radar (`no_current_equivalent_markets_post_kickoff`) and does not fabricate completed. |
 | Identity source | Canonical store (already-known IDs). Prefer `list_markets` / books for those events. Do **not** rediscover the whole world every 30s. |
 | Priority inside the lane | Simple v1 key only (§5.5). Do **not** call `arbitrage/dislocations/scheduler.py`. |
 | Output | Refresh executable market/book economics needed for qualification. Bound and return partial truthful state (#157 leftover rules). |
@@ -260,7 +260,7 @@ DROP when provider status is completed/settled/void/expired/finished/final/close
      supplied that lifecycle status (`fixture_status_source=matchbook`).
      `matchbook_matched` / cluster coverage is not Matchbook lifecycle authority.
 
-HOT  when in_running is True                         # only live label
+HOT  when in_running is True                         # provider live label
      and (now - effective_kickoff) <= 4h current-radar ceiling
      or 0 < (kickoff_utc - now) <= hot_horizon       # pre-kickoff
      or (
@@ -270,7 +270,10 @@ HOT  when in_running is True                         # only live label
           and not DROP
           and not postponed/delayed/rescheduled
         )
-        # kickoff-passed, in-play unknown: HOT membership, no live label
+        # kickoff-passed, in-play unknown: HOT membership.
+        # Operator IN PLAY requires a successful evaluation with equivalents.
+        # It must not write in_running. Zero equivalents after that evaluation
+        # leave current HOT radar without fabricating completed.
 
 UNIVERSE when the fixture is still current and not HOT
      including T-6d, T-4h, and explicit postponed/delayed/rescheduled
@@ -295,7 +298,7 @@ DROP also when a current/effective kickoff is available and the fixture is
      clock_expired_current_radar. Before 4h, genuine in-running remains HOT.
 ```
 
-`in_running is True` is the only live label. After the 3h unknown window the fixture **leaves current radar** (not merely HOT scheduling). Elapsed time must not write `fixture_status=completed` or `in_running=true`. Explicit Matchbook/provider terminal status evicts immediately. A Matchbook-confirmed terminal tombstone must not be resurrected by a later Polymarket/Kalshi unknown or postponed/delayed/rescheduled observation. A later Matchbook `open` / `in-play` / `suspended` / `rescheduled` (or Matchbook `in_running=True` with a non-terminal status) may restore current radar.
+Provider `in_running is True` remains a live label and is never inferred. Inside the existing post-kickoff HOT window, a successful current evaluation with matched equivalents still present may also show operator IN PLAY without writing `in_running`. A successful evaluation with zero matched equivalents leaves current HOT radar then, without writing `fixture_status=completed`. After the 3h unknown window the fixture **leaves current radar** (not merely HOT scheduling). Elapsed time must not write `fixture_status=completed` or `in_running=true`. Explicit Matchbook/provider terminal status evicts immediately. A Matchbook-confirmed terminal tombstone must not be resurrected by a later Polymarket/Kalshi unknown or postponed/delayed/rescheduled observation. A later Matchbook `open` / `in-play` / `suspended` / `rescheduled` (or Matchbook `in_running=True` with a non-terminal status) may restore current radar.
 
 ### 5.5 HOT sort key (v1, required)
 
@@ -620,7 +623,7 @@ Owner product: genuinely qualifying live paper opportunities are automatically p
 | 1 | Wave G correction: explicit `POST /paper/collect` is a bounded **20s manual diagnostic** (+5s coordinator grace), separate from scheduled Fast/Full. |
 | 2 | UNIVERSE **generation** budget is **150s**, not 180s. Keep 30s headroom inside the **180s** sweep cadence. 150s is executed as **resumable chunks**, not one job. |
 | 3 | Radar TTLs: **HOT 90s / UNIVERSE 360s**. Executable quote freshness remains the existing fail-closed ~1s contract. |
-| 4 | Kickoff-passed + unknown in-play: HOT **without a live label**, only within **3h**. After that, expire from **current radar** (#164) unless the provider explicitly says in-running or postponed/delayed/rescheduled. Do not claim completed from time. |
+| 4 | Kickoff-passed + unknown in-play: HOT without fabricating provider `in_running`, only within **3h**, unless a successful current evaluation still shows matched equivalents (operator IN PLAY) or confirms zero equivalents (leave current HOT radar, no fabricated completed). After 3h, expire from **current radar** (#164) unless the provider explicitly says in-running or postponed/delayed/rescheduled. Do not claim completed from time. |
 | 5 | Canonical fixture current-state store: **process memory for v1**. Restart honesty: Tracked empty until collection. **Immediate UNIVERSE bootstrap** on startup. SQLite inventory later. |
 | 6 | HOT ordering: **simple deterministic key** (§5.5). Do not couple the dislocation burst scheduler. |
 | A | Separate HOT cycle timeout default **25s** so the 30s cadence is physically achievable. #157 4s reserve + 5s grace ⇒ ~30s envelope. HOT must not overlap itself. |

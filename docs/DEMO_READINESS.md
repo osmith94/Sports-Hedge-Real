@@ -94,7 +94,7 @@ No tenet was silently weakened to make the demo “work”. Kalshi unwind stays 
 `GET /paper/watchlist/tracked` is the **current radar board** from `FixtureCurrentStateStore`, not the paper decisions of a single latest `CollectionReport`. Operations-console **Opportunity Monitor** (#168) is the operator-facing current-radar table for that same read model. Append-only `/paper/scans` remains a secondary audit window.
 
 - Empty until a live collection completes. Persisted history/activity may exist; the board stays empty.
-- HOT observations win for fixtures currently in the HOT cohort (in-play, ≤60m pre-kickoff, or kickoff-passed unknown in-play within 3h).
+- HOT observations win for fixtures currently in the HOT cohort (provider in-play, ≤60m pre-kickoff, kickoff-passed unknown in-play within 3h, or post-kickoff operator IN PLAY while a successful evaluation still has matched equivalents).
 - UNIVERSE observations remain for distant fixtures until the next sweep or radar TTL (HOT 90s / UNIVERSE 360s).
 - An empty HOT cycle does not clear in-TTL UNIVERSE rows.
 - Partial UNIVERSE leftovers do not clobber a previous valid in-TTL evaluation.

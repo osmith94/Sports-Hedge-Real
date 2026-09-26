@@ -53,16 +53,22 @@ from sports_hedge.application.scan_lanes import (
     DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON,
     DEFAULT_UNIVERSE_INTERVAL_SECONDS,
     DEFAULT_UNIVERSE_TTL_SECONDS,
+    EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF,
     FRESHNESS_EXPIRED,
     ScanLane,
+    authoritative_post_kickoff_zero_equivalents,
     classify_scan_lane,
+    explicit_matched_equivalent_count,
     freshness_class,
     hot_reason_labels,
     hot_sort_key,
     is_explicit_terminal,
+    is_schedule_exception,
     is_trusted_lifecycle_correction,
+    kickoff_has_passed,
     lifecycle_status_source,
     next_due_at,
+    successful_complete_market_evaluation,
     terminal_eviction_reason,
 )
 from sports_hedge.domain.models import VenueName
@@ -122,6 +128,31 @@ class FixtureRadarRow:
     source_events: tuple[StoredSourceEvent, ...] = ()
 
 
+def _market_closure_may_restore(fixture: Any, now: datetime) -> bool:
+    """A zero-equivalent closure is not a provider terminal tombstone.
+
+    Restore when a later observation is provider-live, still has matched
+    equivalents, returns to pre-kickoff, or is an explicit schedule exception.
+    Incomplete scans do not restore and do not count as a new closure.
+    """
+
+    if is_explicit_terminal(fixture):
+        return False
+    if is_schedule_exception(fixture):
+        return True
+    if getattr(fixture, "in_running", None) is True:
+        return True
+    if successful_complete_market_evaluation(fixture):
+        count = explicit_matched_equivalent_count(fixture)
+        if count is not None and count > 0:
+            return True
+    if not kickoff_has_passed(fixture, now):
+        kickoff = getattr(fixture, "kickoff_utc", None)
+        if kickoff is not None:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class CurrentStateTombstone:
     """Current-radar eviction record. Not a fabricated completed/live label."""
@@ -170,8 +201,8 @@ class FixtureCurrentStateStore:
     visible as relationship truth; paper eligibility / auto-capture / HOT
     promotion still require executable or radar-current quote freshness.
 
-    HOT identity is the union of lifecycle HOT membership (in-play / <=60m
-    pre-kickoff / bounded post-kickoff unknown, subject to the 4h hard
+    HOT identity is the union of lifecycle HOT membership (provider in-play /
+    <=60m pre-kickoff / bounded post-kickoff unknown, subject to the 4h hard
     post-kickoff current-radar ceiling) and current fixtures whose
     latest valid merged current-state proves a qualifying executable
     arb (Issue #200), net-proximity within 0.50pp of the operator Min Net
@@ -183,6 +214,14 @@ class FixtureCurrentStateStore:
     still applies. A stale in-running/open flag cannot keep a fixture HOT
     after the current-radar ceiling. Aliases of one football fixture
     collapse to one HOT scheduling unit.
+
+    A post-kickoff fixture whose latest successful complete evaluation reports
+    zero matched equivalents leaves current radar with
+    ``no_current_equivalent_markets_post_kickoff``. That closure does not
+    write ``completed`` or ``in_running``. Incomplete scans keep the last
+    known equivalents. Operator IN PLAY for a post-kickoff row with remaining
+    equivalents is a read-model label and does not overwrite provider
+    ``in_running``.
 
     Terminal tombstones keep explicit finished/completed/settled truth from
     resurrecting via a later stale UNIVERSE or other-venue unknown snapshot.
@@ -464,9 +503,17 @@ class FixtureCurrentStateStore:
                     if target_id != canonical_id:
                         self._universe_catalogue.remove(canonical_id, seen_at=scanned_at)
                 continue
-            evaluated = (
-                fixture.market_evaluation_state == MarketEvaluationState.EVALUATED.value
-            )
+            if authoritative_post_kickoff_zero_equivalents(fixture, scanned_at):
+                self._record_market_closure(
+                    target_id,
+                    fixture,
+                    aliases=aliases | {canonical_id, target_id},
+                    scanned_at=scanned_at,
+                )
+                if target_id != canonical_id:
+                    self._drop_identity(canonical_id)
+                continue
+            evaluated = successful_complete_market_evaluation(fixture)
             stored_fixture = fixture
             if target_id != canonical_id:
                 stored_fixture = fixture.model_copy(update={"canonical_event_id": target_id})
@@ -1615,6 +1662,18 @@ class FixtureCurrentStateStore:
                 )
             else:
                 self._drop_identity(canonical_id)
+            return
+        if authoritative_post_kickoff_zero_equivalents(fixture, evaluated):
+            aliases = {
+                alias for alias, target in self._aliases.items() if target == canonical_id
+            }
+            aliases.add(canonical_id)
+            self._record_market_closure(
+                canonical_id,
+                fixture,
+                aliases=aliases,
+                scanned_at=evaluated,
+            )
 
     def _reject_or_tombstone_incoming(
         self,
@@ -1631,6 +1690,11 @@ class FixtureCurrentStateStore:
                 if tombstone is not None:
                     break
         if tombstone is None:
+            return False
+        if tombstone.reason == EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF and (
+            _market_closure_may_restore(fixture, scanned_at)
+        ):
+            self._clear_tombstone(tombstone.canonical_event_id)
             return False
         if is_trusted_lifecycle_correction(
             fixture,
@@ -1707,6 +1771,47 @@ class FixtureCurrentStateStore:
             reason=terminal_eviction_reason(fixture),
             provider_status=fixture.fixture_status,
             source=status_source,
+            observed_at=scanned_at,
+        )
+        self._tombstones[canonical_id] = tombstone
+        for alias in tombstone.aliases:
+            self._tombstone_aliases[alias] = canonical_id
+        self._drop_identity(canonical_id)
+
+    def _record_market_closure(
+        self,
+        canonical_id: str,
+        fixture: DiscoveredFixture,
+        *,
+        aliases: set[str],
+        scanned_at: datetime,
+    ) -> None:
+        """Leave current radar after a successful zero-equivalent evaluation.
+
+        Does not rewrite ``fixture_status`` or ``in_running``. A later
+        successful evaluation that still has equivalents, provider
+        ``in_running``, or a pre-kickoff/schedule correction may restore.
+        """
+
+        existing = self._tombstones.get(canonical_id)
+        if existing is not None and existing.reason != EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF:
+            return
+        merged = set(aliases)
+        merged.add(canonical_id)
+        if existing is not None:
+            merged.update(existing.aliases)
+        live_id = canonical_id
+        if live_id not in self._rows:
+            resolved = self._aliases.get(canonical_id)
+            if resolved is not None and resolved in self._rows:
+                live_id = resolved
+        merged.update(self._identity_membership_keys(live_id))
+        tombstone = CurrentStateTombstone(
+            canonical_event_id=canonical_id,
+            aliases=frozenset(merged),
+            reason=EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF,
+            provider_status=fixture.fixture_status,
+            source=lifecycle_status_source(fixture),
             observed_at=scanned_at,
         )
         self._tombstones[canonical_id] = tombstone

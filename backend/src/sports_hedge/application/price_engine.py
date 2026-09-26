@@ -133,6 +133,7 @@ from sports_hedge.application.quote_freshness import (
 from sports_hedge.application.scan_lanes import (
     DEFAULT_BACKGROUND_INTERVAL_SECONDS,
     DEFAULT_HOT_INTERVAL_SECONDS,
+    EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF,
     ScanLane,
     classify_scan_lane,
 )
@@ -573,9 +574,14 @@ class CataloguePriceEngine:
         """Scheduler HOT vs BACKGROUND from lifecycle + engine-local promotion.
 
         UI/current-state projection is not scheduler authority. A lagged
-        ``FixtureCurrentStateStore`` upsert cannot grant or revoke priority.
+        ``FixtureCurrentStateStore`` upsert cannot grant HOT priority.
+        A post-kickoff market-closure tombstone may revoke HOT priority only:
+        the fixture is no longer a useful live pricing fixture. Cadence is
+        unchanged, and provider ``in_running`` is not rewritten.
         """
 
+        if self._post_kickoff_market_closed(identity.canonical_event_id):
+            return PriceEnginePriority.BACKGROUND
         fixture = _fixture_like(identity)
         lifecycle = classify_scan_lane(fixture, self.now())
         if lifecycle is ScanLane.HOT:
@@ -585,6 +591,16 @@ class CataloguePriceEngine:
         if identity.canonical_event_id in self._promoted_hot_ids:
             return PriceEnginePriority.HOT
         return PriceEnginePriority.BACKGROUND
+
+    def _post_kickoff_market_closed(self, canonical_event_id: str) -> bool:
+        store = self.fixture_state
+        if store is None or not canonical_event_id:
+            return False
+        tombstone = store.tombstone_for(canonical_event_id)
+        return (
+            tombstone is not None
+            and tombstone.reason == EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF
+        )
 
     def coverage_cursor(self, priority: PriceEnginePriority) -> CoverageCursor:
         return self._coverage[priority.value]
