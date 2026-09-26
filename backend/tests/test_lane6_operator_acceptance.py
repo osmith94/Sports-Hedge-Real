@@ -201,9 +201,13 @@ def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None
     assert "Resume scanner" in scan
     assert "Auto refresh view" in scan
     assert "saveOperatorScannerSettings" in scan
-    assert "2000" in scan
+    provider = (FRONTEND / "components" / "live-status-provider.tsx").read_text(encoding="utf-8")
+    assert "2000" in provider
     assert "dualScanStatusLines" in scan
-    assert "pollLiveStatus" in scan
+    assert "useLiveStatus" in scan
+    assert "refreshNow" in scan
+    assert "pollLiveStatus" not in scan
+    assert "getLiveRefreshStatus" not in scan
     assert "void collectRef.current()" not in scan
     assert "server owns HOT / BACKGROUND / UNIVERSE" in scan
     assert "Refreshing HOT…" in scan
@@ -413,10 +417,11 @@ def test_live_collect_is_bounded_and_does_not_fabricate_fixtures() -> None:
     assert "discovered_fixtures" in body
     status = client.get("/paper/live-refresh").json()
     assert status["last_completed_at"]
-    live_ids = {row["canonical_event_id"] for row in status["discovered_fixtures"]}
+    catalogue = client.get("/operations/universe-fixtures").json()
+    live_ids = {row["canonical_event_id"] for row in catalogue["fixtures"]}
     replay_ids = {
         row["canonical_event_id"]
-        for row in status["discovered_fixtures"]
+        for row in catalogue["fixtures"]
         if "replay" in (row.get("canonical_event_id") or "")
     }
     assert replay_ids == set()

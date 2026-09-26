@@ -305,7 +305,13 @@ def test_no_provider_concurrency_increase_or_new_polling_loop() -> None:
 
     frontend_bar = (REPO_ROOT / "frontend/components/venue-health-bar.tsx").read_text()
     frontend_load = (REPO_ROOT / "frontend/lib/system-load-display.ts").read_text()
-    assert frontend_bar.count("setInterval") == 1
+    frontend_poll = (REPO_ROOT / "frontend/lib/live-status-poll.ts").read_text()
+    frontend_provider = (REPO_ROOT / "frontend/components/live-status-provider.tsx").read_text()
+    assert frontend_bar.count("setInterval") == 0
+    assert "getLiveRefreshStatus" not in frontend_bar
+    assert frontend_poll.count("setInterval") == 1
+    assert "if (inflight) return inflight" in frontend_poll
+    assert "createLiveStatusPoll" in frontend_provider
     assert "setInterval" not in frontend_load
     start_ps1 = (REPO_ROOT / "scripts/windows/Start-SportsHedge-Demo.ps1").read_text()
     refresh_ps1 = (REPO_ROOT / "scripts/windows/Refresh-SportsHedge-Demo.ps1").read_text()

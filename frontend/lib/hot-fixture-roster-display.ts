@@ -1,4 +1,4 @@
-import { DiscoveredFixture, LiveRefreshStatus } from "./api";
+import { DiscoveredFixture, HotRosterEntry, LiveRefreshStatus } from "./api";
 import {
   NOT_EVALUATED_MARKET_FETCH_LABEL,
   NOT_EVALUATED_SCAN_BUDGET_LABEL,
@@ -208,8 +208,15 @@ export function fastScanRosterSummary(status: LiveRefreshStatus | null): string 
   return `HOT PRICING ${hotCount}${cadenceLabel} · ${evaluated} evaluated · ${decisionLabel}`;
 }
 
+export function deferredAwaitingCount(status: LiveRefreshStatus | null | undefined): number {
+  if (typeof status?.deferred_awaiting_count === "number" && Number.isFinite(status.deferred_awaiting_count)) {
+    return Math.max(0, Math.trunc(status.deferred_awaiting_count));
+  }
+  return deferredAwaitingFixtures(status).length;
+}
+
 export function deferredRosterSummary(status: LiveRefreshStatus | null): string {
-  const count = deferredAwaitingFixtures(status).length;
+  const count = deferredAwaitingCount(status);
   return `${DEFERRED_CROSS_VENUE_HEADING} ${count} · ${DEFERRED_NOT_HOT_CAPACITY}`;
 }
 
@@ -274,10 +281,48 @@ export function hotFixtureRow(item: DiscoveredFixture, nowMs: number | null = nu
   };
 }
 
+function rosterFixture(entry: HotRosterEntry): DiscoveredFixture {
+  return {
+    source: "matchbook",
+    source_event_id: entry.canonical_event_id,
+    canonical_event_id: entry.canonical_event_id,
+    home_team: entry.home_team,
+    away_team: entry.away_team,
+    competition: entry.competition,
+    sport: entry.sport,
+    target_competition_code: entry.target_competition_code,
+    kickoff_utc: entry.kickoff_utc,
+    matchbook_matched: entry.matchbook_matched,
+    polymarket_matched: Boolean(entry.polymarket_matched),
+    kalshi_matched: entry.kalshi_matched,
+    in_running: entry.in_running,
+    fixture_status: entry.fixture_status,
+    live_score_supported: Boolean(entry.live_score_supported),
+    home_score: entry.home_score,
+    away_score: entry.away_score,
+    last_seen_at: entry.last_seen_at || entry.last_scanned_at || entry.kickoff_utc,
+    last_scanned_at: entry.last_scanned_at,
+    matched_market_count: entry.matched_equivalent_count ?? 0,
+    matched_equivalent_count: entry.matched_equivalent_count,
+    solver_is_arbitrage: Boolean(entry.solver_is_arbitrage),
+    current_net_edge: entry.current_net_edge,
+    hot_reasons: entry.hot_reasons,
+    scan_lane: entry.scan_lane ?? "hot",
+    market_evaluation_state: entry.market_evaluation_state,
+    market_evaluation_reason: entry.market_evaluation_reason,
+  };
+}
+
 export function hotFixtureRows(
   status: LiveRefreshStatus | null,
   nowMs: number | null = null,
 ): HotFixtureRow[] {
+  if (Array.isArray(status?.hot_roster)) {
+    return status.hot_roster
+      .map(rosterFixture)
+      .filter((item) => !isAwaitingCrossVenue(item) && !isPostKickoffPending(item))
+      .map((item) => hotFixtureRow(item, nowMs));
+  }
   return hotPricingFixtures(status).map((item) => hotFixtureRow(item, nowMs));
 }
 
@@ -292,5 +337,11 @@ export function postKickoffPendingRows(
   status: LiveRefreshStatus | null,
   nowMs: number | null = null,
 ): HotFixtureRow[] {
+  if (Array.isArray(status?.hot_roster)) {
+    return status.hot_roster
+      .map(rosterFixture)
+      .filter((item) => isPostKickoffPending(item) && !isAwaitingCrossVenue(item))
+      .map((item) => hotFixtureRow(item, nowMs));
+  }
   return postKickoffPendingFixtures(status).map((item) => hotFixtureRow(item, nowMs));
 }

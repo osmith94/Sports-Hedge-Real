@@ -169,12 +169,14 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
     assert.match(source, /<details className="discovery-disclosure">/);
     assert.doesNotMatch(source, /\sopen[={]/);
     assert.doesNotMatch(source, /open>/);
-    assert.match(source, /discoveryCompactSummaryLabel/);
-    assert.match(source, /discoveryStatusBadgeLabel/);
+    assert.match(source, /Universe catalogue/);
+    assert.match(source, /universe_catalogue_version/);
+    assert.match(source, /UNIVERSE CATALOGUE/);
     assert.match(source, /Show discovery/);
     assert.match(source, /Hide discovery/);
     assert.match(source, /discovery-chevron/);
-    assert.match(source, /<DiscoveredFixturesPanel status=\{status\} available=\{available\} \/>/);
+    assert.match(source, /<DiscoveredFixturesPanel/);
+    assert.doesNotMatch(source, /discovered_fixtures/);
   });
 
   it("places HOT pricing fixtures after discovery and keeps Opportunity Monitor as the current-opportunity table", () => {
@@ -185,14 +187,13 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
     const discoveryIndex = page.indexOf("<FixtureDiscoverySection");
     const hotIndex = page.indexOf("<HotFixturesPanel");
     const monitorIndex = page.indexOf("<OpportunityMonitor");
-    const auditIndex = page.indexOf("audit-disclosure");
     assert.ok(treasuryIndex >= 0);
     assert.ok(positionsIndex > treasuryIndex);
     assert.ok(scanIndex > positionsIndex);
     assert.ok(discoveryIndex > scanIndex);
     assert.ok(hotIndex > discoveryIndex);
     assert.ok(monitorIndex > hotIndex);
-    assert.ok(auditIndex > monitorIndex);
+    assert.equal(page.indexOf("audit-disclosure"), -1);
     assert.doesNotMatch(page, /<span>Tracked<\/span>/);
     assert.doesNotMatch(page, /TrackedMarketsBoard/);
     assert.doesNotMatch(page, /DiscoveredFixturesPanel/);
@@ -200,11 +201,12 @@ describe("fixture discovery collapsed-by-default disclosure", () => {
 
   it("preserves the expanded warning banner and discovery table in the existing panel", () => {
     const panel = readFileSync(join(frontendRoot, "components/discovered-fixtures.tsx"), "utf8");
-    assert.match(panel, /status\.config_warnings/);
+    assert.match(panel, /configWarnings/);
     assert.match(panel, /CONFIG_WARNING_BANNER_CLASS/);
     assert.doesNotMatch(panel, /scan-message scan-message-error/);
     assert.match(panel, /table className="discovery-compact"/);
-    assert.match(panel, /Discovery status unavailable\. No fabricated fixtures\./);
+    assert.match(panel, /Universe catalogue unavailable\. No fabricated fixtures\./);
+    assert.match(panel, /Recognition only/);
   });
 
   it("gates FixtureRow kickoff on hydrated nowMs so SSR and first client render match", () => {

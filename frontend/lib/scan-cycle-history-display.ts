@@ -8,7 +8,7 @@ export const SCAN_CYCLE_RECENT_TITLE = "Recent scan cycles";
 export const SCAN_CYCLE_DIAGNOSTICS_TITLE = "Diagnostics / Scan history";
 
 export const SCAN_CYCLE_COPY =
-  "Latest 100 completed HOT pricing / BACKGROUND pricing / UNIVERSE discovery cycles, newest first. One row per cycle, including cycles with zero paper decisions. HOT and BACKGROUND counts are catalogue/market rows. UNIVERSE counts are fixtures. Unique fixture totals are shown only when that number is stored. Not market-decision audit.";
+  "Latest 50 completed HOT pricing / BACKGROUND pricing / UNIVERSE discovery cycles, newest first. One row per cycle, including cycles with zero paper decisions. Loaded from the scan-cycle endpoint, not the live heartbeat. HOT and BACKGROUND counts are catalogue/market rows. UNIVERSE counts are fixtures. Unique fixture totals are shown only when that number is stored. Not market-decision audit.";
 
 export const SCAN_CYCLE_EMPTY = "No completed scan cycles yet. Zero-decision cycles still appear here once HOT pricing, BACKGROUND pricing or UNIVERSE discovery finishes.";
 
@@ -146,7 +146,7 @@ export function scanCycleBadgeLabel(
 ): string {
   if (!available) return "UNAVAILABLE";
   const count = cycles?.length ?? 0;
-  return count ? `${Math.min(count, 100)} CYCLES` : "EMPTY";
+  return count ? `${Math.min(count, 50)} CYCLES` : "EMPTY";
 }
 
 export const SCAN_CYCLE_REPORT_ACTION = "View report";

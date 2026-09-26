@@ -433,9 +433,10 @@ def test_live_refresh_exposes_distinct_hot_and_universe_status() -> None:
         assert "UNIVERSE discovery" in (payload["operator_summary"] or "")
         assert "Fast scan" not in (payload["operator_summary"] or "")
         assert "Full sweep" not in (payload["operator_summary"] or "")
-        discovered = payload["discovered_fixtures"]
-        assert discovered
-        assert discovered[0]["scan_lane"] == "universe"
+        assert "discovered_fixtures" not in payload
+        catalogue = client.get("/operations/universe-fixtures").json()
+        assert catalogue["fixtures"]
+        assert catalogue["fixtures"][0]["canonical_event_id"]
     finally:
         coordinator.reset()
         coordinator._clock = original_clock
@@ -733,7 +734,10 @@ def test_frontend_auto_refresh_does_not_post_collect_when_server_owns_scans() ->
     demo = (
         Path(__file__).resolve().parents[2] / "frontend" / "components" / "demo-walkthrough.tsx"
     ).read_text(encoding="utf-8")
-    assert "pollLiveStatus" in scan
+    assert "useLiveStatus" in scan
+    assert "refreshNow" in scan
+    assert "pollLiveStatus" not in scan
+    assert "getLiveRefreshStatus" not in scan
     assert "void collectRef.current()" not in scan
     assert "server owns HOT / BACKGROUND / UNIVERSE" in scan
     assert scan.count("runPaperCollection") == 2

@@ -80,9 +80,12 @@ def test_discovery_ui_renders_target_rows_from_backend_fields() -> None:
     assert "solver_is_arbitrage" in source or "arbClaimLabel" in display
     assert "1 / " not in source
     assert "kalshi_matched" in source
-    assert "best_matchbook_price" in source
-    assert "best_polymarket_price" in source
-    assert "best_kalshi_price" in source
+    assert "Recognition only" in source
+    assert "Universe catalogue" in source
+    assert "best_matchbook_price" not in source
+    assert "best_polymarket_price" not in source
+    assert "best_kalshi_price" not in source
+    assert "current_net_edge" not in source
     assert "fixture found" in display
     assert "Not evaluated — scan budget exhausted" in display
     assert "market_evaluation_state" in display

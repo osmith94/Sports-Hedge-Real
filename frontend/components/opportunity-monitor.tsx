@@ -7,10 +7,12 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   buildMappingReviewPrompt,
   confirmMappingReview,
+  getTrackedWatchlist,
   interpretMappingReview,
   LiveRefreshStatus,
   NearOpportunity,
 } from "../lib/api";
+import { useLiveStatusOptional } from "./live-status-provider";
 import { MappingVerificationPanel } from "./mapping-verification-panel";
 import {
   MappingProposedRule,
@@ -63,27 +65,55 @@ const EVIDENCE_CHANGED_NOTE =
 export function OpportunityMonitor({
   items,
   available,
-  liveRefresh,
-  liveRefreshAvailable,
+  liveRefresh: liveRefreshProp = null,
+  liveRefreshAvailable: liveRefreshAvailableProp = false,
 }: {
   items: NearOpportunity[];
   available: boolean;
-  liveRefresh: LiveRefreshStatus | null;
-  liveRefreshAvailable: boolean;
+  liveRefresh?: LiveRefreshStatus | null;
+  liveRefreshAvailable?: boolean;
 }) {
   const router = useRouter();
+  const live = useLiveStatusOptional();
+  const liveRefresh = live?.status ?? liveRefreshProp;
+  const liveRefreshAvailable = live ? live.status != null : liveRefreshAvailableProp;
+  const [trackedItems, setTrackedItems] = useState(items);
+  const [trackedAvailable, setTrackedAvailable] = useState(available);
   const [sort, setSort] = useState<OpportunityMonitorSortState | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, MappingVerifySession>>({});
   const [verifyNoteById, setVerifyNoteById] = useState<Record<string, string | null>>({});
-  const rows = useMemo(() => opportunityMonitorRows(items), [items]);
+  const rows = useMemo(() => opportunityMonitorRows(trackedItems), [trackedItems]);
   const sortedRows = useMemo(() => sortOpportunityMonitor(rows, sort), [rows, sort]);
   const summary = useMemo(
-    () => opportunityMonitorSummary(rows, liveRefresh, available, liveRefreshAvailable, nowMs),
-    [rows, liveRefresh, available, liveRefreshAvailable, nowMs],
+    () => opportunityMonitorSummary(rows, liveRefresh, trackedAvailable, liveRefreshAvailable, nowMs),
+    [rows, liveRefresh, trackedAvailable, liveRefreshAvailable, nowMs],
   );
+
+  useEffect(() => {
+    setTrackedItems(items);
+    setTrackedAvailable(available);
+  }, [items, available]);
+
+  const cycleStamp = live?.cycleStamp;
+  useEffect(() => {
+    if (cycleStamp == null) return undefined;
+    let cancelled = false;
+    getTrackedWatchlist("limit=100")
+      .then((next) => {
+        if (cancelled) return;
+        setTrackedItems(next);
+        setTrackedAvailable(true);
+      })
+      .catch(() => {
+        // Keep the last loaded watchlist. A failed refresh is not an empty radar.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cycleStamp]);
 
   useEffect(() => {
     setNowMs(Date.now());

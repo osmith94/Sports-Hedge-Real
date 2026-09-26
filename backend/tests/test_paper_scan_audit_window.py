@@ -271,16 +271,17 @@ def test_radar_ttl_eviction_is_not_the_audit_window(tmp_path: Path) -> None:
 def test_frontend_paper_scan_history_is_latest_100_audit_not_radar() -> None:
     page = PAGE_SOURCE.read_text(encoding="utf-8")
     api_ts = API_TS_SOURCE.read_text(encoding="utf-8")
-    assert 'getPaperScans("limit=100")' in page
     assert 'query = "limit=100"' in api_ts
-    assert "Latest 100 audit observations" in page
-    assert "Not current scanner radar" in page
-    assert "LATEST 100 AUDIT" in page
+    assert "/paper/scans" in api_ts
+    assert 'getPaperScans("limit=100")' not in page
+    assert "PaperScanHistoryTable" not in page
+    assert "audit-disclosure" not in page
+    assert "LATEST 100 AUDIT" not in page
     assert "scans.filter" not in page
     assert "dedupe" not in page.lower()
     assert "current_radar_rows" not in page
-    assert "PaperScanHistoryTable" in page
     table = TABLE_SOURCE.read_text(encoding="utf-8")
+    assert "Historical audit window" in table
     assert ".filter(" not in table
     assert "current_radar_rows" not in table
     assert "item.scanned_at" in table

@@ -141,7 +141,10 @@ def test_live_refresh_status_is_matchbook_primary_and_server_loop_off_by_default
     assert payload["server_loop_enabled"] is False
     assert payload["paper_autofill_enabled"] is False
     assert "unavailable_unless_matchbook_payload_includes_scores" in payload["live_scores"]
-    assert payload["discovered_fixtures"] == []
+    assert "discovered_fixtures" not in payload
+    assert "recent_scan_cycles" not in payload
+    assert payload["deferred_awaiting_count"] == 0
+    assert payload["universe_fixture_count"] == 0
     assert payload["hot"]["cadence_seconds"] == 10
     assert payload["hot"]["reprice_after_seconds"] == 30
     assert payload["background"]["cadence_seconds"] == 10

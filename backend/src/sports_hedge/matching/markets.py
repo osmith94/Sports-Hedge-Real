@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 from pydantic import BaseModel, Field
 
 from sports_hedge.domain.football import CanonicalMarket
@@ -10,7 +14,7 @@ from sports_hedge.matching.approved_register import (
     registered_canonical_key,
     structural_mismatch_reasons,
 )
-from sports_hedge.matching.events import EventMatcher
+from sports_hedge.matching.events import EventMatcher, EventMatchResult
 from sports_hedge.matching.learned_rules import (
     MappingProvenance,
     participant_identity_preserved,
@@ -36,6 +40,89 @@ class MarketMatchResult(BaseModel):
     provenance: MappingProvenance = Field(default_factory=MappingProvenance)
 
 
+class _MatchMemo:
+    """Fixture-local cache for one bulk comparison.
+
+    Event identity does not depend on which market is being compared:
+    learned team rules ignore market arguments. Full match results are
+    identical for markets that share an event object and the same
+    economic fingerprint. Callers receive a fresh reasons list.
+    """
+
+    def __init__(self) -> None:
+        self.events: dict[tuple[int, int], EventMatchResult] = {}
+        self.results: dict[tuple[object, ...], MarketMatchResult] = {}
+        self.fingerprints: dict[int, tuple[object, ...]] = {}
+        # Keep markets alive so an id reused after collection cannot
+        # observe another market's fingerprint or event result.
+        self._owners: list[CanonicalMarket] = []
+
+
+_ACTIVE_MATCH_MEMO: ContextVar[_MatchMemo | None] = ContextVar(
+    "sports_hedge_match_memo",
+    default=None,
+)
+
+
+def economic_match_fingerprint(market: CanonicalMarket) -> tuple[object, ...]:
+    """Fields that can change a ``MarketMatcher`` result besides the event object."""
+
+    settlement = market.settlement
+    line = None if market.line is None else format(market.line, "f")
+    outcomes = tuple(sorted({runner.outcome.value for runner in market.runners}))
+    return (
+        market.source_venue,
+        market.family,
+        market.period,
+        line,
+        settlement.deterministic_key(),
+        settlement.unknown_reason,
+        outcomes,
+    )
+
+
+def _copy_match_result(result: MarketMatchResult) -> MarketMatchResult:
+    """Fresh reasons and provenance so a caller cannot poison the cache."""
+
+    provenance = result.provenance.model_copy(
+        update={"applied_rule_ids": list(result.provenance.applied_rule_ids)}
+    )
+    return MarketMatchResult(
+        matched=result.matched,
+        confidence=result.confidence,
+        reasons=list(result.reasons),
+        provenance=provenance,
+    )
+
+
+def _memo_fingerprint(memo: _MatchMemo, market: CanonicalMarket) -> tuple[object, ...]:
+    cached = memo.fingerprints.get(id(market))
+    if cached is None:
+        cached = economic_match_fingerprint(market)
+        memo.fingerprints[id(market)] = cached
+        memo._owners.append(market)
+    return cached
+
+
+@contextmanager
+def memoize_market_matches() -> Iterator[None]:
+    """Reuse event and economic match results for the current task.
+
+    Nested uses share the outer cache. The cache dies when the outermost
+    block exits, including across awaits in that task. Other tasks do not
+    see it.
+    """
+
+    if _ACTIVE_MATCH_MEMO.get() is not None:
+        yield
+        return
+    token = _ACTIVE_MATCH_MEMO.set(_MatchMemo())
+    try:
+        yield
+    finally:
+        _ACTIVE_MATCH_MEMO.reset(token)
+
+
 class MarketMatcher:
     """Runtime PAPER matcher. Fixture identity first, then the register.
 
@@ -50,12 +137,55 @@ class MarketMatcher:
         self.event_matcher = event_matcher or EventMatcher()
 
     def match(self, left: CanonicalMarket, right: CanonicalMarket) -> MarketMatchResult:
-        event_result = self.event_matcher.match(
-            left.event,
-            right.event,
-            left_market=left,
-            right_market=right,
+        memo = _ACTIVE_MATCH_MEMO.get()
+        # Only the stock matcher is proven independent of market arguments
+        # beyond the economic fingerprint. Subclasses and custom event
+        # matchers stay uncached so they cannot observe a borrowed result.
+        if (
+            memo is None
+            or type(self) is not MarketMatcher
+            or type(self.event_matcher) is not EventMatcher
+        ):
+            return self._match_uncached(left, right)
+        key = (
+            id(left.event),
+            id(right.event),
+            _memo_fingerprint(memo, left),
+            _memo_fingerprint(memo, right),
         )
+        cached = memo.results.get(key)
+        if cached is not None:
+            return _copy_match_result(cached)
+        event_result = None
+        if type(self.event_matcher) is EventMatcher:
+            event_key = (id(left.event), id(right.event))
+            event_result = memo.events.get(event_key)
+            if event_result is None:
+                event_result = self.event_matcher.match(
+                    left.event,
+                    right.event,
+                    left_market=left,
+                    right_market=right,
+                )
+                memo.events[event_key] = event_result
+        result = self._match_uncached(left, right, event_result=event_result)
+        memo.results[key] = result
+        return _copy_match_result(result)
+
+    def _match_uncached(
+        self,
+        left: CanonicalMarket,
+        right: CanonicalMarket,
+        *,
+        event_result: EventMatchResult | None = None,
+    ) -> MarketMatchResult:
+        if event_result is None:
+            event_result = self.event_matcher.match(
+                left.event,
+                right.event,
+                left_market=left,
+                right_market=right,
+            )
         if not event_result.matched:
             return MarketMatchResult(
                 matched=False,

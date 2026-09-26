@@ -115,16 +115,14 @@ describe("opportunity monitor current-vs-audit separation", () => {
   const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
   const monitor = readFileSync(join(frontendRoot, "components/opportunity-monitor.tsx"), "utf8");
 
-  it("drives the primary table from tracked radar and keeps audit collapsed and distinct", () => {
+  it("drives the primary table from tracked radar and keeps market-decision audit off the console", () => {
     assert.match(page, /getTrackedWatchlist\("limit=100"\)/);
     assert.match(page, /<OpportunityMonitor/);
     assert.match(page, /items=\{tracked\.available \? tracked\.value : \[\]\}/);
-    assert.match(page, /getPaperScans\("limit=100"\)/);
-    assert.match(page, /audit-disclosure/);
-    assert.match(page, /LATEST 100 AUDIT/);
-    assert.match(page, /Latest 100 audit observations/);
-    assert.match(page, /Not current scanner radar/);
-    assert.match(page, /<PaperScanHistoryTable scans=\{scans\}/);
+    assert.doesNotMatch(page, /getPaperScans/);
+    assert.doesNotMatch(page, /audit-disclosure/);
+    assert.doesNotMatch(page, /PaperScanHistoryTable/);
+    assert.doesNotMatch(page, /LATEST 100 AUDIT/);
     assert.doesNotMatch(page, /panel-title">Paper scan history/);
     assert.doesNotMatch(page, /<span>Tracked<\/span>/);
     assert.doesNotMatch(page, /TrackedMarketsBoard/);
@@ -133,10 +131,11 @@ describe("opportunity monitor current-vs-audit separation", () => {
     const treasuryIdx = page.indexOf("<LiquidityPools");
     const positionsIdx = page.indexOf("Open paper positions");
     const scanIdx = page.indexOf("<RunPaperScan");
-    const auditIdx = page.indexOf("audit-disclosure");
     assert.ok(treasuryIdx >= 0 && positionsIdx > treasuryIdx && scanIdx > positionsIdx);
-    assert.ok(hotIdx > 0 && monitorIdx > hotIdx && auditIdx > monitorIdx);
+    assert.ok(hotIdx > 0 && monitorIdx > hotIdx);
     assert.match(monitor, /Current radar set from tracked watchlist/);
+    assert.match(monitor, /getTrackedWatchlist\("limit=100"\)/);
+    assert.match(monitor, /cycleStamp/);
     assert.doesNotMatch(monitor, /getPaperScans/);
     assert.doesNotMatch(monitor, /DEMO_NEAR_ARB/);
     assert.doesNotMatch(page, /DEMO_NEAR_ARB/);

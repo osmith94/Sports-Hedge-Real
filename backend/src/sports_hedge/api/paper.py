@@ -47,6 +47,7 @@ from sports_hedge.application.live_refresh import (
     UNIVERSE_RUN_MODE_UPDATE,
     ExplicitCollectBusy,
     LiveRefreshStatus,
+    OperationsHeartbeat,
     ScanCycleTimeout,
     get_live_refresh_coordinator,
 )
@@ -928,6 +929,15 @@ def _cycles_from(repository: Any, limit: int = 100) -> list[PaperScanCycleRecord
         return []
 
 
+def _operations_heartbeat(coordinator: Any | None = None) -> OperationsHeartbeat:
+    """Console poll. Does not attach scan-cycle history or the fixture board."""
+
+    resolved = coordinator or get_live_refresh_coordinator()
+    heartbeat = resolved.public_heartbeat()
+    refs = resolved.observe_degradation_incidents(heartbeat)
+    return heartbeat.model_copy(update={"venue_degradation_incidents": refs})
+
+
 def _status_with_scan_cycles(
     status: LiveRefreshStatus,
     repository: Any,
@@ -941,14 +951,14 @@ def _status_with_scan_cycles(
     return with_cycles.model_copy(update={"venue_degradation_incidents": refs})
 
 
-@router.get("/live-refresh", response_model=LiveRefreshStatus)
+@router.get("/live-refresh", response_model=OperationsHeartbeat)
 def live_refresh_status(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Pure read model. Never starts collector, discovery, or checkpoint I/O."""
 
     coordinator = get_live_refresh_coordinator()
-    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+    return _operations_heartbeat(coordinator)
 
 
 @router.get("/venue-degradation-incident/{venue}")
@@ -1006,16 +1016,16 @@ def get_venue_participation() -> LaneVenueParticipation:
     return participation
 
 
-@router.put("/venue-participation", response_model=LiveRefreshStatus)
+@router.put("/venue-participation", response_model=OperationsHeartbeat)
 def put_venue_participation(
     update: LaneVenueParticipationUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Persist operator lane venue toggles. Applies at the next safe cycle boundary."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_venue_participation(update.hot.as_venues(), update.universe.as_venues())
-    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+    return _operations_heartbeat(coordinator)
 
 
 @router.get("/operator-scanner-settings", response_model=OperatorScannerSettings)
@@ -1034,11 +1044,11 @@ def get_universe_scope() -> OperatorUniverseScope:
     return coordinator.effective_universe_scope()
 
 
-@router.put("/universe-scope", response_model=LiveRefreshStatus)
+@router.put("/universe-scope", response_model=OperationsHeartbeat)
 def put_universe_scope(
     update: OperatorUniverseScopeUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Apply current session scope. Saved startup default changes only when requested.
 
     Apply itself never calls providers.
@@ -1061,14 +1071,14 @@ def put_universe_scope(
                 detail="Select at least one supported football competition or season market.",
             ) from exc
         raise
-    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+    return _operations_heartbeat(coordinator)
 
 
-@router.put("/operator-scanner-settings", response_model=LiveRefreshStatus)
+@router.put("/operator-scanner-settings", response_model=OperationsHeartbeat)
 def put_operator_scanner_settings(
     update: OperatorScannerSettingsUpdate,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Persist scanner thresholds, the HOT target, and UNIVERSE discovery refresh.
 
     Legacy HOT/BACKGROUND timing fields are optional. Omitting them keeps the
@@ -1095,73 +1105,73 @@ def put_operator_scanner_settings(
             else {}
         ),
     )
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/scanner/stop", response_model=LiveRefreshStatus)
+@router.post("/scanner/stop", response_model=OperationsHeartbeat)
 def stop_paper_scanner(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Pause server-owned ACTIVE TRADE, HOT, UNIVERSE and BACKGROUND work without clearing state."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scanner_stopped(True)
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/scanner/resume", response_model=LiveRefreshStatus)
+@router.post("/scanner/resume", response_model=OperationsHeartbeat)
 def resume_paper_scanner(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Resume server-owned scanner workers from preserved state. No process restart."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_operator_scanner_stopped(False)
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/scanner/universe-schedule/pause", response_model=LiveRefreshStatus)
+@router.post("/scanner/universe-schedule/pause", response_model=OperationsHeartbeat)
 def pause_universe_schedule(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Pause periodic UNIVERSE fresh-generation scheduling. One-shots still work."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_universe_scans_paused(True)
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/scanner/universe-schedule/resume", response_model=LiveRefreshStatus)
+@router.post("/scanner/universe-schedule/resume", response_model=OperationsHeartbeat)
 def resume_universe_schedule(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Resume periodic UNIVERSE scheduling from the persisted cadence. No catch-up burst."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_universe_scans_paused(False)
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/scanner/background-pricing/pause", response_model=LiveRefreshStatus)
+@router.post("/scanner/background-pricing/pause", response_model=OperationsHeartbeat)
 def pause_background_pricing(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Stop new BACKGROUND pricing slices. In-flight calls finish. Cursor stays."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_background_pricing_paused(True)
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/scanner/background-pricing/resume", response_model=LiveRefreshStatus)
+@router.post("/scanner/background-pricing/resume", response_model=OperationsHeartbeat)
 def resume_background_pricing(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Resume BACKGROUND from the existing coverage cursor. No row-1 restart."""
 
     coordinator = get_live_refresh_coordinator()
     coordinator.apply_background_pricing_paused(False)
-    return _status_with_scan_cycles(coordinator.public_status(), repository)
+    return _operations_heartbeat(coordinator)
 
 
 @router.post(
@@ -1236,11 +1246,11 @@ async def refresh_hot_read_only_market_data(
     return report.model_copy(update={"fixture_markets": {}})
 
 
-@router.post("/collect/background", response_model=LiveRefreshStatus)
+@router.post("/collect/background", response_model=OperationsHeartbeat)
 async def refresh_background_read_only_market_data(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
     service: PaperScanService = Depends(get_paper_scan_service),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Run exact-ID BACKGROUND pricing now. No discovery and no UNIVERSE advance."""
 
     coordinator = get_live_refresh_coordinator()
@@ -1257,13 +1267,13 @@ async def refresh_background_read_only_market_data(
     except ExplicitCollectBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await coordinator.price_engine().drain_item_captures()
-    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/collect/universe", response_model=LiveRefreshStatus)
+@router.post("/collect/universe", response_model=OperationsHeartbeat)
 def run_universe_now(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Make a fresh selected-scope UNIVERSE generation due now, coalescing if busy."""
 
     coordinator = get_live_refresh_coordinator()
@@ -1273,7 +1283,7 @@ def run_universe_now(
         coordinator.request_universe_run_now()
     except ExplicitCollectBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+    return _operations_heartbeat(coordinator)
 
 
 def _audit_universe_operator_clear(
@@ -1331,10 +1341,10 @@ def _audit_universe_operator_clear(
     repository.append_cycle(record)
 
 
-@router.post("/universe/clear", response_model=LiveRefreshStatus)
+@router.post("/universe/clear", response_model=OperationsHeartbeat)
 def clear_universe_working_set(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Clear live UNIVERSE working state only. No provider I/O.
 
     Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
@@ -1343,14 +1353,14 @@ def clear_universe_working_set(
     coordinator = get_live_refresh_coordinator()
     audit = coordinator.clear_universe_working_set(run_after=False)
     _audit_universe_operator_clear(repository, audit)
-    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+    return _operations_heartbeat(coordinator)
 
 
-@router.post("/universe/run", response_model=LiveRefreshStatus)
+@router.post("/universe/run", response_model=OperationsHeartbeat)
 def run_universe_with_mode(
     request: UniverseRunRequest,
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
-) -> LiveRefreshStatus:
+) -> OperationsHeartbeat:
     """Run UNIVERSE now as Update existing or Clear & update."""
 
     coordinator = get_live_refresh_coordinator()
@@ -1364,7 +1374,7 @@ def run_universe_with_mode(
             coordinator.request_universe_run_now()
     except ExplicitCollectBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _status_with_scan_cycles(coordinator.public_status(), repository, coordinator)
+    return _operations_heartbeat(coordinator)
 
 
 @router.post(

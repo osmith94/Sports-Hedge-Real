@@ -243,8 +243,11 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /VenueLaneControls/);
     const chips = readFileSync(join(frontendRoot, "components/venue-lane-controls.tsx"), "utf8");
     assert.match(chips, /config_diagnostic/);
-    assert.match(scan, /pollLiveStatus/);
-    assert.match(scan, /applyLatestLiveRefresh/);
+    assert.match(scan, /useLiveStatus/);
+    assert.match(scan, /refreshNow/);
+    assert.doesNotMatch(scan, /pollLiveStatus/);
+    assert.doesNotMatch(scan, /applyLatestLiveRefresh/);
+    assert.doesNotMatch(scan, /getLiveRefreshStatus/);
     assert.doesNotMatch(scan, /void collectRef\.current\(\)/);
     assert.match(bar, /AUTO PAPER CAPTURE ON/);
     assert.match(bar, /paper_autofill_enabled/);

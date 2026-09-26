@@ -65,16 +65,24 @@ describe("live-refresh poll generation guard", () => {
 });
 
 describe("live-refresh poll surfaces", () => {
-  it("guards overlapping /paper/live-refresh polls on RunPaperScan and VenueHealthBar", () => {
+  it("shares one live-refresh poll instead of overlapping RunPaperScan and VenueHealthBar polls", () => {
     const scan = readFileSync(join(frontendRoot, "components/run-paper-scan.tsx"), "utf8");
     const bar = readFileSync(join(frontendRoot, "components/venue-health-bar.tsx"), "utf8");
+    const provider = readFileSync(join(frontendRoot, "components/live-status-provider.tsx"), "utf8");
+    const poll = readFileSync(join(frontendRoot, "lib/live-status-poll.ts"), "utf8");
     const guard = readFileSync(join(frontendRoot, "lib/live-refresh-poll-guard.ts"), "utf8");
     assert.match(guard, /createLiveRefreshPollGuard/);
     assert.match(guard, /isCurrent\(generation/);
-    assert.match(scan, /applyLatestLiveRefresh/);
-    assert.match(scan, /createLiveRefreshPollGuard/);
-    assert.match(bar, /applyLatestLiveRefresh/);
-    assert.match(bar, /createLiveRefreshPollGuard/);
+    assert.doesNotMatch(scan, /applyLatestLiveRefresh/);
+    assert.doesNotMatch(scan, /createLiveRefreshPollGuard/);
+    assert.doesNotMatch(scan, /getLiveRefreshStatus/);
+    assert.doesNotMatch(bar, /applyLatestLiveRefresh/);
+    assert.doesNotMatch(bar, /createLiveRefreshPollGuard/);
+    assert.doesNotMatch(bar, /getLiveRefreshStatus/);
+    assert.match(scan, /useLiveStatus/);
+    assert.match(bar, /useLiveStatus/);
+    assert.match(provider, /createLiveStatusPoll/);
+    assert.match(poll, /if \(inflight\) return inflight/);
     assert.doesNotMatch(scan, /applyLiveRefresh\(await getLiveRefreshStatus\(\)\)/);
   });
 });

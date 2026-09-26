@@ -833,6 +833,72 @@ export type OperatorUniverseScopeUpdate = {
   restore_saved_default?: boolean;
 };
 
+export type UniverseCatalogueFixture = {
+  canonical_event_id: string;
+  sport?: string | null;
+  competition: string;
+  target_competition_code?: string | null;
+  home_team: string;
+  away_team: string;
+  kickoff_utc: string;
+  matchbook_matched?: boolean;
+  polymarket_matched?: boolean;
+  kalshi_matched?: boolean;
+  fixture_status?: string | null;
+  universe_generation_id?: number | null;
+  updated_at?: string | null;
+};
+
+export type UniverseCatalogueSnapshot = {
+  data_kind?: string;
+  paper_only?: boolean;
+  places_orders?: boolean;
+  fixtures: UniverseCatalogueFixture[];
+  universe_fixture_count: number;
+  universe_catalogue_version: string;
+  universe_catalogue_as_of?: string | null;
+  universe_generation_id?: number | null;
+};
+
+export type HotRosterEntry = {
+  canonical_event_id: string;
+  home_team: string;
+  away_team: string;
+  competition: string;
+  sport?: string | null;
+  target_competition_code?: string | null;
+  kickoff_utc: string;
+  in_running?: boolean | null;
+  fixture_status?: string | null;
+  live_score_supported?: boolean;
+  home_score?: number | null;
+  away_score?: number | null;
+  hot_reasons?: string[];
+  scan_lane?: string;
+  market_evaluation_state?: string | null;
+  market_evaluation_reason?: string | null;
+  solver_is_arbitrage?: boolean;
+  matchbook_matched?: boolean;
+  polymarket_matched?: boolean;
+  kalshi_matched?: boolean;
+  last_scanned_at?: string | null;
+  last_seen_at?: string | null;
+  matched_equivalent_count?: number | null;
+  current_net_edge?: string | number | null;
+};
+
+export type DeferredFixtureReport = {
+  data_kind?: string;
+  paper_only?: boolean;
+  places_orders?: boolean;
+  execution_enabled?: boolean;
+  provider_calls?: number;
+  scan_started?: boolean;
+  count: number;
+  rows: HotRosterEntry[];
+  note?: string;
+};
+
 export type LiveRefreshStatus = {
   discovery_source: Venue;
   discovery_mode?: string;
@@ -862,7 +928,15 @@ export type LiveRefreshStatus = {
   config_warnings?: string[];
   venue_health?: Record<string, string>;
   live_scores: string;
-  discovered_fixtures: DiscoveredFixture[];
+  /** Legacy full board. The live heartbeat omits this. */
+  discovered_fixtures?: DiscoveredFixture[];
+  fixture_board_as_of?: string | null;
+  universe_fixture_count?: number;
+  universe_catalogue_version?: string;
+  universe_catalogue_as_of?: string | null;
+  universe_catalogue_generation_id?: number | null;
+  hot_roster?: HotRosterEntry[];
+  deferred_awaiting_count?: number;
   hot?: LaneRefreshStatus;
   universe?: LaneRefreshStatus;
   background?: LaneRefreshStatus;
@@ -1162,7 +1236,7 @@ export function getPaperScans(query = "limit=100"): Promise<PaperScanRecord[]> {
   return request(`/paper/scans${query ? `?${query}` : ""}`);
 }
 
-export function getPaperScanCycles(query = "limit=100"): Promise<PaperScanCycleRecord[]> {
+export function getPaperScanCycles(query = "limit=50"): Promise<PaperScanCycleRecord[]> {
   return request(`/paper/scan-cycles${query ? `?${query}` : ""}`);
 }
 
@@ -1591,6 +1665,14 @@ export async function recommendPaperDeployment(payload: {
 
 export function getLiveRefreshStatus(): Promise<LiveRefreshStatus> {
   return request("/paper/live-refresh");
+}
+
+export function getUniverseFixtureCatalogue(): Promise<UniverseCatalogueSnapshot> {
+  return request("/operations/universe-fixtures");
+}
+
+export function getDeferredFixtureReport(): Promise<DeferredFixtureReport> {
+  return request("/operations/deferred-fixtures");
 }
 
 export function getVenueDegradationIncident(venue: string): Promise<VenueDegradationIncident> {

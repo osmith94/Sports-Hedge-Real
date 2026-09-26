@@ -248,7 +248,9 @@ describe("Wave N4 operator surface contracts", () => {
     assert.doesNotMatch(chips, /\$\{item\.short\} \{on \? "ON" : "OFF"\}/);
     assert.match(discovery, /discoveryParticipatedVenues/);
     assert.doesNotMatch(discovery, /LIVE PAPER · MB \/ PM \/ K/);
-    assert.match(section, /discoveryStatusBadgeLabel\(available, status\)/);
+    assert.match(section, /universe_catalogue_version/);
+    assert.match(section, /UNIVERSE CATALOGUE/);
+    assert.doesNotMatch(section, /LIVE PAPER · MB/);
     assert.match(scan, /dualScanStatusLines\(liveRefresh, nowMs\)/);
     assert.match(bar, /dualScanStatusLines\(refresh, nowMs\)/);
     assert.match(monitor, /useState<number \| null>\(null\)/);

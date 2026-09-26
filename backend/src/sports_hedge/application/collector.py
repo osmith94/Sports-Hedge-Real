@@ -198,6 +198,7 @@ from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.kalshi import resolve_kalshi_fee_metadata
 from sports_hedge.fees.models import FeeSnapshot
+from sports_hedge.matching.bulk_market_pairs import greedy_unique_market_matches
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult
 from sports_hedge.matching.ordinary_1x2 import (
@@ -6961,12 +6962,18 @@ def _is_baseline_match_result_pair(
     )
 
 
+def _canonical_markets_are_priority_match_result(
+    left: CanonicalMarket, right: CanonicalMarket
+) -> bool:
+    if _is_baseline_match_result(left) and _is_baseline_match_result(right):
+        return True
+    return allow_unknown_settlement_for_ordinary_1x2(left, right)
+
+
 def _is_priority_match_result_pair(
     left: _NormalizedMarket, right: _NormalizedMarket
 ) -> bool:
-    if _is_baseline_match_result_pair(left, right):
-        return True
-    return allow_unknown_settlement_for_ordinary_1x2(left.canonical, right.canonical)
+    return _canonical_markets_are_priority_match_result(left.canonical, right.canonical)
 
 
 def _select_prioritized_market_pairs(
@@ -6987,32 +6994,16 @@ def _greedy_unique_market_pairs(
     *,
     matcher: MarketMatcher,
 ) -> list[tuple[_NormalizedMarket, _NormalizedMarket, MarketMatchResult]]:
-    candidates: list[tuple[float, int, int, MarketMatchResult]] = []
-    for left_index, left_item in enumerate(left):
-        for right_index, right_item in enumerate(right):
-            match = matcher.match(left_item.canonical, right_item.canonical)
-            if match.matched:
-                candidates.append((match.confidence, left_index, right_index, match))
-    candidates.sort(
-        key=lambda item: (
-            1
-            if _is_priority_match_result_pair(left[item[1]], right[item[2]])
-            else 0,
-            item[0],
-        ),
-        reverse=True,
+    chosen = greedy_unique_market_matches(
+        [item.canonical for item in left],
+        [item.canonical for item in right],
+        matcher,
+        priority_pair=_canonical_markets_are_priority_match_result,
     )
-
-    used_left: set[int] = set()
-    used_right: set[int] = set()
-    result: list[tuple[_NormalizedMarket, _NormalizedMarket, MarketMatchResult]] = []
-    for _, left_index, right_index, match in candidates:
-        if left_index in used_left or right_index in used_right:
-            continue
-        used_left.add(left_index)
-        used_right.add(right_index)
-        result.append((left[left_index], right[right_index], match))
-    return result
+    return [
+        (left[left_index], right[right_index], match)
+        for left_index, right_index, match in chosen
+    ]
 
 
 def _extract_matchbook_items(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:

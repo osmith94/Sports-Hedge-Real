@@ -7,6 +7,7 @@ import {
   ScanCycleDiagnosticResponse,
   getPaperScanCycleReport,
 } from "../lib/api";
+import { useLiveStatusOptional } from "./live-status-provider";
 import {
   SCAN_CYCLE_COPY,
   SCAN_CYCLE_EMPTY,
@@ -23,12 +24,15 @@ import {
 import { useHydratedNowMs } from "./hydrated-relative-time";
 
 export function ScanCycleHistoryPanel({
-  cycles,
-  available,
+  cycles: cyclesFromServer,
+  available: availableFromServer,
 }: {
-  cycles: PaperScanCycleRecord[];
-  available: boolean;
+  cycles?: PaperScanCycleRecord[];
+  available?: boolean;
 }) {
+  const live = useLiveStatusOptional();
+  const cycles = live?.scanCycles ?? cyclesFromServer ?? [];
+  const available = live ? live.scanCyclesAvailable : Boolean(availableFromServer);
   const nowMs = useHydratedNowMs();
   const rows = available ? scanCycleRows(cycles, nowMs) : [];
   const badge = scanCycleBadgeLabel(available, cycles);

@@ -358,5 +358,6 @@ def test_paper_only_execution_boundary_unchanged() -> None:
     status_src = inspect.getsource(paper_api.live_refresh_status)
     helper_src = inspect.getsource(paper_api._status_with_scan_cycles)
     assert "audit.append_cycle(" in persist_src
-    assert "_status_with_scan_cycles(" in status_src
+    assert "_operations_heartbeat(" in status_src
+    assert "public_status(" not in status_src
     assert "recent_scan_cycles" in helper_src
