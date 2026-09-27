@@ -678,7 +678,10 @@ async def test_retry_wait_is_logged_and_cannot_trigger_stale_plan_buy(
 
 def test_successful_top_up_logs_decision_and_committed_fill(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    # One-Time stays below this fixture's displayed depth so the repeated book
+    # still has unconsumed residual. An identical fully consumed level must not
+    # be filled again.
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), Decimal("80"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -870,7 +873,9 @@ def test_bounded_recovery_leaves_durable_residual_and_retry_is_idempotent(
 
 def test_injected_journal_failure_rolls_back_finance_and_event(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    # Leave unconsumed residual on the same displayed book. See the successful
+    # top-up test for why One-Time is below the fixture depth.
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), Decimal("80"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]

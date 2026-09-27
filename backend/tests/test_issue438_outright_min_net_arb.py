@@ -409,7 +409,9 @@ def test_active_trade_top_up_uses_stamped_trigger_not_live_fixture(
     assert "plan.decision.minimum_net_edge" in src
     assert "trigger = operator.min_net_edge" not in src
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    # One-Time below the fixture depth leaves unconsumed residual on the same
+    # displayed book. The repeated snapshot may fill only that residual.
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), Decimal("80"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -422,6 +424,9 @@ def test_active_trade_top_up_uses_stamped_trigger_not_live_fixture(
             max_execution_risk=60,
             hot_cadence_seconds=30,
             max_allocated_per_trade_gbp=Decimal("2000"),
+            max_event_gbp=Decimal("2000"),
+            max_opportunity_gbp=Decimal("2000"),
+            max_one_time_gbp=Decimal("80"),
         )
         result = ops.maybe_top_up_open_trade(
             trade,

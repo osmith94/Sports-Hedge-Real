@@ -324,6 +324,9 @@ async def _run(
     treasury: Decimal = Decimal(5000),
     max_allocated_per_trade_gbp: float | None = None,
     max_one_time_gbp: float | None = None,
+    max_event_gbp: float | None = None,
+    max_opportunity_gbp: float | None = None,
+    extra_settings: dict | None = None,
     ready: dict | None = None,
     matchbook_hook=None,
 ):
@@ -331,8 +334,14 @@ async def _run(
     if max_allocated_per_trade_gbp is not None:
         settings_kwargs["max_allocated_per_trade_gbp"] = max_allocated_per_trade_gbp
         settings_kwargs["allocation_per_opportunity_limit_gbp"] = max_allocated_per_trade_gbp
+    if max_event_gbp is not None:
+        settings_kwargs["max_event_gbp"] = max_event_gbp
+    if max_opportunity_gbp is not None:
+        settings_kwargs["max_opportunity_gbp"] = max_opportunity_gbp
     if max_one_time_gbp is not None:
         settings_kwargs["max_one_time_gbp"] = max_one_time_gbp
+    if extra_settings:
+        settings_kwargs.update(extra_settings)
     settings = Settings(**settings_kwargs)
     repository = SqliteMarketIntelligenceRepository()
     scan = _RecordingScan(
