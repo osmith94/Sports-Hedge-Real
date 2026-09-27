@@ -327,6 +327,9 @@ def test_structural_game_winner_and_half_run_totals_are_paper_keys() -> None:
     assert registered_canonical_key(kalshi, polymarket) == CANONICAL_MLB_GAME_WINNER
     assert registered_canonical_key(kalshi, matchbook) == CANONICAL_MLB_GAME_WINNER
     assert registered_canonical_key(polymarket, matchbook) == CANONICAL_MLB_GAME_WINNER
+    assert registered_canonical_key(kalshi, kalshi) is None
+    assert registered_canonical_key(polymarket, polymarket) is None
+    assert registered_canonical_key(matchbook, matchbook) is None
     assessment = classify_pair(kalshi, polymarket)
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.execution_eligible is False
