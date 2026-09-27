@@ -186,12 +186,17 @@ class SqliteWatchlistRepository:
                 accepted INTEGER NOT NULL,
                 rejection_reason TEXT,
                 snapshot_json TEXT NOT NULL,
-                diagnostics_json TEXT
+                diagnostics_json TEXT,
+                execution_cycle INTEGER,
+                trade_id TEXT,
+                tranche_id TEXT,
+                cycle_outcome TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_execution_snapshot_audits_opportunity
                 ON execution_snapshot_audits(opportunity_id, occurred_at);
             """
         )
+        self._migrate_execution_snapshot_audits()
         columns = {
             row[1]
             for row in self._connection.execute("PRAGMA table_info(watchlist_opportunities)")
@@ -473,6 +478,39 @@ class SqliteWatchlistRepository:
             )
             self._commit()
 
+    def _migrate_execution_snapshot_audits(self) -> None:
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(execution_snapshot_audits)")
+        }
+        extras = {
+            "execution_cycle": "INTEGER",
+            "trade_id": "TEXT",
+            "tranche_id": "TEXT",
+            "cycle_outcome": "TEXT",
+        }
+        for name, ddl in extras.items():
+            if name not in columns:
+                self._connection.execute(
+                    f"ALTER TABLE execution_snapshot_audits ADD COLUMN {name} {ddl}"
+                )
+
+    def next_execution_cycle(self, opportunity_id: str | None) -> int:
+        """Next 1-based Price-2 cycle for one opportunity. Unscoped attempts start at 1."""
+
+        if not opportunity_id:
+            return 1
+        with self.exclusive():
+            row = self._connection.execute(
+                """
+                SELECT COALESCE(MAX(execution_cycle), 0)
+                FROM execution_snapshot_audits
+                WHERE opportunity_id = ?
+                """,
+                (opportunity_id,),
+            ).fetchone()
+        return int(row[0]) + 1
+
     def append_execution_snapshot_audit(
         self,
         *,
@@ -485,16 +523,38 @@ class SqliteWatchlistRepository:
         rejection_reason: str | None,
         snapshot_json: str,
         diagnostics_json: str | None,
+        execution_cycle: int | None = None,
+        cycle_outcome: str | None = None,
     ) -> None:
         """Durable Price-2 snapshot. Separate from lifecycle detail text."""
 
         with self.exclusive():
+            cycle = execution_cycle
+            if cycle is None:
+                if opportunity_id:
+                    row = self._connection.execute(
+                        """
+                        SELECT COALESCE(MAX(execution_cycle), 0)
+                        FROM execution_snapshot_audits
+                        WHERE opportunity_id = ?
+                        """,
+                        (opportunity_id,),
+                    ).fetchone()
+                    cycle = int(row[0]) + 1
+                else:
+                    cycle = 1
+            snapshot_json = _json_with_cycle(
+                snapshot_json,
+                execution_cycle=cycle,
+                cycle_outcome=cycle_outcome,
+            )
             self._connection.execute(
                 """
                 INSERT OR REPLACE INTO execution_snapshot_audits (
                     snapshot_id, opportunity_id, catalogue_row_id, canonical_market_id,
-                    occurred_at, accepted, rejection_reason, snapshot_json, diagnostics_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    occurred_at, accepted, rejection_reason, snapshot_json, diagnostics_json,
+                    execution_cycle, trade_id, tranche_id, cycle_outcome
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
                 """,
                 (
                     snapshot_id,
@@ -506,7 +566,45 @@ class SqliteWatchlistRepository:
                     rejection_reason,
                     snapshot_json,
                     diagnostics_json,
+                    cycle,
+                    cycle_outcome,
                 ),
+            )
+            self._commit()
+
+    def link_execution_snapshot_fill(
+        self,
+        *,
+        snapshot_id: str,
+        trade_id: str,
+        tranche_id: str | None,
+        cycle_outcome: str,
+    ) -> None:
+        """Attach the fill result to the Price-2 attempt that authorised it."""
+
+        with self.exclusive():
+            row = self._connection.execute(
+                """
+                SELECT snapshot_json FROM execution_snapshot_audits
+                WHERE snapshot_id = ?
+                """,
+                (snapshot_id,),
+            ).fetchone()
+            if row is None:
+                return
+            snapshot_json = _json_with_cycle(
+                row["snapshot_json"],
+                trade_id=trade_id,
+                tranche_id=tranche_id,
+                cycle_outcome=cycle_outcome,
+            )
+            self._connection.execute(
+                """
+                UPDATE execution_snapshot_audits
+                SET trade_id = ?, tranche_id = ?, cycle_outcome = ?, snapshot_json = ?
+                WHERE snapshot_id = ?
+                """,
+                (trade_id, tranche_id, cycle_outcome, snapshot_json, snapshot_id),
             )
             self._commit()
 
@@ -938,6 +1036,33 @@ def _row_get(row: sqlite3.Row, key: str) -> Any:
     if key not in row.keys():
         return None
     return row[key]
+
+
+def _json_with_cycle(
+    snapshot_json: str,
+    *,
+    execution_cycle: int | None = None,
+    cycle_outcome: str | None = None,
+    trade_id: str | None = None,
+    tranche_id: str | None = None,
+) -> str:
+    """Keep the stored blob aligned with the queryable cycle columns."""
+
+    try:
+        payload = json.loads(snapshot_json)
+    except json.JSONDecodeError:
+        return snapshot_json
+    if not isinstance(payload, dict):
+        return snapshot_json
+    if execution_cycle is not None:
+        payload["execution_cycle"] = execution_cycle
+    if cycle_outcome is not None:
+        payload["cycle_outcome"] = cycle_outcome
+    if trade_id is not None:
+        payload["trade_id"] = trade_id
+    if tranche_id is not None:
+        payload["tranche_id"] = tranche_id
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
 def _venue(value: str | None) -> VenueName | None:

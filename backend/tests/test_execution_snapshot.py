@@ -277,8 +277,12 @@ async def test_paper_fill_records_price2_prices_depth_and_audit_phases(
             assert leg["retrieval_native_id"]
             assert leg["retrieved_at"]
         audits = bundle.watchlist.repository.list_execution_snapshot_audits(trade.opportunity_id)
-        assert len(audits) == 1
-        assert audits[0]["accepted"] == 1
+        audits = sorted(audits, key=lambda row: int(row["execution_cycle"] or 0))
+        assert [row["accepted"] for row in audits] == [1, 0]
+        assert audits[0]["cycle_outcome"] == "filled"
+        assert audits[0]["tranche_id"] == "opening"
+        assert audits[0]["trade_id"] == trade.trade_id
+        assert audits[1]["cycle_outcome"] == "rejected"
         assert json.loads(audits[0]["snapshot_json"])["snapshot_id"] == payload["snapshot_id"]
         text = caplog.text
         for phase in (
@@ -291,8 +295,12 @@ async def test_paper_fill_records_price2_prices_depth_and_audit_phases(
             PHASE_FILL_COMPLETE,
         ):
             assert f"phase={phase}" in text
-        assert bundle.matchbook.get_market_calls == [(EVENT, MARKET), (EVENT, MARKET)]
-        assert bundle.kalshi.book_calls == [TICKER, TICKER]
+        assert bundle.matchbook.get_market_calls == [
+            (EVENT, MARKET),
+            (EVENT, MARKET),
+            (EVENT, MARKET),
+        ]
+        assert bundle.kalshi.book_calls == [TICKER, TICKER, TICKER]
     finally:
         bundle.repository.close()
         bundle.ledger.close()

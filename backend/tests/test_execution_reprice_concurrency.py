@@ -526,8 +526,12 @@ async def test_fresh_price2_still_opens_exactly_one_paper_trade(tmp_path, monkey
     )
     try:
         assert len(bundle.operations.list_active_trades()) == 1
-        assert bundle.matchbook.get_market_calls == [(EVENT, MARKET), (EVENT, MARKET)]
-        assert bundle.kalshi.book_calls == [TICKER, TICKER]
+        assert bundle.matchbook.get_market_calls == [
+            (EVENT, MARKET),
+            (EVENT, MARKET),
+            (EVENT, MARKET),
+        ]
+        assert bundle.kalshi.book_calls == [TICKER, TICKER, TICKER]
         assert bundle.matchbook.list_events_calls == 0
         assert Settings().sports_hedge_execution_enabled is False
     finally:

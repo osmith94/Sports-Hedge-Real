@@ -276,6 +276,23 @@ def _is_expected_autofill_gate(exc: BaseException) -> bool:
     return reason.startswith("allocation_failed:")
 
 
+def _iterative_fill_stop(trade: PaperTrade) -> str:
+    """Why a fresh accepted snapshot did not add a tranche."""
+
+    from sports_hedge.application.execution_reprice import (
+        CYCLE_ALLOCATION_CEILING,
+        CYCLE_BELOW_MIN_NET,
+        CYCLE_NO_INCREMENTAL_LIQUIDITY,
+    )
+
+    phase = trade.active_trade_phase
+    if phase is PaperActiveTradePhase.MONITORING_CAP_REACHED:
+        return CYCLE_ALLOCATION_CEILING
+    if phase is PaperActiveTradePhase.EXIT_MANAGEMENT:
+        return CYCLE_BELOW_MIN_NET
+    return CYCLE_NO_INCREMENTAL_LIQUIDITY
+
+
 def _autofill_begin_rejection_reason(exc: BaseException) -> str:
     """Map a bound-snapshot begin failure to a durable capture-rejection code."""
 
@@ -1295,6 +1312,167 @@ class PaperOperationsService:
         noted = self._note_repeat_observation(trade, simulated_at)
         return self._result_from_existing_trade(noted, simulated_at)
 
+    def fill_from_execution_snapshot(
+        self,
+        opportunity_id: str,
+        decision: PaperScanDecision,
+        *,
+        snapshot_id: str,
+        snapshot_json: str,
+        pricing_lane: str | None = None,
+    ) -> str:
+        """Append one tranche from a new accepted Price-2 snapshot, or refuse it.
+
+        The decision is the only economics used. A snapshot that already has a
+        tranche does not fill again. Capital, min-net, and max-per-trade gates
+        are the existing top-up gates.
+        """
+
+        from sports_hedge.application.execution_reprice import (
+            CYCLE_DUPLICATE,
+            CYCLE_FILLED,
+            CYCLE_NOT_OPEN,
+            PHASE_FILL_ATTEMPTED,
+            log_execution_phase,
+        )
+
+        with self._fill_persist_lock:
+            trade = self._get_trade_by_opportunity(opportunity_id)
+            if trade is None or trade.state is not PaperTradeState.OPEN:
+                return CYCLE_NOT_OPEN
+            if self._snapshot_id_on_trade(trade, snapshot_id):
+                return CYCLE_DUPLICATE
+            if trade.unresolved_recovery or trade.active_trade_phase in {
+                PaperActiveTradePhase.EXIT_MANAGEMENT,
+                PaperActiveTradePhase.MONITORING_CAP_REACHED,
+                PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+            }:
+                return CYCLE_NOT_OPEN
+            plan = self._plan_from_decision(
+                decision,
+                opportunity_id,
+                trade.provenance,
+                pricing_lane=pricing_lane,
+            )
+            plan = plan.model_copy(
+                update={
+                    "execution_authoritative": True,
+                    "execution_snapshot_json": snapshot_json,
+                }
+            )
+            before_ids = {item.tranche_id for item in trade.tranches}
+            when = datetime.now(UTC)
+            log_execution_phase(
+                PHASE_FILL_ATTEMPTED,
+                opportunity_id=opportunity_id,
+                snapshot=snapshot_id,
+            )
+            self._maybe_top_up_open_trade_locked(
+                trade,
+                now=when,
+                plan=plan,
+                require_current_plan=True,
+            )
+            loaded = self.trades.get(trade.trade_id) if self.trades is not None else trade
+            if loaded is None:
+                return CYCLE_NOT_OPEN
+            if self._snapshot_id_on_trade(loaded, snapshot_id):
+                return CYCLE_DUPLICATE
+            added = [item for item in loaded.tranches if item.tranche_id not in before_ids]
+            if not added:
+                outcome = _iterative_fill_stop(loaded)
+                self._link_execution_snapshot(
+                    snapshot_id,
+                    trade_id=loaded.trade_id,
+                    tranche_id=None,
+                    cycle_outcome=outcome,
+                )
+                return outcome
+            tranche = added[-1]
+            tranche.execution_snapshot_id = snapshot_id
+            tranche.idempotency_key = snapshot_id
+            loaded.audit.append(
+                PaperTradeAuditEvent(
+                    event_id=f"{loaded.trade_id}:execution_snapshot:{snapshot_id}",
+                    occurred_at=when,
+                    event_type=PaperTradeAuditEventType.EXECUTION_SNAPSHOT,
+                    detail=snapshot_json,
+                )
+            )
+            if self.trades is not None:
+                loaded = self.trades.save(loaded)
+            self._plans[opportunity_id] = plan
+            self._link_execution_snapshot(
+                snapshot_id,
+                trade_id=loaded.trade_id,
+                tranche_id=tranche.tranche_id,
+                cycle_outcome=CYCLE_FILLED,
+            )
+            return CYCLE_FILLED
+
+    def _snapshot_id_on_trade(self, trade: PaperTrade, snapshot_id: str) -> bool:
+        return any(
+            item.execution_snapshot_id == snapshot_id or item.idempotency_key == snapshot_id
+            for item in trade.tranches
+        )
+
+    def _execution_snapshot_already_filled(self, trade: PaperTrade, plan: PaperFillPlan) -> bool:
+        if not plan.execution_authoritative:
+            return False
+        from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+        snapshot_id = execution_snapshot_id_from_json(plan.execution_snapshot_json)
+        if not snapshot_id:
+            return False
+        return self._snapshot_id_on_trade(trade, snapshot_id)
+
+    def _link_execution_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        trade_id: str,
+        tranche_id: str | None,
+        cycle_outcome: str,
+    ) -> None:
+        linker = getattr(self.watchlist, "link_execution_snapshot_fill", None)
+        if not callable(linker):
+            return
+        linker(
+            snapshot_id=snapshot_id,
+            trade_id=trade_id,
+            tranche_id=tranche_id,
+            cycle_outcome=cycle_outcome,
+        )
+
+    def _bind_opening_execution_snapshot(
+        self,
+        trade: PaperTrade,
+        plan: PaperFillPlan,
+    ) -> PaperTrade:
+        from sports_hedge.application.execution_reprice import CYCLE_FILLED
+        from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+        snapshot_id = execution_snapshot_id_from_json(plan.execution_snapshot_json)
+        if not snapshot_id:
+            return trade
+        changed = False
+        for tranche in trade.tranches:
+            if (
+                tranche.kind is PaperTradeTrancheKind.OPENING
+                and tranche.execution_snapshot_id != snapshot_id
+            ):
+                tranche.execution_snapshot_id = snapshot_id
+                changed = True
+        if changed and self.trades is not None:
+            trade = self.trades.save(trade)
+        self._link_execution_snapshot(
+            snapshot_id,
+            trade_id=trade.trade_id,
+            tranche_id=OPENING_TRANCHE_ID,
+            cycle_outcome=CYCLE_FILLED,
+        )
+        return trade
+
     def maybe_top_up_open_trade(
         self,
         trade: PaperTrade,
@@ -1343,6 +1521,8 @@ class PaperOperationsService:
         trigger = plan.decision.minimum_net_edge if plan is not None else None
         if plan is None:
             return None
+        if self._execution_snapshot_already_filled(trade, plan):
+            return self._result_from_existing_trade(trade, when)
         recovering = bool(
             trade.unresolved_recovery
             or trade.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
@@ -3829,6 +4009,7 @@ class PaperOperationsService:
             )
         if saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             self._ensure_opening_tranche(saved, occurred_at)
+            saved = self._bind_opening_execution_snapshot(saved, plan)
             self._promote_active_trade(saved, occurred_at)
             reloaded = self.trades.get(saved.trade_id)
             return reloaded or saved

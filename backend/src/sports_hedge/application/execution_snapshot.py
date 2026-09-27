@@ -155,6 +155,7 @@ class ExecutionSnapshot:
     minimum_net_edge_scope: str | None = None
     capital_constraint: ExecutionCapitalEvidence | None = None
     timing: ExecutionTiming | None = None
+    execution_cycle: int = 0
 
     def __post_init__(self) -> None:
         if not self.snapshot_id:
@@ -194,6 +195,7 @@ class ExecutionSnapshot:
         return " ".join(
             (
                 f"snapshot_id={self.snapshot_id}",
+                f"execution_cycle={self.execution_cycle}",
                 f"skew_ms={self.skew_ms if self.skew_ms is not None else 'unknown'}",
                 f"max_skew_ms={self.max_skew_ms}",
                 f"earliest_retrieval_at={earliest.isoformat() if earliest else 'unknown'}",
@@ -208,6 +210,7 @@ class ExecutionSnapshot:
 
         payload = {
             "snapshot_id": self.snapshot_id,
+            "execution_cycle": self.execution_cycle,
             "catalogue_row_id": self.catalogue_row_id,
             "canonical_market_id": self.canonical_market_id,
             "started_at": self.started_at.isoformat(),
@@ -261,6 +264,23 @@ class ExecutionSnapshot:
             ],
         }
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def execution_snapshot_id_from_json(raw: str | None) -> str | None:
+    """Snapshot id stored on a fill plan. None when the plan has no Price-2 record."""
+
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("snapshot_id")
+    if not value:
+        return None
+    return str(value)
 
 
 def _settings_int(settings: Any, name: str, default: int) -> int:

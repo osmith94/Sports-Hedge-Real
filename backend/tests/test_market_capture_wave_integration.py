@@ -236,8 +236,8 @@ async def test_post_kickoff_in_play_stale_discovery_fills_from_execution_reprice
         assert kalshi.list_events_calls == 0
         assert matchbook.list_markets_calls == []
         assert kalshi.list_markets_calls == []
-        assert len(matchbook.get_market_calls) == 2
-        assert kalshi.book_calls == [TICKER, TICKER]
+        assert len(matchbook.get_market_calls) == 3
+        assert kalshi.book_calls == [TICKER, TICKER, TICKER]
         trade = _open_trade(
             type("Bundle", (), {"operations": operations})()
         )

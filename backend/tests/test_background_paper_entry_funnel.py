@@ -1,10 +1,12 @@
-"""BACKGROUND prices catalogue rows, then PAPER entry reprices exact IDs once.
+"""BACKGROUND prices catalogue rows, then PAPER entry reprices exact IDs.
 
 Deterministic fixture/demo books, not live quotes. Thresholds, fees, and
 execution rules are the current Settings defaults except where a case sets
 the existing risk cap or treasury seed. Autofill is the production
 LIVE_PAPER flag. A capture-eligible row gets one discovery scan and one
-execution reprice. Dull and risk-capped rows do not take the second read.
+execution reprice. The scripted book then disappears, so the iterative
+follow-up stops without another fill. Dull and risk-capped rows do not
+take the second read.
 """
 
 from __future__ import annotations
@@ -45,6 +47,21 @@ RICH_EVENT = "8899"
 RICH_TICKER = "KXEPLBTTS-RICH-BTTS"
 
 
+class _LimitedMatchbook(FakeMatchbook):
+    """The rich market is readable twice: discovery, then one Price-2 fill."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rich_reads = 0
+
+    async def get_market(self, event_id: int | str, market_id: int | str, **filters: object):
+        if str(market_id) == RICH_MARKET:
+            self._rich_reads += 1
+            if self._rich_reads > 2:
+                self.gone.add(RICH_MARKET)
+        return await super().get_market(event_id, market_id, **filters)
+
+
 class _Books(FakeKalshi):
     def __init__(self) -> None:
         super().__init__()
@@ -56,10 +73,14 @@ class _Books(FakeKalshi):
         market_id: int | str,
         outcome_id: int | str | None = None,
         **filters: object,
-    ) -> dict:
+    ) -> dict | None:
         del event_id, outcome_id, filters
         ticker = str(market_id)
         self.book_calls.append(ticker)
+        if ticker == RICH_TICKER:
+            self._rich_reads = getattr(self, "_rich_reads", 0) + 1
+            if self._rich_reads > 2:
+                return None
         return self.by_ticker[ticker]
 
 
@@ -94,7 +115,7 @@ def _market(market_id: str) -> dict:
 
 def _catalogue(include_rich: bool):
     rows = []
-    matchbook = FakeMatchbook()
+    matchbook = _LimitedMatchbook()
     kalshi = _Books()
     for index in range(DULL_COUNT):
         market_id = str(316100 + index)
@@ -255,9 +276,9 @@ async def test_background_opens_one_paper_trade_after_one_execution_reprice(
     assert len(result.evaluated) == expected_rows
     assert len(result.decisions) == expected_rows
     assert scan.scan_calls == expected_rows + 1
-    _assert_no_rediscovery(matchbook, kalshi, expected_rows, extra_exact_reads=1)
-    assert matchbook.get_market_calls.count((RICH_EVENT, RICH_MARKET)) == 2
-    assert kalshi.book_calls.count(RICH_TICKER) == 2
+    _assert_no_rediscovery(matchbook, kalshi, expected_rows, extra_exact_reads=2)
+    assert matchbook.get_market_calls.count((RICH_EVENT, RICH_MARKET)) == 3
+    assert kalshi.book_calls.count(RICH_TICKER) == 3
 
     dull = [item for item in result.decisions if not item.eligible_for_paper_simulation]
     rich = [item for item in result.decisions if item.eligible_for_paper_simulation]
