@@ -4093,6 +4093,7 @@ def _canonical_kalshi_market(identity: DerivedPriceEngineItem) -> CanonicalMarke
         kickoff_utc=identity.kickoff_utc,
         source_venue=VenueName.KALSHI,
         source_event_id=identity.kalshi_event_ticker,
+        scheduled_game_key=_scheduled_game_key_for_identity(identity),
     )
     return CanonicalMarket(
         event=event,
@@ -4146,6 +4147,7 @@ def _canonical_polymarket_market(identity: DerivedPriceEngineItem) -> CanonicalM
         kickoff_utc=identity.kickoff_utc,
         source_venue=VenueName.POLYMARKET,
         source_event_id=identity.polymarket_event_id,
+        scheduled_game_key=_scheduled_game_key_for_identity(identity),
     )
     return CanonicalMarket(
         event=event,
@@ -4173,6 +4175,24 @@ def _discovered_fixture_sport(identity: DerivedPriceEngineItem) -> str:
         competition=identity.competition,
         register_canonical_key=identity.register_canonical_key,
     )
+
+
+def _scheduled_game_key_for_identity(identity: DerivedPriceEngineItem) -> str | None:
+    """Restore the MLB minute key Matchbook reconstruction already derives.
+
+    Catalogue rows do not store ``scheduled_game_key``. Matchbook MLB events
+    rebuild it from the catalogue kickoff. Kalshi and Polymarket must use that
+    same minute or ``mlb_scheduled_games_compatible`` fail-closes on a missing
+    key. Do not invent a Game 1/Game 2 ordinal: the catalogue did not store one.
+    """
+
+    from sports_hedge.mlb.constants import MLB_SPORT
+
+    if _sport_for_identity(identity) != MLB_SPORT or identity.kickoff_utc is None:
+        return None
+    from sports_hedge.mlb.normalize import scheduled_game_key
+
+    return scheduled_game_key(identity.kickoff_utc)
 
 
 def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:

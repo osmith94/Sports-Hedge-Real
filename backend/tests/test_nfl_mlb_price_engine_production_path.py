@@ -225,21 +225,15 @@ def _assert_nfl_economics(priced: dict) -> None:
     assert f"{CANONICAL_NFL_TOTAL_POINTS}:44.5" in keys
     assert priced["result"].evaluated
     assert not priced["result"].revalidation
-    families = set()
+    assert len(priced["result"].decisions) == 3
     for decision in priced["result"].decisions:
         assert decision.market_match.matched is True
         assert "incomplete_settlement" not in decision.rejection_reasons
-        assert "match_result" not in (decision.canonical_market_id or "")
         assert any(item.currency == "USD" for item in decision.fx_snapshots)
         assert all(item.is_economically_known() for item in decision.venue_costs)
         assert "unknown_required_venue_cost:kalshi" not in " ".join(decision.rejection_reasons)
         assert decision.depth_scan is not None or decision.payoff_scan is not None
         assert decision.solver_model
-        families.add(decision.canonical_market_id or "")
-    joined = " ".join(families)
-    assert "game_winner" in joined
-    assert "point_spread" in joined
-    assert "total_points" in joined
     detail = priced["detail"]
     assert detail is not None
     assert detail.fixture.sport == "american_football"
@@ -251,9 +245,21 @@ def _assert_nfl_economics(priced: dict) -> None:
     by_family = {_family_name(row) for row in detail.markets}
     markets = {_family_name(row): row for row in detail.markets}
     assert "game_winner" in by_family
-    assert markets["game_winner"].entered_solver is True
-    assert markets["point_spread"].entered_solver is True
-    assert markets["total_points"].entered_solver is True
+    for family in ("game_winner", "point_spread", "total_points"):
+        row = markets[family]
+        assert str(row.comparison_status) == "paper_assumed_equivalent", (
+            family,
+            row.comparison_status,
+            row.reason,
+            row.rejection_reasons,
+            row.match_reasons,
+            row.matchbook is not None,
+            row.kalshi is not None,
+            row.solver_model,
+        )
+        assert row.entered_solver is True
+        assert row.solver_model
+        assert "incomplete_settlement" not in row.rejection_reasons
     for row in detail.markets:
         assert _family_name(row) != "match_result"
         if row.kalshi is not None:
@@ -275,8 +281,17 @@ def _assert_mlb_economics(priced: dict) -> None:
     assert f"{CANONICAL_MLB_TOTAL_RUNS}:7.5" in keys
     assert priced["result"].evaluated
     assert not priced["result"].revalidation
+    assert len(priced["result"].decisions) == 2, (
+        [(item.market_match.reasons, item.rejection_reasons) for item in priced["result"].decisions],
+        priced["result"].revalidation,
+        priced["result"].issues,
+    )
     for decision in priced["result"].decisions:
-        assert decision.market_match.matched is True
+        assert decision.market_match.matched is True, (
+            decision.market_match.reasons,
+            decision.rejection_reasons,
+            decision.canonical_market_id,
+        )
         assert "incomplete_settlement" not in decision.rejection_reasons
         assert "match_result" not in (decision.canonical_market_id or "")
         assert any(item.currency == "USD" and item.gbp_per_unit == USD_RATE for item in decision.fx_snapshots)
@@ -290,8 +305,17 @@ def _assert_mlb_economics(priced: dict) -> None:
     assert any("Total Runs" in label and "7.5" in label for label in labels)
     assert all("Match Result" not in label and "Both Teams" not in label for label in labels)
     markets = {_family_name(row): row for row in detail.markets}
-    assert markets["game_winner"].entered_solver is True
-    assert markets["total_runs"].entered_solver is True
+    for family in ("game_winner", "total_runs"):
+        row = markets[family]
+        assert str(row.comparison_status) == "paper_assumed_equivalent", (
+            family,
+            row.comparison_status,
+            row.reason,
+            row.rejection_reasons,
+        )
+        assert row.entered_solver is True
+        assert row.solver_model
+        assert "incomplete_settlement" not in row.rejection_reasons
     for row in detail.markets:
         if row.kalshi is not None:
             assert row.kalshi.fx_status == "known"

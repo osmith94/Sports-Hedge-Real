@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sports_hedge.domain.models import FxRateSnapshot
 from sports_hedge.fx.models import FxRateUnavailable
+from sports_hedge.paper.models import FxRateSnapshot
 
 SCANNER_FX_CURRENCIES = frozenset({"USD", "GBP"})
 _DEMO_FX_SOURCE = "paper_demo_fx_snapshot"

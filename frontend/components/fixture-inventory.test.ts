@@ -25,6 +25,13 @@ describe("Fixture Detail Market Comparison component contract", () => {
     expect(workspace).toContain("Raw codes:");
   });
 
+  it("keeps unsupported NFL and MLB markets out of the primary stack", () => {
+    expect(workspace).toContain("isPrimaryApprovedFamily");
+    expect(workspace).toContain("Advanced · unsupported discovered markets");
+    expect(workspace).toContain("approved Stage-1 families for this sport");
+    expect(workspace).toContain('`${row.archetype}-${row.line ?? "none"}`');
+  });
+
   it("links qualifying cards to the existing paper preview without executing from the card", () => {
     expect(workspace).toContain("view.paperAction");
     expect(workspace).toContain("inventory-cta");

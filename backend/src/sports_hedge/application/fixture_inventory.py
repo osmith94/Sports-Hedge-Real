@@ -1344,12 +1344,11 @@ def _kalshi_related_to_row(row: FixtureMarketInventoryRow, item: InventoryMarket
     }
     kalshi_key = item.canonical.settlement.deterministic_key()
     if settlement_keys and kalshi_key not in settlement_keys:
-        if item.canonical.family in {
-            MarketFamily.MATCH_RESULT,
-            MarketFamily.TOTAL_GOALS,
-            MarketFamily.BOTH_TEAMS_TO_SCORE,
-            MarketFamily.FIRST_TEAM_TO_SCORE,
-        }:
+        # Family, period, and exact line already selected this bucket.
+        # Football paper 1X2 and NFL/MLB paper families keep incomplete
+        # fingerprints on purpose. The matcher and register still decide
+        # equivalence; a fingerprint difference must not hide the pair.
+        if item.canonical.family.value in _SETTLEMENT_EXEMPT_KALSHI_FAMILIES:
             return True
         return False
     return True
@@ -1384,6 +1383,10 @@ _SETTLEMENT_EXEMPT_KALSHI_FAMILIES = {
     MarketFamily.TOTAL_GOALS.value,
     MarketFamily.BOTH_TEAMS_TO_SCORE.value,
     MarketFamily.FIRST_TEAM_TO_SCORE.value,
+    MarketFamily.GAME_WINNER.value,
+    MarketFamily.POINT_SPREAD.value,
+    MarketFamily.TOTAL_POINTS.value,
+    MarketFamily.TOTAL_RUNS.value,
 }
 
 
@@ -1814,6 +1817,8 @@ def _attach_kalshi(
             matchbook_markets=matchbook_markets,
             polymarket_markets=polymarket_markets,
         )
+    if catalogue is None or catalogue.allowed:
+        _clear_pre_pair_settlement_block(row, best_decision)
     if catalogue is not None and not catalogue.allowed:
         catalogue_reason = catalogue.rejection_reason or "catalogue_review_required"
         reason = catalogue.assessment.reason or catalogue_reason
@@ -1853,6 +1858,26 @@ def _attach_kalshi(
     row.reason = _comparable_reason(row.comparison_status, row.reason)
 
 
+def _clear_pre_pair_settlement_block(
+    row: FixtureMarketInventoryRow,
+    decision: PaperScanDecision | None,
+) -> None:
+    """Drop the unpaired incomplete-fingerprint label once the register admits the pair.
+
+    A venue-only NFL/MLB row is labelled incomplete before Kalshi attaches.
+    That label is not a second settlement verdict after PAPER admission.
+    """
+
+    if decision is not None and "incomplete_settlement" in decision.rejection_reasons:
+        return
+    if row.reason == "incomplete_settlement":
+        row.reason = None
+    if "incomplete_settlement" in row.rejection_reasons:
+        row.rejection_reasons = [
+            item for item in row.rejection_reasons if item != "incomplete_settlement"
+        ]
+
+
 def _comparable_status_from_catalogue(catalogue: Any) -> InventoryComparisonStatus:
     from sports_hedge.catalogue.states import CatalogueApprovalState
 
@@ -1869,7 +1894,7 @@ def _comparable_reason(
     current: str | None,
 ) -> str | None:
     if status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT:
-        if current in {None, "venue_only"}:
+        if current in {None, "venue_only", "incomplete_settlement"}:
             return "paper_assumed_equivalent"
         return current
     if current == "venue_only":
