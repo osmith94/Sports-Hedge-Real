@@ -184,6 +184,7 @@ def test_reprice_source_does_not_discover_or_place_orders() -> None:
         for item in (
             CataloguePriceEngine.reprice_for_paper_entry,
             CataloguePriceEngine._reprice_exact_books,
+            CataloguePriceEngine._execution_fetch_venues,
             CataloguePriceEngine._execution_fetch_matchbook,
             CataloguePriceEngine._execution_fetch_kalshi,
             CataloguePriceEngine._execution_fetch_polymarket,
@@ -507,7 +508,7 @@ async def test_execution_reprice_below_minimum_does_not_fill(
             event
             for event in events
             if event.event_type is LifecycleEventType.PAPER_FILL_REJECTED
-            and event.detail == EXECUTION_REPRICE_NO_LONGER_QUALIFYING
+            and str(event.detail).startswith(EXECUTION_REPRICE_NO_LONGER_QUALIFYING)
         ]
         assert missed
         lost = next(
@@ -546,7 +547,10 @@ async def test_execution_reprice_provider_failure_does_not_fill_or_retry(
             for event in _events(bundle.watchlist, opportunity_id)
             if event.event_type is LifecycleEventType.PAPER_FILL_REJECTED
         ]
-        assert [event.detail for event in missed] == [EXECUTION_REPRICE_FAILED]
+        assert [event.detail for event in missed]
+        assert all(
+            str(event.detail).startswith(EXECUTION_REPRICE_FAILED) for event in missed
+        )
         watched = bundle.watchlist.repository.get(opportunity_id)
         assert watched is not None
         assert watched.status is OpportunityStatus.TRIGGERED
@@ -582,11 +586,15 @@ async def test_still_stale_execution_books_do_not_fill(
         assert len(bundle.kalshi.book_calls) == 2
         opportunity_id = _opportunity(bundle)
         events = _events(bundle.watchlist, opportunity_id)
-        assert [
-            event.detail
+        rejected = [
+            event
             for event in events
             if event.event_type is LifecycleEventType.PAPER_FILL_REJECTED
-        ] == [EXECUTION_REPRICE_STALE]
+        ]
+        assert len(rejected) == 1
+        assert str(rejected[0].detail).startswith(EXECUTION_REPRICE_STALE)
+        assert "matchbook.quote_age_ms=" in str(rejected[0].detail)
+        assert "kalshi.quote_age_ms=" in str(rejected[0].detail)
         assert LifecycleEventType.PAPER_ELIGIBLE not in [event.event_type for event in events]
         assert LifecycleEventType.PAPER_FILL_ATTEMPTED not in [
             event.event_type for event in events

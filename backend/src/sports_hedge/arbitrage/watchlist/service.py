@@ -623,6 +623,8 @@ class WatchlistService:
         occurred_at,
         reason: str,
         pricing_lane: str | None = None,
+        detail: str | None = None,
+        quote_age_ms: int | None = None,
     ) -> OpportunityLifecycleEvent | None:
         """Record one fail-closed execution reprice without changing radar status.
 
@@ -645,16 +647,46 @@ class WatchlistService:
             status=current.status,
             current_net_edge=current.current_net_edge,
             distance_to_trigger_pp=current.distance_to_trigger_pp,
-            detail=reason,
+            detail=detail or reason,
             gross_edge=current.gross_edge,
             limiting_depth_gbp=current.limiting_depth_gbp,
             guaranteed_profit_gbp=current.guaranteed_profit_gbp,
-            quote_age_ms=current.quote_age_ms,
+            quote_age_ms=current.quote_age_ms if quote_age_ms is None else quote_age_ms,
             pricing_lane=pricing_lane,
             **lifecycle_identity_from_opportunity(current),
         )
         self.repository.append_event(event)
         return event
+
+    def record_execution_snapshot_audit(
+        self,
+        *,
+        snapshot_id: str,
+        opportunity_id: str | None,
+        catalogue_row_id: str,
+        canonical_market_id: str | None,
+        occurred_at: datetime,
+        accepted: bool,
+        rejection_reason: str | None,
+        snapshot_json: str,
+        diagnostics_json: str | None = None,
+    ) -> None:
+        """Store one Price-2 attempt outside the scanner lifecycle detail."""
+
+        recorder = getattr(self.repository, "append_execution_snapshot_audit", None)
+        if not callable(recorder):
+            return
+        recorder(
+            snapshot_id=snapshot_id,
+            opportunity_id=opportunity_id,
+            catalogue_row_id=catalogue_row_id,
+            canonical_market_id=canonical_market_id,
+            occurred_at=occurred_at,
+            accepted=accepted,
+            rejection_reason=rejection_reason,
+            snapshot_json=snapshot_json,
+            diagnostics_json=diagnostics_json,
+        )
 
     def close(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None

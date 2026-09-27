@@ -2396,6 +2396,7 @@ def persist_price_engine_item_capture(
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     pricing_lane: str | None = None,
     execution_authoritative: bool = False,
+    execution_snapshot_json: str | None = None,
 ) -> list[Any] | None:
     """Capture-critical watchlist + ``persist_triggered_chain`` only.
 
@@ -2421,6 +2422,7 @@ def persist_price_engine_item_capture(
             write_audit=False,
             pricing_lane=pricing_lane,
             execution_authoritative=execution_authoritative,
+            execution_snapshot_json=execution_snapshot_json,
         )
 
 
@@ -2571,6 +2573,7 @@ def _persist_decision(
     write_audit: bool = True,
     pricing_lane: str | None = None,
     execution_authoritative: bool = False,
+    execution_snapshot_json: str | None = None,
 ) -> list[Any] | None:
     if not decision.canonical_market_id:
         return None
@@ -2593,6 +2596,7 @@ def _persist_decision(
             refreshed_venues=refreshed_venues,
             pricing_lane=pricing_lane,
             execution_authoritative=execution_authoritative,
+            execution_snapshot_json=execution_snapshot_json,
         )
     return history
 

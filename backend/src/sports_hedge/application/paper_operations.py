@@ -425,6 +425,7 @@ class PaperOperationsService:
         now: datetime | None = None,
         pricing_lane: str | None = None,
         execution_authoritative: bool = False,
+        execution_snapshot_json: str | None = None,
     ) -> PriorityAlertCandidate | None:
         if not decision.canonical_market_id:
             return None
@@ -443,8 +444,14 @@ class PaperOperationsService:
             plan = self._plan_from_decision(
                 decision, opportunity_id, provenance, pricing_lane=pricing_lane
             )
-            if execution_authoritative:
-                plan = plan.model_copy(update={"execution_authoritative": True})
+            if execution_authoritative or execution_snapshot_json:
+                plan = plan.model_copy(
+                    update={
+                        "execution_authoritative": execution_authoritative
+                        or plan.execution_authoritative,
+                        "execution_snapshot_json": execution_snapshot_json,
+                    }
+                )
             self._plans[opportunity_id] = plan
         candidate = None
         solver_arb = _solver_is_arbitrage(decision)
@@ -492,6 +499,17 @@ class PaperOperationsService:
                             bind_snapshot=True,
                             decision_at=decision.scanned_at,
                         )
+                        if execution_authoritative:
+                            from sports_hedge.application.execution_reprice import (
+                                PHASE_FILL_ATTEMPTED,
+                                log_execution_phase,
+                            )
+
+                            log_execution_phase(
+                                PHASE_FILL_ATTEMPTED,
+                                opportunity_id=opportunity_id,
+                                canonical_market_id=decision.canonical_market_id,
+                            )
                         should_simulate = True
                     except ValueError as exc:
                         skip_reason = _autofill_begin_rejection_reason(exc)
@@ -3753,6 +3771,24 @@ class PaperOperationsService:
             occurred_at=occurred_at,
             detail=f"state={trade.state.value}",
         )
+        if plan.execution_snapshot_json:
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.EXECUTION_SNAPSHOT,
+                occurred_at=occurred_at,
+                detail=plan.execution_snapshot_json,
+            )
+            if trade.state is PaperTradeState.OPEN:
+                from sports_hedge.application.execution_reprice import (
+                    PHASE_FILL_COMPLETE,
+                    log_execution_phase,
+                )
+
+                log_execution_phase(
+                    PHASE_FILL_COMPLETE,
+                    trade_id=trade.trade_id,
+                    opportunity_id=trade.opportunity_id,
+                )
         saved = self.trades.save(trade)
         fill_event = (
             ActiveTradeEventType.ENTRY_PARTIAL_FILL

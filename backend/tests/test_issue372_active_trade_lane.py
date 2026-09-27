@@ -474,10 +474,17 @@ def test_below_min_net_hands_off_to_exit_management(tmp_path: Path) -> None:
 
 def test_active_trade_uses_shared_provider_limits_without_raising_concurrency() -> None:
     assert ProviderPriority.ACTIVE_TRADE == 0
-    assert ProviderPriority.HOT == 1
-    assert ProviderPriority.UNIVERSE == 2
-    assert ProviderPriority.BACKGROUND == 3
+    assert ProviderPriority.EXECUTION_CANDIDATE == 1
+    assert ProviderPriority.HOT == 2
+    assert ProviderPriority.UNIVERSE == 3
+    assert ProviderPriority.BACKGROUND == 4
+    assert (
+        ProviderPriority.ACTIVE_TRADE
+        < ProviderPriority.EXECUTION_CANDIDATE
+        < ProviderPriority.HOT
+    )
     assert priority_for_lane(PRICE_ENGINE_ACTIVE_TRADE_LANE) is ProviderPriority.ACTIVE_TRADE
+    assert priority_for_lane("execution_candidate") is ProviderPriority.EXECUTION_CANDIDATE
     assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.MATCHBOOK] == 4
     assert DEFAULT_PROVIDER_CONCURRENCY[VenueName.KALSHI] == 4
     assert "ACTIVE_TRADE" in inspect.getsource(priority_for_lane)

@@ -17,17 +17,19 @@ Bands (after anti-starvation overrides):
     -2  starved UNIVERSE / BACKGROUND (grant-count fairness)
     -1  starved HOT versus a run of ACTIVE grants
      0  ACTIVE TRADE safety / settlement
-     1  HOT cross-venue viable and near-threshold / qualifying
-     2  HOT cross-venue viable
-     3  HOT ordinary (lifecycle/surveillance, not yet valued)
-     4  UNIVERSE discovery
-     5  BACKGROUND near-threshold
-     6  BACKGROUND ordinary
-     7  low-value (skip_expensive / single-venue / pruned bound)
+     1  EXECUTION CANDIDATE (Price-2 before entry; not an open position)
+     2  HOT cross-venue viable and near-threshold / qualifying
+     3  HOT cross-venue viable
+     4  HOT ordinary (lifecycle/surveillance, not yet valued)
+     5  UNIVERSE discovery
+     6  BACKGROUND near-threshold
+     7  BACKGROUND ordinary
+     8  low-value (skip_expensive / single-venue / pruned bound)
 
-ACTIVE never ages out of band 0. Aging may promote bands 4–7 toward band 1
-so discovery/BACKGROUND cannot starve forever, but cannot outrank unaged
-HOT viable/near-threshold (floor is band 1, and HOT_VIABLE_NEAR stays 1).
+ACTIVE never ages out of band 0. EXECUTION CANDIDATE never ages into ACTIVE.
+Aging may promote lower bands toward HOT_VIABLE_NEAR so discovery/BACKGROUND
+cannot starve forever, but cannot outrank an execution candidate or an
+unaged HOT viable/near-threshold row.
 
 Value inputs come from #487 viability/upper-bound signals plus last known
 near-threshold economics. Provider backpressure uses observed latency,
@@ -35,7 +37,7 @@ queue depth, rate-limit/backoff and saturation of venues the work needs.
 
 Weighted-fair aging: ``aging_steps = wait_age_ms // (quantum_ms * lane_weight)``
 with HOT weight 8, UNIVERSE 2, BACKGROUND 1 (same 8:1 ratio as the existing
-HOT starvation grant cap). Each step reduces band by 1 down to 1.
+HOT starvation grant cap). Each step reduces band by 1 down to HOT_VIABLE_NEAR.
 
 Diagnostics are explainable: every decision returns named components and
 reason labels. Queue metrics live on the shared provider-access snapshot.
@@ -61,12 +63,14 @@ UNIVERSE_LANE_WEIGHT = 2
 BACKGROUND_LANE_WEIGHT = 1
 LATENCY_BACKPRESSURE_MS = 1500
 URGENCY_ACTIVE = 100
+URGENCY_EXECUTION_CANDIDATE = 80
 URGENCY_DEADLINE_MISS = 50
 URGENCY_OVERDUE_CAP = 40
 URGENCY_IN_PLAY = 30
 URGENCY_NEAR = 20
 
 LANE_ACTIVE = "active_trade"
+LANE_EXECUTION_CANDIDATE = "execution_candidate"
 LANE_HOT = ScanLane.HOT.value
 LANE_BACKGROUND = "background"
 LANE_UNIVERSE = ScanLane.UNIVERSE.value
@@ -76,17 +80,19 @@ class SchedulerBand(IntEnum):
     STARVED_LOWER = -2
     STARVED_HOT = -1
     ACTIVE = 0
-    HOT_VIABLE_NEAR = 1
-    HOT_VIABLE = 2
-    HOT_ORDINARY = 3
-    UNIVERSE = 4
-    BACKGROUND_NEAR = 5
-    BACKGROUND = 6
-    LOW_VALUE = 7
+    EXECUTION_CANDIDATE = 1
+    HOT_VIABLE_NEAR = 2
+    HOT_VIABLE = 3
+    HOT_ORDINARY = 4
+    UNIVERSE = 5
+    BACKGROUND_NEAR = 6
+    BACKGROUND = 7
+    LOW_VALUE = 8
 
 
 class SchedulerValueClass(StrEnum):
     ACTIVE_SAFETY = "active_safety"
+    EXECUTION_CANDIDATE = "execution_candidate"
     HOT_VIABLE_NEAR = "hot_viable_near"
     HOT_VIABLE = "hot_viable"
     HOT_ORDINARY = "hot_ordinary"
@@ -152,6 +158,8 @@ class SchedulerWork:
         text = str(self.lane or "").strip().casefold()
         if text in {LANE_ACTIVE, "active-trade", "settlement"}:
             return LANE_ACTIVE
+        if text in {LANE_EXECUTION_CANDIDATE, "execution-candidate"}:
+            return LANE_EXECUTION_CANDIDATE
         if text == LANE_HOT:
             return LANE_HOT
         if text == LANE_BACKGROUND:
@@ -196,7 +204,7 @@ def work_from_lane(
 
 def lane_weight(lane: str) -> int:
     normalized = str(lane or "").strip().casefold()
-    if normalized == LANE_HOT:
+    if normalized in {LANE_HOT, LANE_EXECUTION_CANDIDATE}:
         return HOT_LANE_WEIGHT
     if normalized == LANE_UNIVERSE:
         return UNIVERSE_LANE_WEIGHT
@@ -209,6 +217,8 @@ def classify_value_class(work: SchedulerWork) -> SchedulerValueClass:
     lane = work.normalized_lane
     if lane == LANE_ACTIVE:
         return SchedulerValueClass.ACTIVE_SAFETY
+    if lane == LANE_EXECUTION_CANDIDATE:
+        return SchedulerValueClass.EXECUTION_CANDIDATE
     low_value = _is_low_value(work)
     if lane == LANE_UNIVERSE:
         return SchedulerValueClass.UNIVERSE
@@ -228,6 +238,7 @@ def classify_value_class(work: SchedulerWork) -> SchedulerValueClass:
 def base_band(value_class: SchedulerValueClass) -> SchedulerBand:
     mapping = {
         SchedulerValueClass.ACTIVE_SAFETY: SchedulerBand.ACTIVE,
+        SchedulerValueClass.EXECUTION_CANDIDATE: SchedulerBand.EXECUTION_CANDIDATE,
         SchedulerValueClass.HOT_VIABLE_NEAR: SchedulerBand.HOT_VIABLE_NEAR,
         SchedulerValueClass.HOT_VIABLE: SchedulerBand.HOT_VIABLE,
         SchedulerValueClass.HOT_ORDINARY: SchedulerBand.HOT_ORDINARY,
@@ -250,17 +261,20 @@ def aging_steps_for(wait_age_ms: int, *, lane: str, quantum_ms: int = AGING_QUAN
 def apply_aging(band: int, steps: int, *, value_class: SchedulerValueClass) -> int:
     if value_class is SchedulerValueClass.ACTIVE_SAFETY:
         return int(SchedulerBand.ACTIVE)
+    if value_class is SchedulerValueClass.EXECUTION_CANDIDATE:
+        return int(SchedulerBand.EXECUTION_CANDIDATE)
     if steps <= 0:
         return band
     # Floor at HOT_VIABLE_NEAR: aged BACKGROUND/UNIVERSE may compete with
-    # ordinary HOT, but unaged HOT viable/near-threshold still sorts first
-    # via remaining HOT items at bands 1–2 until grant-count starvation.
+    # ordinary HOT. They do not age into EXECUTION CANDIDATE or ACTIVE.
     return max(int(SchedulerBand.HOT_VIABLE_NEAR), band - steps)
 
 
 def urgency_score(work: SchedulerWork) -> int:
     if work.normalized_lane == LANE_ACTIVE:
         return URGENCY_ACTIVE
+    if work.normalized_lane == LANE_EXECUTION_CANDIDATE:
+        return URGENCY_EXECUTION_CANDIDATE
     score = 0
     now = float(work.now_mono or 0.0)
     if work.deadline_mono is not None and now > float(work.deadline_mono):
