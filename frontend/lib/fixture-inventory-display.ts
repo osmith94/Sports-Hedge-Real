@@ -140,9 +140,16 @@ export function solverFacts(row: KalshiFixtureMarketInventoryRow): string {
 }
 
 export function settlementLabel(facts: VenueMarketFacts): string {
-  return facts.settlement_complete
-    ? "Settlement fingerprint complete"
-    : "Settlement fingerprint incomplete/unknown";
+  if (facts.settlement_status === "paper_assumed") {
+    const detail = facts.settlement_provenance
+      ? humanizeToken(facts.settlement_provenance)
+      : "owner-approved paper comparison";
+    return `PAPER-assumed settlement · ${detail}`;
+  }
+  if (facts.settlement_status === "complete" || (facts.settlement_status == null && facts.settlement_complete)) {
+    return "Settlement fingerprint complete";
+  }
+  return "Settlement fingerprint incomplete/unknown";
 }
 
 export function pairSummary(pair: InventoryPairResult): string {
@@ -195,6 +202,7 @@ export function provenanceLines(facts: VenueMarketFacts): string[] {
     lines.push(`Raw runners ${facts.raw_runner_labels.join(" / ")}`);
   }
   if (facts.settlement_key) lines.push(`Settlement key ${facts.settlement_key}`);
+  if (facts.settlement_status === "paper_assumed") lines.push(settlementLabel(facts));
   if (facts.fee_source) lines.push(`Fee source ${facts.fee_source}`);
   if (facts.fee_label) lines.push(`Fee rule ${facts.fee_label}`);
   if (facts.fee_account_assumption) lines.push("Fee is an operator/account assumption");
@@ -365,7 +373,13 @@ export function compactVenueMeta(
 
 export function failingVenueChecks(facts: VenueMarketFacts): string[] {
   const checks: string[] = [];
-  if (facts.settlement_complete === false || facts.settlement_complete == null) {
+  if (facts.settlement_status === "paper_assumed") {
+    checks.push(settlementLabel(facts));
+  } else if (
+    facts.settlement_status === "incomplete" ||
+    (facts.settlement_status == null &&
+      (facts.settlement_complete === false || facts.settlement_complete == null))
+  ) {
     checks.push("Settlement fingerprint incomplete/unknown");
   }
   if (facts.fee_status === "missing" || facts.fee_status === "unknown") {

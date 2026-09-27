@@ -337,6 +337,8 @@ export type VenueMarketFacts = {
   line?: string | number | null;
   settlement_key?: string | null;
   settlement_complete?: boolean | null;
+  settlement_status?: "complete" | "paper_assumed" | "incomplete" | string | null;
+  settlement_provenance?: string | null;
   best_backs: VenueQuoteFact[];
   usable_depth_at_touch?: string | number | null;
   observed_at?: string | null;

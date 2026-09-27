@@ -19,6 +19,7 @@ from sports_hedge.application.catalogue_maintenance import (
     CATALOGUE_NATIVE_IDENTITY_CONFLICT,
     FamilyDiscoveryCompleteness,
     family_key_from_kalshi_series,
+    incomplete_families_for_failed_sibling_normalization,
     pair_identity_from_markets,
     persist_universe_catalogue_pass_offloop,
 )
@@ -51,6 +52,7 @@ from sports_hedge.application.fixture_clusters import (
 from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     InventoryMarket,
+    apply_durable_kalshi_fee_evidence,
     assemble_fixture_inventory,
     inventory_is_comparable_opportunity,
     inventory_summary,
@@ -116,7 +118,6 @@ from sports_hedge.application.polymarket_fixture_discovery import (
     merge_discovery_stats,
     retain_polymarket_page,
 )
-from sports_hedge.application.target_competitions import polymarket_series_is_football_fixture
 from sports_hedge.application.provider_access import (
     HEALTH_AUTH_FAILURE,
     HEALTH_DISCOVERY_TIMEOUT,
@@ -146,6 +147,7 @@ from sports_hedge.application.target_competitions import (
     filter_in_scope_events,
     kalshi_series_tickers_for_codes,
     polymarket_series_ids_for_codes,
+    polymarket_series_is_football_fixture,
     resolve_target_competition,
     resolve_target_competition_from_kalshi_ticker,
     scope_matchbook_event,
@@ -3960,6 +3962,20 @@ class ReadOnlyCrossVenueCollector:
         # observations after a leftover depth attempt — leftover books are
         # never fetched.
         self._kalshi_books_skipped_unapproved += len(leftover_kalshi)
+        failed_sibling_tickers = [
+            str(issue.source_id)
+            for issue in issues
+            if issue.stage == "normalize_event"
+            and issue.venue is VenueName.KALSHI
+            and issue.source_id
+        ]
+        incomplete_families = set(kalshi_side.kalshi_incomplete_family_keys)
+        incomplete_families.update(
+            incomplete_families_for_failed_sibling_normalization(
+                [item.canonical.source_event_id for item in k_events],
+                failed_sibling_tickers,
+            )
+        )
         persisted_catalogue_keys = await self._persist_universe_catalogue_from_pairs(
             fixture=fixture,
             eligible_pairs=catalogue_pairs,
@@ -3969,9 +3985,7 @@ class ReadOnlyCrossVenueCollector:
                 kalshi_series_results=tuple(
                     self._op_series_results.get(VenueName.KALSHI.value) or ()
                 ),
-                kalshi_incomplete_family_keys=frozenset(
-                    kalshi_side.kalshi_incomplete_family_keys
-                ),
+                kalshi_incomplete_family_keys=frozenset(incomplete_families),
                 target_competition_code=fixture.target_competition_code,
             ),
             issues=issues,
@@ -4075,6 +4089,11 @@ class ReadOnlyCrossVenueCollector:
             + len(polymarket_inventory)
             + len(kalshi_inventory),
         ):
+            apply_durable_kalshi_fee_evidence(
+                [*matchbook_inventory, *polymarket_inventory, *kalshi_inventory],
+                catalogue_store=self.catalogue_store,
+                canonical_event_id=fixture.canonical_event_id,
+            )
             inventory_rows = assemble_fixture_inventory(
                 matchbook_inventory,
                 polymarket_inventory,

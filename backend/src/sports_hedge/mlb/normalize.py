@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
-import re
 from typing import Any
 
 from sports_hedge.domain.football import (
@@ -28,9 +28,18 @@ from sports_hedge.mlb.markets import (
     parse_over_runs_line,
 )
 from sports_hedge.mlb.settlement import mlb_structural_settlement
-from sports_hedge.mlb.teams import require_resolved_mlb_team, resolve_mlb_team
+from sports_hedge.mlb.teams import (
+    mlb_away_home_from_event_ticker,
+    require_resolved_mlb_team,
+    resolve_mlb_team,
+)
 from sports_hedge.normalization.text import normalize_text
-from sports_hedge.normalization.venues import VenueNormalizationError, _first, _list_field, _parse_datetime
+from sports_hedge.normalization.venues import (
+    VenueNormalizationError,
+    _first,
+    _list_field,
+    _parse_datetime,
+)
 
 _AWAY_VS_HOME = re.compile(r"^(.+?)\s+vs\.?\s+(.+)$", re.IGNORECASE)
 _AWAY_AT_HOME = re.compile(r"^(.+?)\s+at\s+(.+)$", re.IGNORECASE)
@@ -93,6 +102,30 @@ def _event(
     )
 
 
+def _resolved_detail_team(details: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        resolved = resolve_mlb_team(str(details.get(key) or ""))
+        if resolved.ok and resolved.canonical:
+            return resolved.canonical
+    return None
+
+
+def _split_away_home_title(title: str) -> tuple[str, str]:
+    cleaned = re.sub(
+        r"\s*[:\-]\s*(total runs|totals?|moneyline|game winner).*$",
+        "",
+        title or "",
+        flags=re.IGNORECASE,
+    ).strip()
+    at_match = _AWAY_AT_HOME.match(cleaned)
+    if at_match is not None:
+        return at_match.group(1).strip(), at_match.group(2).strip()
+    vs_match = _AWAY_VS_HOME.match(cleaned)
+    if vs_match is None:
+        raise VenueNormalizationError("MLB title is not 'Away vs Home' or 'Away at Home'")
+    return vs_match.group(1).strip(), vs_match.group(2).strip()
+
+
 def kalshi_mlb_event(
     payload: dict[str, Any],
     *,
@@ -117,11 +150,36 @@ def kalshi_mlb_event(
     home_id = str(details.get("home_team_id") or "").strip()
     away_id = str(details.get("away_team_id") or "").strip()
     names = _kalshi_team_uuid_names(payload)
-    home = names.get(home_id)
-    away = names.get(away_id)
-    if not home or not away:
-        raise VenueNormalizationError("Kalshi MLB home/away team ids are not on the market strikes")
+    home = names.get(home_id) if home_id else None
+    away = names.get(away_id) if away_id else None
+    if not home:
+        home = _resolved_detail_team(details, "home_team_name", "home_team", "home_team_abbr")
+    if not away:
+        away = _resolved_detail_team(details, "away_team_name", "away_team", "away_team_abbr")
     title = str(payload.get("title") or milestone.get("title") or "")
+    if not home or not away:
+        try:
+            away_label, home_label = _split_away_home_title(title)
+        except VenueNormalizationError:
+            away_label, home_label = "", ""
+        if not away and away_label:
+            resolved = resolve_mlb_team(away_label)
+            if resolved.ok and resolved.canonical:
+                away = resolved.canonical
+        if not home and home_label:
+            resolved = resolve_mlb_team(home_label)
+            if resolved.ok and resolved.canonical:
+                home = resolved.canonical
+    ticker_pair = mlb_away_home_from_event_ticker(source_id)
+    if ticker_pair is not None:
+        ticker_away, ticker_home = ticker_pair
+        if (away and away != ticker_away) or (home and home != ticker_home):
+            ticker_pair = None
+        else:
+            away = away or ticker_away
+            home = home or ticker_home
+    if not home or not away:
+        raise VenueNormalizationError("Kalshi MLB home/away teams are unresolved")
     _reject_non_stage1(title, series_head=series_ticker)
     kickoff = _kickoff(start)
     return _event(

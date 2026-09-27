@@ -13,14 +13,14 @@ from sports_hedge.application.complete_set import (
     SOLVER_INELIGIBLE_REASON,
     SPLIT_LINE_REASON,
     UNKNOWN_DRAW_VOID_REASON,
-    UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
     UNPROVEN_HANDICAP_REASON,
     UNPROVEN_SETTLEMENT_REASON,
+    UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
+    generalized_payoff_eligible_market,
     scan_eligible_pair,
     scan_ineligibility_reason,
     solver_eligible_market,
     solver_model_for_pair,
-    generalized_payoff_eligible_market,
 )
 from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.domain.football import (
@@ -33,7 +33,11 @@ from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.fees.kalshi import kalshi_cost_from_series
 from sports_hedge.fees.labels import operator_fee_label
 from sports_hedge.fees.polymarket import polymarket_cost_from_market
-from sports_hedge.fees.resolver import MATCHBOOK_OVERRIDE_TIER, UnknownRequiredCostError, VenueCostResolver
+from sports_hedge.fees.resolver import (
+    MATCHBOOK_OVERRIDE_TIER,
+    UnknownRequiredCostError,
+    VenueCostResolver,
+)
 from sports_hedge.matching.bulk_market_pairs import greedy_unique_market_matches
 from sports_hedge.matching.events import EventMatcher
 from sports_hedge.matching.markets import (
@@ -122,6 +126,8 @@ class VenueMarketFacts(BaseModel):
     line: Decimal | None = None
     settlement_key: str | None = None
     settlement_complete: bool | None = None
+    settlement_status: str | None = None
+    settlement_provenance: str | None = None
     best_backs: list[VenueQuoteFact] = Field(default_factory=list)
     usable_depth_at_touch: Decimal | None = None
     observed_at: str | None = None
@@ -163,7 +169,7 @@ class FixtureMarketInventoryRow(BaseModel):
     matchbook: VenueMarketFacts | None = None
     polymarket: VenueMarketFacts | None = None
     kalshi: VenueMarketFacts | None = None
-    pair_results: list["InventoryPairResult"] = Field(default_factory=list)
+    pair_results: list[InventoryPairResult] = Field(default_factory=list)
     scan_lane: str | None = None
     last_scanned_at: datetime | None = None
     radar_freshness: str | None = None
@@ -189,6 +195,7 @@ class InventoryMarket(BaseModel):
     canonical: CanonicalMarket | None = None
     observation: VenueMarketObservation | None = None
     normalize_error: str | None = None
+    durable_kalshi_fee: dict[str, Any] | None = None
 
 
 def solver_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
@@ -837,6 +844,106 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
     return InventoryComparisonStatus.MATCHED_EQUIVALENT
 
 
+def _settlement_inventory_fields(canonical: CanonicalMarket | None) -> dict[str, str | None]:
+    """Distinguish owner-approved PAPER settlement from an unknown fingerprint.
+
+    Economically incomplete NFL/MLB paper fingerprints stay incomplete for live
+    execution. Inventory still names the sport settlement authority instead of
+    calling that caveat unknown.
+    """
+
+    if canonical is None:
+        return {"settlement_status": "incomplete", "settlement_provenance": None}
+    from sports_hedge.mlb.constants import MLB_SETTLEMENT_NOT_EXECUTABLE
+    from sports_hedge.mlb.register import mlb_structural_identity
+    from sports_hedge.nfl.constants import NFL_NOT_LIVE_EXECUTION_REASON
+    from sports_hedge.nfl.register import nfl_structural_identity
+
+    if nfl_structural_identity(canonical):
+        return {
+            "settlement_status": "paper_assumed",
+            "settlement_provenance": (
+                canonical.settlement.unknown_reason or NFL_NOT_LIVE_EXECUTION_REASON
+            ),
+        }
+    if mlb_structural_identity(canonical):
+        return {
+            "settlement_status": "paper_assumed",
+            "settlement_provenance": (
+                canonical.settlement.unknown_reason or MLB_SETTLEMENT_NOT_EXECUTABLE
+            ),
+        }
+    if canonical.settlement.is_economically_complete():
+        return {
+            "settlement_status": "complete",
+            "settlement_provenance": canonical.settlement.unknown_reason,
+        }
+    return {
+        "settlement_status": "incomplete",
+        "settlement_provenance": canonical.settlement.unknown_reason,
+    }
+
+
+def apply_durable_kalshi_fee_evidence(
+    items: list[InventoryMarket],
+    *,
+    catalogue_store: Any,
+    canonical_event_id: str,
+) -> None:
+    """Copy a persisted Kalshi fee snapshot onto UNIVERSE rows that have no quote.
+
+    Observation ``kalshi_fee`` still wins when BACKGROUND/HOT has priced the row.
+    Missing or conflicting snapshots are not invented.
+    """
+
+    if catalogue_store is None or not canonical_event_id:
+        return
+    rows = catalogue_store.list_rows_for_event(canonical_event_id)
+    for item in items:
+        if item.venue is not VenueName.KALSHI:
+            continue
+        metadata = item.observation.metadata if item.observation is not None else {}
+        if isinstance(metadata, dict) and isinstance(metadata.get("kalshi_fee"), dict):
+            continue
+        snapshots: list[dict[str, Any]] = []
+        for row in rows:
+            if not _catalogue_row_covers_kalshi_item(row, item):
+                continue
+            snapshot_id = getattr(row, "kalshi_fee_snapshot_id", None)
+            if not snapshot_id:
+                continue
+            snapshot = catalogue_store.get_fee_snapshot(str(snapshot_id))
+            if snapshot is None:
+                continue
+            payload = snapshot.observation_metadata()
+            if isinstance(payload, dict):
+                snapshots.append(payload)
+        identities = {str(payload.get("snapshot_id") or "") for payload in snapshots}
+        identities.discard("")
+        if len(identities) == 1:
+            item.durable_kalshi_fee = snapshots[0]
+
+
+def _catalogue_row_covers_kalshi_item(row: Any, item: InventoryMarket) -> bool:
+    event_ticker = str(getattr(row, "kalshi_event_ticker", "") or "")
+    if event_ticker and item.source_event_id and item.source_event_id != event_ticker:
+        return False
+    family = str(getattr(row, "family", "") or "")
+    if item.canonical is not None and family and item.canonical.family.value != family:
+        return False
+    row_line = getattr(row, "line", None)
+    if item.canonical is not None and item.canonical.line is not None and row_line not in (None, ""):
+        try:
+            if Decimal(str(row_line)) != item.canonical.line:
+                return False
+        except (ArithmeticError, ValueError):
+            return False
+    if not event_ticker and item.canonical is None:
+        tickers = list(getattr(row, "kalshi_market_tickers", []) or [])
+        return item.source_market_id in tickers
+    return bool(event_ticker or getattr(row, "kalshi_fee_snapshot_id", None))
+
+
 def _facts_from_inventory(
     item: InventoryMarket,
     *,
@@ -899,6 +1006,7 @@ def _facts_from_inventory(
         settlement_complete=(
             canonical.settlement.is_economically_complete() if canonical else None
         ),
+        **_settlement_inventory_fields(canonical),
         best_backs=_best_backs(observation),
         usable_depth_at_touch=_touch_depth(observation),
         observed_at=observation.observed_at.isoformat() if observation is not None else None,
@@ -996,6 +1104,8 @@ def _resolve_inventory_cost(
     if item.venue is VenueName.KALSHI:
         metadata = observation.metadata if observation is not None else {}
         fee_meta = metadata.get("kalshi_fee") if isinstance(metadata, dict) else None
+        if not isinstance(fee_meta, dict):
+            fee_meta = item.durable_kalshi_fee if isinstance(item.durable_kalshi_fee, dict) else None
         if isinstance(fee_meta, dict):
             snapshot = kalshi_cost_from_series(
                 fee_meta,
@@ -1599,12 +1709,10 @@ def _attach_kalshi(
                 solver_is_arbitrage=_decision_is_arb(decision),
             )
         )
-        if best_decision is None:
-            best_decision = decision
-        elif _decision_net_edge(decision) is not None and (
+        if best_decision is None or _decision_net_edge(decision) is not None and (
             _decision_net_edge(best_decision) is None
-            or (_decision_net_edge(decision) or Decimal("-1"))
-            > (_decision_net_edge(best_decision) or Decimal("-1"))
+            or (_decision_net_edge(decision) or Decimal(-1))
+            > (_decision_net_edge(best_decision) or Decimal(-1))
         ):
             best_decision = decision
     matches = _kalshi_match_results(
@@ -1682,7 +1790,7 @@ def _attach_kalshi(
     if pair_summaries:
         best = max(
             pair_summaries,
-            key=lambda item: item.current_net_edge or Decimal("-1"),
+            key=lambda item: item.current_net_edge or Decimal(-1),
         )
         if best.entered_solver and not row.entered_solver:
             row.entered_solver = True
