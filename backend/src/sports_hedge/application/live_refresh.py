@@ -207,6 +207,21 @@ from sports_hedge.venues.matchbook import MatchbookAuthError, MatchbookDiscovery
 LOGGER = logging.getLogger(__name__)
 
 
+def _accumulation_eligible(trade: Any) -> bool:
+    """Open exposure that may request another Price-2 cycle, not a recovery."""
+
+    if getattr(trade, "unresolved_recovery", False):
+        return False
+    phase = getattr(trade, "active_trade_phase", None)
+    if phase in {
+        PaperActiveTradePhase.EXIT_MANAGEMENT,
+        PaperActiveTradePhase.MONITORING_CAP_REACHED,
+        PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+    }:
+        return False
+    return trade.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}
+
+
 class ScanCycleTimeout(TimeoutError):
     """Raised when a live-refresh cycle exceeds its bounded deadline."""
 
@@ -6380,6 +6395,47 @@ class LiveRefreshCoordinator:
             )
             return False
 
+    async def _request_execution_candidate_cycle(
+        self,
+        trade: Any,
+        operations: Any,
+        fresh_plan: Any,
+    ) -> None:
+        """Ask for one Price-2 cycle. The tranche still requires its snapshot.
+
+        Engines without ``reprice_for_paper_entry`` no-op. That keeps fixture
+        ACTIVE ticks from adding discretionary exposure off the refresh plan.
+        """
+
+        engine = self._price_engine
+        if engine is None or not callable(getattr(engine, "reprice_for_paper_entry", None)):
+            return
+        from sports_hedge.application.execution_reprice import continue_iterative_paper_fills
+        from sports_hedge.application.price_engine import PriceEngineRuntimeItem
+        from sports_hedge.application.provider_access import (
+            PRICE_ENGINE_EXECUTION_CANDIDATE_LANE,
+        )
+
+        identity = identity_from_open_trade(trade)
+        watchlist = getattr(operations, "watchlist", None)
+        decision = getattr(fresh_plan, "decision", None)
+        if identity is None or watchlist is None or decision is None:
+            return
+        try:
+            await continue_iterative_paper_fills(
+                opportunity_id=trade.opportunity_id,
+                runtime=PriceEngineRuntimeItem(identity=identity),
+                engine=engine,
+                watchlist=watchlist,
+                pricing_lane=PRICE_ENGINE_EXECUTION_CANDIDATE_LANE,
+                entry_decision=decision,
+            )
+        except Exception:
+            LOGGER.exception(
+                "ACTIVE TRADE execution-candidate reprice failed trade_id=%s",
+                getattr(trade, "trade_id", None),
+            )
+
     async def _run_active_trade_tick(self, plan: DualCadencePlan) -> None:
         """Exact-ID refresh + optional top-up. Never list_events/list_markets.
 
@@ -6533,7 +6589,12 @@ class LiveRefreshCoordinator:
                     dedupe_key=f"no-action-stale:{cycle_id}",
                     cycle_id=cycle_id,
                 )
-            if fresh_plan is not None:
+            recovering = bool(
+                getattr(trade, "unresolved_recovery", False)
+                or getattr(trade, "active_trade_phase", None)
+                is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
+            )
+            if fresh_plan is not None and recovering:
                 try:
                     operations.maybe_top_up_open_trade(
                         trade,
@@ -6543,6 +6604,12 @@ class LiveRefreshCoordinator:
                     )
                 except Exception:
                     pass
+            elif fresh_plan is not None and _accumulation_eligible(trade):
+                await self._request_execution_candidate_cycle(
+                    trade,
+                    operations,
+                    fresh_plan,
+                )
             loaded = trade
             if operations.trades is not None:
                 loaded = operations.trades.get(trade.trade_id) or trade

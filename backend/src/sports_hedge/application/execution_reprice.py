@@ -164,6 +164,8 @@ def record_execution_snapshot_attempt(
     *,
     opportunity_id: str | None,
     occurred_at: datetime,
+    liquidity: list[dict[str, str]] | None = None,
+    cumulative_capital_gbp: str | None = None,
 ) -> None:
     """Persist one finished Price-2 attempt. No-op when the attempt never read."""
 
@@ -191,7 +193,40 @@ def record_execution_snapshot_attempt(
             diagnostics_json=execution_diagnostics_json(diagnostics),
             execution_cycle=snapshot.execution_cycle,
             cycle_outcome=outcome,
+            liquidity=liquidity,
+            cumulative_capital_gbp=cumulative_capital_gbp,
         )
+
+
+def _liquidity_for_attempt(snapshot: ExecutionSnapshot | None, trade: Any) -> list[dict[str, str]]:
+    from decimal import Decimal
+
+    from sports_hedge.application.active_trade_recovery import liquidity_evidence_for_levels
+
+    if snapshot is None:
+        return []
+    legs = []
+    for leg in snapshot.legs:
+        levels = [(Decimal(odds), Decimal(depth)) for odds, depth in leg.levels]
+        if not levels and leg.displayed_odds and leg.available_depth:
+            levels = [(Decimal(leg.displayed_odds), Decimal(leg.available_depth))]
+        identity = (
+            str(leg.venue),
+            str(leg.native_market_id),
+            str(leg.native_runner_id or ""),
+            str(leg.outcome),
+        )
+        legs.append((identity, levels))
+    return liquidity_evidence_for_levels(legs, trade)
+
+
+def _capital_text(trade: Any) -> str | None:
+    if trade is None:
+        return None
+    locked = getattr(trade, "capital_locked_gbp", None)
+    if locked is None:
+        return "0"
+    return str(locked)
 
 
 def execution_reprice_audit_detail(
@@ -406,6 +441,7 @@ async def capture_with_execution_reprice(
             refreshed.diagnostics,
             opportunity_id=opportunity_id,
             occurred_at=datetime.now(UTC),
+            liquidity=_liquidity_for_attempt(refreshed.snapshot, None),
         )
         watchlist.note_execution_reprice_miss(
             decision,
@@ -438,6 +474,7 @@ async def capture_with_execution_reprice(
             refreshed.diagnostics,
             opportunity_id=opportunity_id,
             occurred_at=datetime.now(UTC),
+            liquidity=_liquidity_for_attempt(refreshed.snapshot, None),
         )
         entry_history = _observe(
             watchlist,
@@ -481,6 +518,8 @@ async def capture_with_execution_reprice(
         refreshed.diagnostics,
         opportunity_id=opportunity_id,
         occurred_at=datetime.now(UTC),
+        liquidity=_liquidity_for_attempt(refreshed.snapshot, None),
+        cumulative_capital_gbp="0",
     )
     snapshot_json = None if refreshed.snapshot is None else refreshed.snapshot.to_json()
     entry_history = persist_price_engine_item_capture(
@@ -584,12 +623,15 @@ async def continue_iterative_paper_fills(
                 )
                 return
             occurred_at = datetime.now(UTC)
+            trade = _open_iterative_trade(operations, opportunity_id)
             record_execution_snapshot_attempt(
                 watchlist,
                 refreshed.snapshot,
                 refreshed.diagnostics,
                 opportunity_id=opportunity_id,
                 occurred_at=occurred_at,
+                liquidity=_liquidity_for_attempt(refreshed.snapshot, trade),
+                cumulative_capital_gbp=_capital_text(trade),
             )
             snapshot = refreshed.snapshot
             accepted = (

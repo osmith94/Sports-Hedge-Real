@@ -525,6 +525,8 @@ class SqliteWatchlistRepository:
         diagnostics_json: str | None,
         execution_cycle: int | None = None,
         cycle_outcome: str | None = None,
+        liquidity: list[dict[str, str]] | None = None,
+        cumulative_capital_gbp: str | None = None,
     ) -> None:
         """Durable Price-2 snapshot. Separate from lifecycle detail text."""
 
@@ -547,6 +549,8 @@ class SqliteWatchlistRepository:
                 snapshot_json,
                 execution_cycle=cycle,
                 cycle_outcome=cycle_outcome,
+                liquidity=liquidity,
+                cumulative_capital_gbp=cumulative_capital_gbp,
             )
             self._connection.execute(
                 """
@@ -579,6 +583,8 @@ class SqliteWatchlistRepository:
         trade_id: str,
         tranche_id: str | None,
         cycle_outcome: str,
+        liquidity: list[dict[str, str]] | None = None,
+        cumulative_capital_gbp: str | None = None,
     ) -> None:
         """Attach the fill result to the Price-2 attempt that authorised it."""
 
@@ -597,6 +603,8 @@ class SqliteWatchlistRepository:
                 trade_id=trade_id,
                 tranche_id=tranche_id,
                 cycle_outcome=cycle_outcome,
+                liquidity=liquidity,
+                cumulative_capital_gbp=cumulative_capital_gbp,
             )
             self._connection.execute(
                 """
@@ -1045,6 +1053,8 @@ def _json_with_cycle(
     cycle_outcome: str | None = None,
     trade_id: str | None = None,
     tranche_id: str | None = None,
+    liquidity: list[dict[str, str]] | None = None,
+    cumulative_capital_gbp: str | None = None,
 ) -> str:
     """Keep the stored blob aligned with the queryable cycle columns."""
 
@@ -1062,6 +1072,10 @@ def _json_with_cycle(
         payload["trade_id"] = trade_id
     if tranche_id is not None:
         payload["tranche_id"] = tranche_id
+    if liquidity is not None:
+        payload["paper_liquidity"] = liquidity
+    if cumulative_capital_gbp is not None:
+        payload["cumulative_capital_gbp"] = cumulative_capital_gbp
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
