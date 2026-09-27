@@ -1068,6 +1068,7 @@ def phase1_expensive_work_families() -> frozenset[MarketFamily]:
             MarketFamily.GAME_WINNER,
             MarketFamily.POINT_SPREAD,
             MarketFamily.TOTAL_POINTS,
+            MarketFamily.TOTAL_RUNS,
         }
     )
 

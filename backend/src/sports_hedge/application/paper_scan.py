@@ -152,6 +152,7 @@ class PaperScanService:
         fee_snapshots: list[FeeSnapshot] | None = None,
         venue_costs: list[VenueCostSnapshot] | None = None,
         fx_snapshots: list[FxRateSnapshot] | None = None,
+        fx_unavailable_reason: str | None = None,
         capital_limit_gbp: Decimal | None = None,
         liquidity_snapshot: PaperLiquiditySnapshot | None = None,
         minimum_net_edge: Decimal = Decimal("0.005"),
@@ -204,6 +205,7 @@ class PaperScanService:
             left,
             right,
             fx_snapshots=fx_snapshots,
+            fx_unavailable_reason=fx_unavailable_reason,
             as_of=evaluated_at,
         )
         rejections.extend(cost_resolve_reasons)
@@ -819,7 +821,10 @@ class PaperScanService:
         *,
         fx_snapshots: list[FxRateSnapshot] | None,
         as_of: datetime,
+        fx_unavailable_reason: str | None = None,
     ) -> tuple[list[FxRateSnapshot], list[str]]:
+        if fx_unavailable_reason and not fx_snapshots:
+            return _with_gbp_rate([], as_of=as_of), [fx_unavailable_reason]
         if fx_snapshots:
             return _with_gbp_rate(list(fx_snapshots), as_of=as_of), []
         if self.fx_service is None:

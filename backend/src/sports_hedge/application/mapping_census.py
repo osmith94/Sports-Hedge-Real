@@ -309,6 +309,7 @@ def _catalogue_by_archetype(report: CollectionReport) -> dict[str, dict[str, int
                 kalshi_matched=bool(fixture.kalshi_matched),
                 polymarket_matched=bool(fixture.polymarket_matched),
                 target_competition_code=fixture.target_competition_code,
+                sport=fixture.sport,
             )
         )
     return aggregate_coverage_by_archetype(rebuilt)

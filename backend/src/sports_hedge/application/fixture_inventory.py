@@ -225,10 +225,13 @@ def market_display_name(
     if family == "game_winner":
         return "Game winner"
     if family == "point_spread":
-        return "Point spread"
-    if family == "total_points":
-        return "Total points"
-    label = family.replace("_", " ").title()
+        label = "Point spread"
+    elif family == "total_points":
+        label = "Total points"
+    elif family == "total_runs":
+        label = "Total runs"
+    else:
+        label = family.replace("_", " ").title()
     if line is not None:
         line_text = format(line, "f").rstrip("0").rstrip(".") if "." in format(line, "f") else format(line, "f")
         label = f"{label} {line_text}"
@@ -956,7 +959,7 @@ def _facts_from_inventory(
     observation = item.observation
     fee = _inventory_fee_fields(item, venue_costs, cost_resolver=cost_resolver)
     currency = observation.native_currency if observation is not None else None
-    fx_truth = decision.fx_snapshots if decision is not None else fx_snapshots
+    fx_truth = _fx_context_for_currency(currency, decision, fx_snapshots)
     metadata = observation.metadata if observation is not None else {}
     raw_name = item.raw_name or _metadata_str(metadata, "raw_market_name")
     raw_type = item.raw_market_type or _metadata_str(metadata, "raw_market_type")
@@ -1151,6 +1154,36 @@ FUNCTIONAL_CURRENCY = "GBP"
 FX_STATUS_NOT_REQUIRED = "not_required"
 FX_STATUS_KNOWN = "known"
 FX_STATUS_MISSING = "missing"
+
+
+def _fx_context_for_currency(
+    currency: str | None,
+    decision: PaperScanDecision | None,
+    fx_snapshots: list[FxRateSnapshot] | None,
+) -> list[FxRateSnapshot] | None:
+    """Lane FX covers a venue-only USD row that has no pair decision.
+
+    A decision snapshot wins when it already contains the native currency.
+    Otherwise the scanner-economic lane context is used. Neither path invents
+    a rate.
+    """
+
+    decision_snaps = list(decision.fx_snapshots) if decision is not None else []
+    lane = list(fx_snapshots or [])
+
+    def covers(snaps: list[FxRateSnapshot]) -> bool:
+        if not currency:
+            return False
+        code = currency.upper()
+        return any(item.currency.upper() == code for item in snaps)
+
+    if covers(decision_snaps):
+        return decision_snaps
+    if covers(lane):
+        return lane
+    if decision_snaps:
+        return decision_snaps
+    return lane or None
 
 
 def _fx_status(currency: str | None, fx_snapshots: list[FxRateSnapshot] | None) -> str | None:
@@ -1662,11 +1695,19 @@ def _clear_stale_venue_only(row: FixtureMarketInventoryRow) -> None:
         row.match_reasons = [item for item in row.match_reasons if item != "venue_only"]
 
 
-def _apply_decision_fx(row: FixtureMarketInventoryRow, decision: PaperScanDecision) -> None:
+def _apply_decision_fx(
+    row: FixtureMarketInventoryRow,
+    decision: PaperScanDecision,
+    *,
+    fx_snapshots: list[FxRateSnapshot] | None = None,
+) -> None:
     for facts in (row.matchbook, row.polymarket, row.kalshi):
         if facts is None:
             continue
-        facts.fx_status = _fx_status(facts.native_currency, decision.fx_snapshots)
+        facts.fx_status = _fx_status(
+            facts.native_currency,
+            _fx_context_for_currency(facts.native_currency, decision, fx_snapshots),
+        )
 
 
 def _attach_kalshi(
@@ -1733,7 +1774,7 @@ def _attach_kalshi(
     )
     row.pair_results = pair_summaries
     if best_decision is not None:
-        _apply_decision_fx(row, best_decision)
+        _apply_decision_fx(row, best_decision, fx_snapshots=fx_snapshots)
     if proven:
         for match in matches:
             if not match.matched:
