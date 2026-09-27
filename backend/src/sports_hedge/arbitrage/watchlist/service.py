@@ -623,6 +623,8 @@ class WatchlistService:
         occurred_at,
         reason: str,
         pricing_lane: str | None = None,
+        detail: str | None = None,
+        quote_age_ms: int | None = None,
     ) -> OpportunityLifecycleEvent | None:
         """Record one fail-closed execution reprice without changing radar status.
 
@@ -645,11 +647,11 @@ class WatchlistService:
             status=current.status,
             current_net_edge=current.current_net_edge,
             distance_to_trigger_pp=current.distance_to_trigger_pp,
-            detail=reason,
+            detail=detail or reason,
             gross_edge=current.gross_edge,
             limiting_depth_gbp=current.limiting_depth_gbp,
             guaranteed_profit_gbp=current.guaranteed_profit_gbp,
-            quote_age_ms=current.quote_age_ms,
+            quote_age_ms=current.quote_age_ms if quote_age_ms is None else quote_age_ms,
             pricing_lane=pricing_lane,
             **lifecycle_identity_from_opportunity(current),
         )

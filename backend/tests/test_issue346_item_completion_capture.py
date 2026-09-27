@@ -783,7 +783,7 @@ def test_phase4_preserves_paper_boundary_and_does_not_fork_capture() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matchbook_then_delayed_kalshi_is_stale_at_evaluation(
+async def test_delayed_kalshi_stales_discovery_but_concurrent_price2_stays_fresh(
     tmp_path: Path, monkeypatch
 ) -> None:
     scan, watchlist, ops, repository, ledger = _ops_bundle(tmp_path, autofill=True)
@@ -806,13 +806,17 @@ async def test_matchbook_then_delayed_kalshi_is_stale_at_evaluation(
         )
         _bind(engine, scan=scan, watchlist=watchlist, ops=ops, audit=audit, monkeypatch=monkeypatch)
         await _slice_and_drain(engine, PriceEnginePriority.HOT, now=NOW)
+        assert len(paper.samples) >= 2
+        discovery_left, _discovery_right, discovery_combined = paper.samples[0]
+        assert discovery_left is not None and discovery_left >= max_age
+        assert discovery_combined is not None and discovery_combined >= max_age
+        execution_left, execution_right, execution_combined = paper.samples[-1]
+        assert execution_left is not None and execution_left < max_age
+        assert execution_right is not None and execution_right < max_age
+        assert execution_combined is not None and execution_combined < max_age
         assert paper.last is not None
-        assert paper.last_left_age is not None
-        assert paper.last_left_age >= max_age
-        assert paper.last.quote_age_ms is not None
-        assert paper.last.quote_age_ms >= max_age
-        assert ops.list_active_trades() == []
-        assert ledger.treasury.snapshot().pool(VenueName.MATCHBOOK, "GBP").locked_capital == 0
+        assert paper.last.quote_age_ms == execution_combined
+        assert len(ops.list_active_trades()) == 1
     finally:
         repository.close()
         ledger.close()

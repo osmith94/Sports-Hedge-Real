@@ -36,6 +36,74 @@ EXECUTION_REPRICE_NO_LONGER_QUALIFYING = "execution_reprice_no_longer_qualifying
 _QUOTE_AGE_REVALIDATION_REASONS = frozenset({"stale_quote"})
 
 
+@dataclass(frozen=True)
+class ExecutionProviderCall:
+    """One exact-ID provider read inside a Price-2 complete set."""
+
+    venue: str
+    stage: str
+    source_id: str
+    outcome: str
+    slot_wait_ms: int
+    io_ms: int
+
+
+@dataclass
+class ExecutionRepriceDiagnostics:
+    """Timing for one execution reprice. Ages are the books at evaluation."""
+
+    started_at: datetime
+    assembly_ms: int = 0
+    calls: tuple[ExecutionProviderCall, ...] = ()
+    quote_age_ms: dict[str, int | None] = field(default_factory=dict)
+    reason: str | None = None
+
+    def venue_slot_wait_ms(self, venue: str) -> int:
+        waits = [call.slot_wait_ms for call in self.calls if call.venue == venue]
+        return max(waits) if waits else 0
+
+    def venue_io_ms(self, venue: str) -> int:
+        durations = [call.io_ms for call in self.calls if call.venue == venue]
+        return max(durations) if durations else 0
+
+    def oldest_quote_age_ms(self) -> int | None:
+        if not self.quote_age_ms:
+            return None
+        ages = [age for age in self.quote_age_ms.values() if age is not None]
+        if len(ages) != len(self.quote_age_ms):
+            return None
+        return max(ages)
+
+    def compact(self) -> str:
+        """One audit line: start, assembly, per-venue wait, I/O, and quote age."""
+
+        parts = [
+            f"started_at={self.started_at.isoformat()}",
+            f"assembly_ms={self.assembly_ms}",
+        ]
+        venues = list(dict.fromkeys(call.venue for call in self.calls))
+        for venue in [*venues, *[name for name in self.quote_age_ms if name not in venues]]:
+            parts.append(f"{venue}.slot_wait_ms={self.venue_slot_wait_ms(venue)}")
+            parts.append(f"{venue}.io_ms={self.venue_io_ms(venue)}")
+            age = self.quote_age_ms.get(venue)
+            parts.append(f"{venue}.quote_age_ms={'unknown' if age is None else age}")
+        return " ".join(parts)
+
+
+def execution_reprice_audit_detail(
+    reason: str,
+    diagnostics: ExecutionRepriceDiagnostics | None,
+) -> str:
+    """Reason code plus the Price-2 timings that explain a missed entry."""
+
+    if diagnostics is None:
+        return reason
+    body = diagnostics.compact()
+    if not body:
+        return reason
+    return f"{reason} {body}"
+
+
 @dataclass
 class ExecutionRepriceResult:
     """One execution-time PaperScanDecision, or a fail-closed reason."""
@@ -43,6 +111,7 @@ class ExecutionRepriceResult:
     decision: PaperScanDecision | None = None
     reason: str | None = None
     refreshed_venues: tuple[VenueName, ...] = ()
+    diagnostics: ExecutionRepriceDiagnostics | None = None
 
 
 @dataclass
@@ -117,6 +186,12 @@ def hedge_venues(decision: PaperScanDecision) -> tuple[VenueName, ...]:
     return tuple(ordered)
 
 
+def _diagnostic_quote_age(diagnostics: ExecutionRepriceDiagnostics | None) -> int | None:
+    if diagnostics is None:
+        return None
+    return diagnostics.oldest_quote_age_ms()
+
+
 def _history(service: Any, decision: PaperScanDecision) -> list[Any]:
     if not decision.canonical_market_id:
         return []
@@ -189,11 +264,14 @@ async def capture_with_execution_reprice(
     venues = hedge_venues(decision)
     refreshed = await engine.reprice_for_paper_entry(runtime, venues=venues)
     if refreshed.decision is None:
+        reason = refreshed.reason or EXECUTION_REPRICE_FAILED
         watchlist.note_execution_reprice_miss(
             decision,
             occurred_at=datetime.now(UTC),
-            reason=refreshed.reason or EXECUTION_REPRICE_FAILED,
+            reason=reason,
             pricing_lane=pricing_lane,
+            detail=execution_reprice_audit_detail(reason, refreshed.diagnostics),
+            quote_age_ms=_diagnostic_quote_age(refreshed.diagnostics),
         )
         return ExecutionCaptureResult(
             discovery_history=discovery_history,
@@ -213,6 +291,8 @@ async def capture_with_execution_reprice(
             occurred_at=datetime.now(UTC),
             reason=block,
             pricing_lane=pricing_lane,
+            detail=execution_reprice_audit_detail(block, refreshed.diagnostics),
+            quote_age_ms=_diagnostic_quote_age(refreshed.diagnostics),
         )
         return ExecutionCaptureResult(
             discovery_history=discovery_history,
