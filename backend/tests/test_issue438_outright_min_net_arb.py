@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import inspect
 from decimal import Decimal
+
+from authorised_execution_plan import authorised_execution_plan
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -407,7 +409,9 @@ def test_active_trade_top_up_uses_stamped_trigger_not_live_fixture(
     assert "plan.decision.minimum_net_edge" in src
     assert "trigger = operator.min_net_edge" not in src
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    # One-Time below the fixture depth leaves unconsumed residual on the same
+    # displayed book. The repeated snapshot may fill only that residual.
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), Decimal("80"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -420,8 +424,16 @@ def test_active_trade_top_up_uses_stamped_trigger_not_live_fixture(
             max_execution_risk=60,
             hot_cadence_seconds=30,
             max_allocated_per_trade_gbp=Decimal("2000"),
+            max_event_gbp=Decimal("2000"),
+            max_opportunity_gbp=Decimal("2000"),
+            max_one_time_gbp=Decimal("80"),
         )
-        result = ops.maybe_top_up_open_trade(trade, now=TRADE_OBSERVED)
+        result = ops.maybe_top_up_open_trade(
+            trade,
+            now=TRADE_OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "outright-trigger"),
+            require_current_plan=True,
+        )
         assert result is not None
         loaded = ops.list_active_trades()[0]
         assert any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)
@@ -451,7 +463,13 @@ def test_active_trade_retains_stamped_outright_trigger_when_fixture_slider_chang
             hot_cadence_seconds=30,
             max_allocated_per_trade_gbp=Decimal("2000"),
         )
-        ops.maybe_top_up_open_trade(trade, now=TRADE_OBSERVED)
+        stamped = ops._plans[trade.opportunity_id]
+        ops.maybe_top_up_open_trade(
+            trade,
+            now=TRADE_OBSERVED,
+            plan=authorised_execution_plan(stamped, "outright-exit"),
+            require_current_plan=True,
+        )
         loaded = ops.list_active_trades()[0]
         assert loaded.active_trade_phase is PaperActiveTradePhase.EXIT_MANAGEMENT
         assert not any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)

@@ -119,7 +119,23 @@ class OperatorScannerSettings(BaseModel):
         ge=UNIVERSE_CADENCE_MIN_SECONDS,
         le=UNIVERSE_CADENCE_MAX_SECONDS,
     )
+    # Deprecated display/migration column. No allocation authority.
     max_allocated_per_trade_gbp: Decimal = Field(
+        default=DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
+    max_event_gbp: Decimal = Field(
+        default=DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
+    max_opportunity_gbp: Decimal = Field(
+        default=DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
+    max_one_time_gbp: Decimal = Field(
         default=DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP,
         ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
         le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
@@ -144,6 +160,7 @@ class OperatorScannerSettings(BaseModel):
         _copy_legacy_when_new_absent(
             payload, "universe_discovery_refresh_seconds", "universe_cadence_seconds"
         )
+        _migrate_placement_thresholds(payload)
         return payload
 
     @computed_field
@@ -222,6 +239,21 @@ class OperatorScannerSettingsUpdate(BaseModel):
         ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
         le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
     )
+    max_event_gbp: Decimal | None = Field(
+        default=None,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
+    max_opportunity_gbp: Decimal | None = Field(
+        default=None,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
+    max_one_time_gbp: Decimal | None = Field(
+        default=None,
+        ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
+        le=MAX_ALLOCATED_PER_TRADE_MAX_GBP,
+    )
 
     @field_validator("outright_min_net_edge", mode="before")
     @classmethod
@@ -244,6 +276,38 @@ class OperatorScannerSettingsUpdate(BaseModel):
             payload, "universe_discovery_refresh_seconds", "universe_cadence_seconds"
         )
         return payload
+
+
+def _placement_from_row(row: sqlite3.Row, legacy: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+    """Inherit a missing threshold from the legacy per-trade cap."""
+
+    resolved: list[Decimal] = []
+    for key in ("max_event_gbp", "max_opportunity_gbp", "max_one_time_gbp"):
+        raw = _row_optional(row, key)
+        if raw is None or str(raw).strip() == "":
+            resolved.append(legacy)
+            continue
+        try:
+            resolved.append(clamp_max_allocated_per_trade_gbp(raw))
+        except (InvalidOperation, ArithmeticError, TypeError, ValueError):
+            LOGGER.warning("malformed operator scanner %s; using legacy cap", key)
+            resolved.append(legacy)
+    return resolved[0], resolved[1], resolved[2]
+
+
+def _migrate_placement_thresholds(payload: dict[str, Any]) -> None:
+    """Copy a legacy per-trade cap into any omitted placement threshold.
+
+    An upgrade must not raise permitted deployment. When the three new
+    fields are absent they all start at the previous max-per-trade value.
+    """
+
+    legacy = payload.get("max_allocated_per_trade_gbp")
+    if legacy is None:
+        return
+    for key in ("max_event_gbp", "max_opportunity_gbp", "max_one_time_gbp"):
+        if payload.get(key) is None:
+            payload[key] = legacy
 
 
 def _copy_legacy_when_new_absent(payload: dict[str, Any], new_key: str, old_key: str) -> None:
@@ -319,6 +383,13 @@ def clamp_max_allocated_per_trade_gbp(value: Decimal | float | int | str) -> Dec
     return amount
 
 
+def _env_placement_gbp(settings: Settings, field_name: str) -> Decimal:
+    configured = getattr(settings, field_name, None)
+    if configured is None:
+        return clamp_max_allocated_per_trade_gbp(settings.max_allocated_per_trade_gbp)
+    return clamp_max_allocated_per_trade_gbp(configured)
+
+
 def _env_max_allocated_per_trade_gbp(settings: Settings) -> Decimal:
     configured = settings.allocation_per_opportunity_limit_gbp
     if configured is None:
@@ -363,6 +434,9 @@ def env_operator_scanner_settings(
             resolved.paper_universe_discovery_interval_seconds
         ),
         max_allocated_per_trade_gbp=_env_max_allocated_per_trade_gbp(resolved),
+        max_event_gbp=_env_placement_gbp(resolved, "max_event_gbp"),
+        max_opportunity_gbp=_env_placement_gbp(resolved, "max_opportunity_gbp"),
+        max_one_time_gbp=_env_placement_gbp(resolved, "max_one_time_gbp"),
         scanner_stopped=scanner_stopped,
         universe_scans_paused=universe_scans_paused,
         background_pricing_paused=background_pricing_paused,
@@ -461,6 +535,11 @@ class SqliteOperatorScannerSettingsStore:
                 "ALTER TABLE operator_scanner_settings "
                 "ADD COLUMN max_allocated_per_trade_gbp TEXT"
             )
+        for column in ("max_event_gbp", "max_opportunity_gbp", "max_one_time_gbp"):
+            if column not in columns:
+                connection.execute(
+                    f"ALTER TABLE operator_scanner_settings ADD COLUMN {column} TEXT"
+                )
         if "universe_cadence_seconds" not in columns:
             connection.execute(
                 "ALTER TABLE operator_scanner_settings "
@@ -522,6 +601,9 @@ class SqliteOperatorScannerSettingsStore:
         universe_cadence_seconds: int | None = None,
         universe_discovery_refresh_seconds: int | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
+        max_event_gbp: Decimal | None = None,
+        max_opportunity_gbp: Decimal | None = None,
+        max_one_time_gbp: Decimal | None = None,
         outright_min_net_edge: Any = _UNSET,
         scanner_stopped: bool | None = None,
         universe_scans_paused: bool | None = None,
@@ -592,6 +674,40 @@ class SqliteOperatorScannerSettingsStore:
                 allocated = _env_max_allocated_per_trade_gbp(get_settings())
         else:
             allocated = clamp_max_allocated_per_trade_gbp(max_allocated_per_trade_gbp)
+        if current is not None:
+            event_current = current.max_event_gbp
+            opportunity_current = current.max_opportunity_gbp
+            one_time_current = current.max_one_time_gbp
+        else:
+            fresh = _env_max_allocated_per_trade_gbp(get_settings())
+            event_current = fresh
+            opportunity_current = fresh
+            one_time_current = fresh
+        if max_event_gbp is None and max_opportunity_gbp is None and max_one_time_gbp is None:
+            if max_allocated_per_trade_gbp is not None:
+                event_cap = opportunity_cap = one_time_cap = allocated
+            else:
+                event_cap, opportunity_cap, one_time_cap = (
+                    event_current,
+                    opportunity_current,
+                    one_time_current,
+                )
+        else:
+            event_cap = (
+                clamp_max_allocated_per_trade_gbp(max_event_gbp)
+                if max_event_gbp is not None
+                else event_current
+            )
+            opportunity_cap = (
+                clamp_max_allocated_per_trade_gbp(max_opportunity_gbp)
+                if max_opportunity_gbp is not None
+                else opportunity_current
+            )
+            one_time_cap = (
+                clamp_max_allocated_per_trade_gbp(max_one_time_gbp)
+                if max_one_time_gbp is not None
+                else one_time_current
+            )
         if outright_min_net_edge is _UNSET:
             if current is not None:
                 outright = current.outright_min_net_edge
@@ -614,6 +730,9 @@ class SqliteOperatorScannerSettingsStore:
             background_reprice_after_seconds=background,
             universe_discovery_refresh_seconds=universe,
             max_allocated_per_trade_gbp=allocated,
+            max_event_gbp=event_cap,
+            max_opportunity_gbp=opportunity_cap,
+            max_one_time_gbp=one_time_cap,
             scanner_stopped=stopped,
             universe_scans_paused=paused,
             background_pricing_paused=background_paused,
@@ -758,10 +877,11 @@ class SqliteOperatorScannerSettingsStore:
                     background_cadence_seconds, background_scan_interval_seconds,
                     background_reprice_after_seconds,
                     universe_cadence_seconds, universe_discovery_refresh_seconds,
-                    max_allocated_per_trade_gbp, scanner_stopped,
+                    max_allocated_per_trade_gbp, max_event_gbp, max_opportunity_gbp,
+                    max_one_time_gbp, scanner_stopped,
                     universe_scans_paused, background_pricing_paused, source, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_net_edge = excluded.min_net_edge,
                     outright_min_net_edge = excluded.outright_min_net_edge,
@@ -776,6 +896,9 @@ class SqliteOperatorScannerSettingsStore:
                     universe_cadence_seconds = excluded.universe_cadence_seconds,
                     universe_discovery_refresh_seconds = excluded.universe_discovery_refresh_seconds,
                     max_allocated_per_trade_gbp = excluded.max_allocated_per_trade_gbp,
+                    max_event_gbp = excluded.max_event_gbp,
+                    max_opportunity_gbp = excluded.max_opportunity_gbp,
+                    max_one_time_gbp = excluded.max_one_time_gbp,
                     scanner_stopped = excluded.scanner_stopped,
                     universe_scans_paused = excluded.universe_scans_paused,
                     background_pricing_paused = excluded.background_pricing_paused,
@@ -798,6 +921,9 @@ class SqliteOperatorScannerSettingsStore:
                     int(payload.universe_discovery_refresh_seconds),
                     int(payload.universe_discovery_refresh_seconds),
                     str(payload.max_allocated_per_trade_gbp),
+                    str(payload.max_event_gbp),
+                    str(payload.max_opportunity_gbp),
+                    str(payload.max_one_time_gbp),
                     1 if payload.scanner_stopped else 0,
                     1 if payload.universe_scans_paused else 0,
                     1 if payload.background_pricing_paused else 0,
@@ -999,6 +1125,9 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         LOGGER.warning("malformed operator scanner max_allocated_per_trade_gbp; using env default")
         max_allocated_per_trade_gbp = _env_max_allocated_per_trade_gbp(get_settings())
         source = "env_default"
+    event_cap, opportunity_cap, one_time_cap = _placement_from_row(
+        row, max_allocated_per_trade_gbp
+    )
     try:
         updated = datetime.fromisoformat(str(row["updated_at"]))
     except ValueError:
@@ -1015,6 +1144,9 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         background_reprice_after_seconds=background_reprice_after_seconds,
         universe_discovery_refresh_seconds=universe_discovery_refresh_seconds,
         max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
+        max_event_gbp=event_cap,
+        max_opportunity_gbp=opportunity_cap,
+        max_one_time_gbp=one_time_cap,
         scanner_stopped=bool(int(row["scanner_stopped"] or 0)),
         universe_scans_paused=bool(int(_row_optional(row, "universe_scans_paused") or 0)),
         background_pricing_paused=bool(

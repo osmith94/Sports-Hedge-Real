@@ -582,20 +582,23 @@ async def test_pre_match_and_in_play_share_the_same_inventory_read_model() -> No
 
 def test_operations_fixture_route_uses_canonical_event_id() -> None:
     coordinator = get_live_refresh_coordinator()
+    # Kickoff must stay inside the current-radar window relative to the route
+    # clock. A fixed historical date falls outside that window as wall time moves.
+    observed = datetime.now(UTC)
     fixture = DiscoveredFixture(
         source_event_id="5001",
         canonical_event_id="evt:fixture-route-test",
         home_team="Tottenham",
         away_team="Everton",
         competition="Premier League",
-        kickoff_utc=KICKOFF + timedelta(days=8),
-        last_seen_at=KICKOFF,
+        kickoff_utc=observed + timedelta(days=1),
+        last_seen_at=observed,
         discovered_market_count=2,
         matched_equivalent_count=1,
     )
     report = CollectionReport(
-        started_at=KICKOFF,
-        completed_at=KICKOFF,
+        started_at=observed,
+        completed_at=observed,
         discovered_fixtures=[fixture],
         fixture_markets={"evt:fixture-route-test": []},
     )

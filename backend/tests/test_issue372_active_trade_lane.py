@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from authorised_execution_plan import authorised_execution_plan
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
@@ -68,14 +69,20 @@ from test_paper_trade_lifecycle import OBSERVED, _ops
 NOW = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
 
 
-def _raise_trade_cap(tmp_path: Path, amount: Decimal) -> SqliteOperatorScannerSettingsStore:
+def _raise_trade_cap(
+    tmp_path: Path, amount: Decimal, one_time: Decimal | None = None
+) -> SqliteOperatorScannerSettingsStore:
     store = SqliteOperatorScannerSettingsStore(tmp_path / "operator-scanner.sqlite")
     bind_runtime_operator_scanner_settings_store(store)
+    cycle = amount if one_time is None else one_time
     store.save_settings(
         min_net_edge=Decimal("0.01"),
         max_execution_risk=60,
         hot_cadence_seconds=30,
         max_allocated_per_trade_gbp=amount,
+        max_event_gbp=amount,
+        max_opportunity_gbp=amount,
+        max_one_time_gbp=cycle,
     )
     return store
 
@@ -279,7 +286,7 @@ async def test_active_trade_fresh_refresh_updates_exit_management_without_extra_
 
 def test_qualifying_arb_adds_second_tranche(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("1000"))
+    store = _raise_trade_cap(tmp_path, Decimal("1000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -290,8 +297,16 @@ def test_qualifying_arb_adds_second_tranche(tmp_path: Path) -> None:
             max_execution_risk=60,
             hot_cadence_seconds=30,
             max_allocated_per_trade_gbp=Decimal("2000"),
+            max_event_gbp=Decimal("2000"),
+            max_opportunity_gbp=Decimal("2000"),
+            max_one_time_gbp=Decimal("2000"),
         )
-        result = ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        result = ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "qualifying-top-up"),
+            require_current_plan=True,
+        )
         assert result is not None
         loaded = ops.list_active_trades()[0]
         topups = [item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.TOP_UP]
@@ -317,7 +332,7 @@ def test_qualifying_arb_adds_second_tranche(tmp_path: Path) -> None:
 
 def test_incomplete_complete_set_commits_nothing(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("1000"))
+    store = _raise_trade_cap(tmp_path, Decimal("1000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -344,7 +359,12 @@ def test_incomplete_complete_set_commits_nothing(tmp_path: Path) -> None:
                 return filled.model_copy(update={"fills": zeros, "fully_filled": False})
 
         ops.simulator = PartialSimulator()
-        ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "incomplete-top-up"),
+            require_current_plan=True,
+        )
         loaded = ops.list_active_trades()[0]
         assert len(loaded.legs) == before_legs
         assert loaded.capital_locked_native == before_locks
@@ -368,7 +388,12 @@ def test_top_up_retry_is_idempotent(tmp_path: Path) -> None:
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
-        first = ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        first = ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "idempotent-top-up"),
+            require_current_plan=True,
+        )
         assert first is not None
         after_first = ops.list_active_trades()[0]
         tranche_ids = [item.tranche_id for item in after_first.tranches]
@@ -413,7 +438,12 @@ def test_cumulative_cap_and_smaller_tranche_and_monitoring(tmp_path: Path) -> No
         assert remaining_trade_room_gbp(trade, Decimal("1000")) == max(
             Decimal("0"), Decimal("1000") - locked
         )
-        ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "cap-top-up-1"),
+            require_current_plan=True,
+        )
         loaded = ops.list_active_trades()[0]
         if remaining_trade_room_gbp(loaded, Decimal("1000")) <= 0:
             assert loaded.active_trade_phase is PaperActiveTradePhase.MONITORING_CAP_REACHED
@@ -430,7 +460,12 @@ def test_cumulative_cap_and_smaller_tranche_and_monitoring(tmp_path: Path) -> No
         )
         before = ops.list_active_trades()[0]
         before_locked = before.capital_locked_gbp or Decimal("0")
-        ops.maybe_top_up_open_trade(before, now=OBSERVED)
+        ops.maybe_top_up_open_trade(
+            before,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[before.opportunity_id], "cap-top-up-2"),
+            require_current_plan=True,
+        )
         after = ops.list_active_trades()[0]
         added = (after.capital_locked_gbp or Decimal("0")) - before_locked
         assert added >= 0
@@ -457,8 +492,14 @@ def test_below_min_net_hands_off_to_exit_management(tmp_path: Path) -> None:
     try:
         trade = ops.list_active_trades()[0]
         plan = ops._plans[trade.opportunity_id]
-        ops._plans[trade.opportunity_id] = plan.model_copy(update={"net_edge": Decimal("0.001")})
-        ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        lowered = plan.model_copy(update={"net_edge": Decimal("0.001")})
+        ops._plans[trade.opportunity_id] = lowered
+        ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(lowered, "below-min-top-up"),
+            require_current_plan=True,
+        )
         loaded = ops.list_active_trades()[0]
         assert loaded.active_trade_phase is PaperActiveTradePhase.EXIT_MANAGEMENT
         assert not any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)
@@ -779,11 +820,16 @@ def test_aggregate_reverse_depth_consumed_once_across_tranches(tmp_path: Path) -
     from sports_hedge.paper.unwind.adapter import position_from_trade
 
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
-        ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "aggregate-top-up"),
+            require_current_plan=True,
+        )
         loaded = ops.list_active_trades()[0]
         filled_legs = [leg for leg in loaded.legs if leg.filled_stake > 0]
         assert len(filled_legs) >= 4
@@ -810,14 +856,19 @@ def test_qualifying_treasury_safe_top_up_ignores_recommendation_haircuts(tmp_pat
     assert "maximum_validated_capital" in size_src
     assert "recommended_stakes" not in size_src or "validated" in size_src
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
         plan = ops._plans[trade.opportunity_id]
         if plan.decision.execution_risk is not None:
             plan.decision.execution_risk.score = 99
-        result = ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        result = ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "haircut-top-up"),
+            require_current_plan=True,
+        )
         assert result is not None
         loaded = ops.list_active_trades()[0]
         assert any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)
@@ -1083,14 +1134,7 @@ async def test_active_trade_tick_does_not_top_up_from_stale_plan_when_refresh_fa
 
         mode["status"] = "evaluated"
         await coordinator._run_active_trade_tick(tick_plan)
-        loaded = ops.list_active_trades()[0]
-        topups = [
-            item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.TOP_UP
-        ]
-        assert len(topups) == 1
-        assert (loaded.capital_locked_gbp or Decimal("0")) > (before_capital or Decimal("0"))
-        assert len(loaded.legs) > before_legs
-        assert len(_lock_fingerprint(ledger, loaded.trade_id)) > len(before_locks)
+        _assert_unchanged()
     finally:
         if coordinator is not None:
             coordinator.reset()
@@ -1234,7 +1278,7 @@ def test_aggregated_unwind_releases_every_tranche_lock_once(tmp_path: Path) -> N
     from sports_hedge.paper.unwind.adapter import allocated_close_shares, position_from_trade
     from sports_hedge.paper.unwind.models import UnwindPolicy
 
-    store = _raise_trade_cap(tmp_path, Decimal("5000"))
+    store = _raise_trade_cap(tmp_path, Decimal("5000"), one_time=Decimal("40"))
     ledger = SqlitePaperLedger(
         tmp_path / "unwind-locks.sqlite",
         seed_gbp=Decimal("5000"),
@@ -1270,10 +1314,37 @@ def test_aggregated_unwind_releases_every_tranche_lock_once(tmp_path: Path) -> N
         opened = demo.replay(FixtureReplayRequest(venue_pair="matchbook_kalshi", close_via="hold"))
         assert opened.trade is not None
         trade = opened.trade
-        first = ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        first = ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "unwind-top-up-1"),
+            require_current_plan=True,
+        )
         assert first is not None
         after_one = ops.list_active_trades()[0]
-        second = ops.maybe_top_up_open_trade(after_one, now=OBSERVED + timedelta(seconds=1))
+        stored = ops._plans[after_one.opportunity_id]
+        deeper_legs = [
+            leg.model_copy(
+                update={
+                    "levels": [
+                        level.model_copy(
+                            update={"available_stake": level.available_stake + Decimal("1000")}
+                        )
+                        for level in leg.levels
+                    ]
+                }
+            )
+            for leg in stored.legs
+        ]
+        second = ops.maybe_top_up_open_trade(
+            after_one,
+            now=OBSERVED + timedelta(seconds=1),
+            plan=authorised_execution_plan(
+                stored.model_copy(update={"legs": deeper_legs}),
+                "unwind-top-up-2",
+            ),
+            require_current_plan=True,
+        )
         assert second is not None
         loaded = ops.list_active_trades()[0]
         topups = [item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.TOP_UP]
@@ -1323,17 +1394,21 @@ def test_aggregated_unwind_releases_every_tranche_lock_once(tmp_path: Path) -> N
             assert Decimal(locked_native) == Decimal(released_native)
         allocated_qty = Decimal("0")
         allocated_pnl = Decimal("0")
-        allocated_fees = Decimal("0")
+        allocated_fee_parts: list[Decimal] = []
         for open_leg, close_leg in zip(position.legs, decision.close_plan.legs, strict=True):
             parts = allocated_close_shares(open_leg, close_leg)
             allocated_qty += sum((part[1] for part in parts), Decimal("0"))
-            allocated_fees += sum((part[3] for part in parts), Decimal("0"))
+            allocated_fee_parts.extend(part[3] for part in parts)
             allocated_pnl += sum((part[4] for part in parts), Decimal("0"))
         assert allocated_qty == sum(
             (leg.filled_close_quantity for leg in decision.close_plan.legs), Decimal("0")
         )
-        assert sum((fill.filled_close_quantity for fill in closed.close_fills), Decimal("0")) == allocated_qty
-        assert sum((fill.closing_fee_native for fill in closed.close_fills), Decimal("0")) == allocated_fees
+        filled_qty = sum((fill.filled_close_quantity for fill in closed.close_fills), Decimal("0"))
+        assert abs(filled_qty - allocated_qty) <= Decimal("0.0000001")
+        # Compare the fee parts themselves. Summing per leg and then across
+        # legs can differ by one Decimal ulp from summing every fill fee in
+        # one pass once a cap-safe scale moves a tranche by one ulp.
+        assert [fill.closing_fee_native for fill in closed.close_fills] == allocated_fee_parts
         unwind_ids = [
             entry.source_id
             for entry in ops.journal.list_entries(opportunity_id=loaded.opportunity_id)
@@ -1376,7 +1451,7 @@ def test_top_up_lock_and_tranche_share_one_sqlite_transaction(tmp_path: Path) ->
     commit_src = inspect.getsource(PaperOperationsService._maybe_top_up_open_trade_locked)
     assert "ledger.transaction()" in commit_src
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -1393,7 +1468,12 @@ def test_top_up_lock_and_tranche_share_one_sqlite_transaction(tmp_path: Path) ->
 
         ops.trades.save = _boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="injected_trade_save_failure"):
-            ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+            ops.maybe_top_up_open_trade(
+                trade,
+                now=OBSERVED,
+                plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "txn-top-up-1"),
+                require_current_plan=True,
+            )
         ops.trades.save = original_save  # type: ignore[method-assign]
         rolled = ops.trades.get(trade.trade_id)
         assert rolled is not None
@@ -1402,7 +1482,12 @@ def test_top_up_lock_and_tranche_share_one_sqlite_transaction(tmp_path: Path) ->
         assert len(rolled.legs) == before_legs
         assert _lock_fingerprint(ledger, trade.trade_id) == before_locks
         assert _journal_keys(ops) == before_journals
-        retry = ops.maybe_top_up_open_trade(rolled, now=OBSERVED)
+        retry = ops.maybe_top_up_open_trade(
+            rolled,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[rolled.opportunity_id], "txn-top-up-2"),
+            require_current_plan=True,
+        )
         assert retry is not None
         loaded = ops.list_active_trades()[0]
         topups = [item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.TOP_UP]
@@ -1410,7 +1495,12 @@ def test_top_up_lock_and_tranche_share_one_sqlite_transaction(tmp_path: Path) ->
         assert len(loaded.legs) > before_legs
         after_locks = _lock_fingerprint(ledger, loaded.trade_id)
         assert len(after_locks) > len(before_locks)
-        second = ops.maybe_top_up_open_trade(loaded, now=OBSERVED)
+        second = ops.maybe_top_up_open_trade(
+            loaded,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[loaded.opportunity_id], "txn-top-up-3"),
+            require_current_plan=True,
+        )
         assert second is not None
         again = ops.list_active_trades()[0]
         assert (
@@ -1420,6 +1510,71 @@ def test_top_up_lock_and_tranche_share_one_sqlite_transaction(tmp_path: Path) ->
         first_topup_id = topups[0].tranche_id
         assert sum(1 for item in again.tranches if item.tranche_id == first_topup_id) == 1
     finally:
+        repository.close()
+        ledger.close()
+        store.close()
+        bind_runtime_operator_scanner_settings_store(None)
+        reset_active_trade_registry()
+
+
+@pytest.mark.asyncio
+async def test_active_tick_requests_price2_instead_of_refresh_top_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eligible exposure may request Price 2. The refresh plan itself cannot fill."""
+
+    from sports_hedge.application.execution_reprice import ExecutionRepriceResult
+
+    ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
+    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
+    coordinator = None
+    try:
+        trade = ops.list_active_trades()[0]
+        before = [item.tranche_id for item in trade.tranches]
+        decision = ops._plans[trade.opportunity_id].decision
+
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def _price_item(self, runtime, slice_result, *, lane=None):
+                del lane
+                runtime.status = PriceEngineItemStatus.EVALUATED
+                slice_result.decisions.append(decision)
+                return PriceEngineItemStatus.EVALUATED
+
+            async def reprice_for_paper_entry(self, runtime, *, venues=()):
+                del runtime, venues
+                self.calls += 1
+                return ExecutionRepriceResult(reason="execution_reprice_failed")
+
+            async def drain_item_captures(self) -> None:
+                return None
+
+            def restart(self) -> None:
+                return None
+
+        engine = _Engine()
+        monkeypatch.setattr(
+            "sports_hedge.api.paper.get_paper_operations_service",
+            lambda *_args, **_kwargs: ops,
+        )
+        coordinator = LiveRefreshCoordinator(clock=lambda: OBSERVED, price_engine=engine)
+        await coordinator._run_active_trade_tick(
+            DualCadencePlan(
+                lane=ACTIVE_TRADE_LANE,
+                reason="active_trade_due",
+                identity_scope=[trade.trade_id],
+            )
+        )
+        loaded = ops.list_active_trades()[0]
+        assert engine.calls == 1
+        assert [item.tranche_id for item in loaded.tranches] == before
+    finally:
+        if coordinator is not None:
+            coordinator.reset()
         repository.close()
         ledger.close()
         store.close()

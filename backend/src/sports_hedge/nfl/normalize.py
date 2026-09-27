@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-import re
 from typing import Any
 
 from sports_hedge.domain.football import (
@@ -30,9 +30,18 @@ from sports_hedge.nfl.markets import (
     parse_wins_by_over_line,
 )
 from sports_hedge.nfl.settlement import nfl_paper_settlement
-from sports_hedge.nfl.teams import require_resolved_nfl_team, resolve_nfl_team
+from sports_hedge.nfl.teams import (
+    nfl_away_home_from_event_ticker,
+    require_resolved_nfl_team,
+    resolve_nfl_team,
+)
 from sports_hedge.normalization.text import normalize_text
-from sports_hedge.normalization.venues import VenueNormalizationError, _first, _list_field, _parse_datetime
+from sports_hedge.normalization.venues import (
+    VenueNormalizationError,
+    _first,
+    _list_field,
+    _parse_datetime,
+)
 
 
 def _required_nfl_team(value: str | None) -> str:
@@ -359,7 +368,22 @@ def matchbook_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Cano
     )
 
 
+def _resolved_detail_team(details: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        resolved = resolve_nfl_team(str(details.get(key) or ""))
+        if resolved.ok and resolved.canonical:
+            return resolved.canonical
+    return None
+
+
 def _kalshi_home_away_kickoff(payload: dict[str, Any]) -> tuple[str, str, datetime]:
+    """Resolve home/away without lowering event-match confidence.
+
+    Evidence order: milestone team ids joined to market strikes, structured
+    milestone names, title labels (including ``KC Chiefs``), then the event
+    ticker's away+home abbreviations. A ticker never overrides a resolved side.
+    """
+
     milestone = payload.get("milestone")
     if not isinstance(milestone, dict):
         raise VenueNormalizationError(
@@ -372,13 +396,35 @@ def _kalshi_home_away_kickoff(payload: dict[str, Any]) -> tuple[str, str, dateti
     home_id = str(details.get("home_team_id") or "").strip()
     away_id = str(details.get("away_team_id") or "").strip()
     uuid_names = _kalshi_team_uuid_names(payload)
-    home = uuid_names.get(home_id)
-    away = uuid_names.get(away_id)
+    home = uuid_names.get(home_id) if home_id else None
+    away = uuid_names.get(away_id) if away_id else None
+    if not home:
+        home = _resolved_detail_team(details, "home_team_name", "home_team", "home_team_abbr")
+    if not away:
+        away = _resolved_detail_team(details, "away_team_name", "away_team", "away_team_abbr")
     if not home or not away:
         title = str(payload.get("title") or milestone.get("title") or "")
-        away_label, home_label = _split_away_vs_home(title)
-        home = home or home_label
-        away = away or away_label
+        try:
+            away_label, home_label = _split_away_at_home(title)
+        except VenueNormalizationError:
+            away_label, home_label = "", ""
+        if not away and away_label:
+            resolved = resolve_nfl_team(away_label)
+            if resolved.ok and resolved.canonical:
+                away = resolved.canonical
+        if not home and home_label:
+            resolved = resolve_nfl_team(home_label)
+            if resolved.ok and resolved.canonical:
+                home = resolved.canonical
+    ticker = str(_first(payload, "event_ticker", "ticker") or "")
+    ticker_pair = nfl_away_home_from_event_ticker(ticker)
+    if ticker_pair is not None:
+        ticker_away, ticker_home = ticker_pair
+        if (away and away != ticker_away) or (home and home != ticker_home):
+            ticker_pair = None
+        else:
+            away = away or ticker_away
+            home = home or ticker_home
     return _required_nfl_team(home), _required_nfl_team(away), _kickoff(start)
 
 

@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from authorised_execution_plan import authorised_execution_plan
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
@@ -472,7 +473,7 @@ async def test_qualifying_price_engine_cycle_attempts_fill_immediately(
 
 
 @pytest.mark.asyncio
-async def test_refresh_telemetry_failure_does_not_veto_fresh_top_up(
+async def test_refresh_telemetry_failure_still_cannot_bypass_price2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -530,8 +531,8 @@ async def test_refresh_telemetry_failure_does_not_veto_fresh_top_up(
             )
         )
         loaded = ops.list_active_trades()[0]
-        assert any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)
-        assert (loaded.capital_locked_gbp or Decimal("0")) > (before_capital or Decimal("0"))
+        assert not any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)
+        assert loaded.capital_locked_gbp == before_capital
         assert coordinator.status.active_trade.last_persist_error == "active_trade_journal_write_failed"
         assert coordinator.status.active_trade.persist_ok is False
     finally:
@@ -677,12 +678,20 @@ async def test_retry_wait_is_logged_and_cannot_trigger_stale_plan_buy(
 
 def test_successful_top_up_logs_decision_and_committed_fill(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    # One-Time stays below this fixture's displayed depth so the repeated book
+    # still has unconsumed residual. An identical fully consumed level must not
+    # be filled again.
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), Decimal("80"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
         before_locks = _lock_fingerprint(ledger, trade.trade_id)
-        result = ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+        result = ops.maybe_top_up_open_trade(
+            trade,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "journal-top-up"),
+            require_current_plan=True,
+        )
         assert result is not None
         loaded = ops.list_active_trades()[0]
         topups = [item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.TOP_UP]
@@ -864,7 +873,9 @@ def test_bounded_recovery_leaves_durable_residual_and_retry_is_idempotent(
 
 def test_injected_journal_failure_rolls_back_finance_and_event(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    # Leave unconsumed residual on the same displayed book. See the successful
+    # top-up test for why One-Time is below the fixture depth.
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), Decimal("80"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -885,7 +896,12 @@ def test_injected_journal_failure_rolls_back_finance_and_event(tmp_path: Path) -
 
         ops.ledger.active_trade_events.append = _boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="injected_journal_failure"):
-            ops.maybe_top_up_open_trade(trade, now=OBSERVED)
+            ops.maybe_top_up_open_trade(
+                trade,
+                now=OBSERVED,
+                plan=authorised_execution_plan(ops._plans[trade.opportunity_id], "journal-rollback"),
+                require_current_plan=True,
+            )
         ops.ledger.active_trade_events.append = original  # type: ignore[method-assign]
         rolled = ops.trades.get(trade.trade_id)
         assert rolled is not None
@@ -898,7 +914,12 @@ def test_injected_journal_failure_rolls_back_finance_and_event(tmp_path: Path) -
             for item in ops.query_active_trade_events(trade_id=trade.trade_id, limit=500)
             if item.event_type is ActiveTradeEventType.TOPUP_FILL
         ] == before_fills
-        retry = ops.maybe_top_up_open_trade(rolled, now=OBSERVED)
+        retry = ops.maybe_top_up_open_trade(
+            rolled,
+            now=OBSERVED,
+            plan=authorised_execution_plan(ops._plans[rolled.opportunity_id], "journal-retry"),
+            require_current_plan=True,
+        )
         assert retry is not None
         loaded = ops.list_active_trades()[0]
         assert any(item.kind is PaperTradeTrancheKind.TOP_UP for item in loaded.tranches)

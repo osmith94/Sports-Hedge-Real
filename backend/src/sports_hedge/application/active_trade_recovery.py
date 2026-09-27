@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -245,3 +246,218 @@ def _stake_to_cover_post_cost_loss(
         else:
             lo = mid
     return best
+
+
+# PAPER fills do not remove venue orders. A later HTTP read of the same
+# displayed size is not new liquidity. Matchbook last-updated, Kalshi
+# orderbook payloads, and Polymarket book bodies are not used as a
+# replenishment epoch: none of those clients expose a book version,
+# sequence, or revision that proves a price level was replaced. Local
+# retrieval time is not proof either. Remaining depth is
+# max(0, observed_at_this_odds - previously_consumed_at_this_odds).
+# A larger displayed size unlocks only the increment. A smaller one
+# clamps at zero. A different price is a different level.
+ODDS_QUANTUM = Decimal("0.0001")
+
+
+def odds_token(odds: Decimal | str) -> str:
+    return str(Decimal(str(odds)).quantize(ODDS_QUANTUM))
+
+
+def native_leg_identity(leg: Any) -> tuple[str, str, str, str]:
+    venue = getattr(leg, "venue", "")
+    venue_name = venue.value if hasattr(venue, "value") else str(venue)
+    market = getattr(leg, "source_market_id", None) or getattr(leg, "native_market_id", "")
+    runner = getattr(leg, "source_runner_id", None)
+    if runner is None:
+        runner = getattr(leg, "native_runner_id", "") or ""
+    outcome = getattr(leg, "outcome", "") or ""
+    return (venue_name, str(market or ""), str(runner or ""), str(outcome))
+
+
+def residual_native(observed: Decimal, consumed: Decimal) -> Decimal:
+    """Executable stake still available at one exact price. Never negative."""
+
+    left = observed - consumed
+    if left <= 0:
+        return ZERO
+    return left
+
+
+def _snapshot_levels(
+    payload: dict[str, Any],
+) -> dict[tuple[str, str, str, str], list[tuple[Decimal, Decimal]]]:
+    levels: dict[tuple[str, str, str, str], list[tuple[Decimal, Decimal]]] = {}
+    for leg in payload.get("legs") or []:
+        if not isinstance(leg, dict):
+            continue
+        identity = (
+            str(leg.get("venue") or ""),
+            str(leg.get("native_market_id") or ""),
+            str(leg.get("native_runner_id") or ""),
+            str(leg.get("outcome") or ""),
+        )
+        parsed: list[tuple[Decimal, Decimal]] = []
+        for level in leg.get("levels") or []:
+            if not isinstance(level, dict):
+                continue
+            parsed.append((Decimal(str(level["odds"])), Decimal(str(level["depth"]))))
+        if not parsed and leg.get("displayed_odds") and leg.get("available_depth"):
+            parsed.append(
+                (Decimal(str(leg["displayed_odds"])), Decimal(str(leg["available_depth"])))
+            )
+        levels[identity] = parsed
+    return levels
+
+
+def _attribute_fill(
+    levels: list[tuple[Decimal, Decimal]],
+    filled_stake: Decimal,
+) -> dict[str, Decimal]:
+    """Replay one fill best-odds-first onto the book that authorised it."""
+
+    remaining = filled_stake
+    attributed: dict[str, Decimal] = {}
+    ordered = sorted(levels, key=lambda item: item[0], reverse=True)
+    for odds, available in ordered:
+        if remaining <= 0:
+            break
+        take = min(available, remaining)
+        if take <= 0:
+            continue
+        token = odds_token(odds)
+        attributed[token] = attributed.get(token, ZERO) + take
+        remaining -= take
+    if remaining > 0 and ordered:
+        token = odds_token(ordered[0][0])
+        attributed[token] = attributed.get(token, ZERO) + remaining
+    return attributed
+
+
+def consumed_native_by_level(
+    trade: PaperTrade | None,
+) -> dict[tuple[str, str, str, str, str], Decimal]:
+    """Native stake already PAPER-filled, keyed by venue, market, runner, outcome, odds.
+
+    Durable source is the persisted trade: each snapshot-backed tranche is
+    replayed onto that snapshot's levels. Fills without a snapshot fall back
+    to their filled odds. Process restart does not reset this.
+    """
+
+    if trade is None:
+        return {}
+    from sports_hedge.paper.trades import PaperTradeAuditEventType
+
+    snapshots: dict[str, dict[tuple[str, str, str, str], list[tuple[Decimal, Decimal]]]] = {}
+    for event in trade.audit:
+        if event.event_type is not PaperTradeAuditEventType.EXECUTION_SNAPSHOT:
+            continue
+        try:
+            payload = json.loads(event.detail or "")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        snapshot_id = payload.get("snapshot_id")
+        if snapshot_id:
+            snapshots[str(snapshot_id)] = _snapshot_levels(payload)
+    by_tranche: dict[str, list[Any]] = {}
+    for leg in trade.legs:
+        stake = leg.filled_stake or ZERO
+        if stake <= 0:
+            continue
+        by_tranche.setdefault(leg.tranche_id, []).append(leg)
+    consumed: dict[tuple[str, str, str, str, str], Decimal] = {}
+    seen: set[str] = set()
+    for tranche in trade.tranches:
+        seen.add(tranche.tranche_id)
+        levels_map = snapshots.get(tranche.execution_snapshot_id or "")
+        for leg in by_tranche.get(tranche.tranche_id, []):
+            _add_consumed(consumed, leg, levels_map)
+    for tranche_id, legs in by_tranche.items():
+        if tranche_id in seen:
+            continue
+        for leg in legs:
+            _add_consumed(consumed, leg, None)
+    return consumed
+
+
+def _add_consumed(
+    consumed: dict[tuple[str, str, str, str, str], Decimal],
+    leg: Any,
+    levels_map: dict[tuple[str, str, str, str], list[tuple[Decimal, Decimal]]] | None,
+) -> None:
+    identity = native_leg_identity(leg)
+    stake = Decimal(leg.filled_stake or ZERO)
+    if stake <= 0:
+        return
+    levels = None if levels_map is None else levels_map.get(identity)
+    if levels:
+        attributed = _attribute_fill(levels, stake)
+    elif getattr(leg, "filled_odds", None):
+        attributed = {odds_token(leg.filled_odds): stake}
+    else:
+        return
+    for token, amount in attributed.items():
+        key = (*identity, token)
+        consumed[key] = consumed.get(key, ZERO) + amount
+
+
+def liquidity_rows(
+    identity: tuple[str, str, str, str],
+    levels: list[tuple[Decimal, Decimal]],
+    consumed: dict[tuple[str, str, str, str, str], Decimal],
+) -> list[dict[str, str]]:
+    buckets: dict[str, Decimal] = {}
+    for odds, available in levels:
+        token = odds_token(odds)
+        buckets[token] = buckets.get(token, ZERO) + available
+    rows: list[dict[str, str]] = []
+    for token in sorted(buckets, key=Decimal, reverse=True):
+        observed = buckets[token]
+        used = consumed.get((*identity, token), ZERO)
+        incremental = residual_native(observed, used)
+        rows.append(
+            {
+                "venue": identity[0],
+                "source_market_id": identity[1],
+                "source_runner_id": identity[2],
+                "outcome": identity[3],
+                "odds": token,
+                "observed": str(observed),
+                "previously_consumed": str(used),
+                "incremental": str(incremental),
+            }
+        )
+    return rows
+
+
+def liquidity_evidence_for_levels(
+    legs: list[tuple[tuple[str, str, str, str], list[tuple[Decimal, Decimal]]]],
+    trade: PaperTrade | None,
+) -> list[dict[str, str]]:
+    consumed = consumed_native_by_level(trade)
+    rows: list[dict[str, str]] = []
+    for identity, levels in legs:
+        rows.extend(liquidity_rows(identity, levels, consumed))
+    return rows
+
+
+def residual_book_levels(
+    levels: list[BookLevel],
+    identity: tuple[str, str, str, str],
+    consumed: dict[tuple[str, str, str, str, str], Decimal],
+) -> list[BookLevel]:
+    """Still-displayed stake at each price after PAPER consumption at that price."""
+
+    observed = [(level.decimal_odds, level.available_stake) for level in levels]
+    residual: list[BookLevel] = []
+    buckets: dict[str, Decimal] = {}
+    for odds, available in observed:
+        token = odds_token(odds)
+        buckets[token] = buckets.get(token, ZERO) + available
+    for token in sorted(buckets, key=Decimal, reverse=True):
+        left = residual_native(buckets[token], consumed.get((*identity, token), ZERO))
+        if left > 0:
+            residual.append(BookLevel(decimal_odds=Decimal(token), available_stake=left))
+    return residual

@@ -108,6 +108,13 @@ class ExecutionCapitalEvidence:
     solver_model: str | None
     hard_constraints: tuple[str, ...] = ()
     paper_only: bool = True
+    max_event_gbp: str | None = None
+    event_deployed_gbp: str | None = None
+    event_room_gbp: str | None = None
+    max_opportunity_gbp: str | None = None
+    opportunity_deployed_gbp: str | None = None
+    opportunity_room_gbp: str | None = None
+    max_one_time_gbp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +162,7 @@ class ExecutionSnapshot:
     minimum_net_edge_scope: str | None = None
     capital_constraint: ExecutionCapitalEvidence | None = None
     timing: ExecutionTiming | None = None
+    execution_cycle: int = 0
 
     def __post_init__(self) -> None:
         if not self.snapshot_id:
@@ -194,6 +202,7 @@ class ExecutionSnapshot:
         return " ".join(
             (
                 f"snapshot_id={self.snapshot_id}",
+                f"execution_cycle={self.execution_cycle}",
                 f"skew_ms={self.skew_ms if self.skew_ms is not None else 'unknown'}",
                 f"max_skew_ms={self.max_skew_ms}",
                 f"earliest_retrieval_at={earliest.isoformat() if earliest else 'unknown'}",
@@ -208,6 +217,7 @@ class ExecutionSnapshot:
 
         payload = {
             "snapshot_id": self.snapshot_id,
+            "execution_cycle": self.execution_cycle,
             "catalogue_row_id": self.catalogue_row_id,
             "canonical_market_id": self.canonical_market_id,
             "started_at": self.started_at.isoformat(),
@@ -261,6 +271,23 @@ class ExecutionSnapshot:
             ],
         }
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def execution_snapshot_id_from_json(raw: str | None) -> str | None:
+    """Snapshot id stored on a fill plan. None when the plan has no Price-2 record."""
+
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("snapshot_id")
+    if not value:
+        return None
+    return str(value)
 
 
 def _settings_int(settings: Any, name: str, default: int) -> int:
@@ -467,6 +494,13 @@ def _capital_evidence(allocation: Any) -> ExecutionCapitalEvidence | None:
         solver_model=_text(getattr(allocation, "solver_model", None)),
         hard_constraints=constraints,
         paper_only=bool(getattr(allocation, "paper_only", True)),
+        max_event_gbp=_text(getattr(allocation, "max_event_gbp", None)),
+        event_deployed_gbp=_text(getattr(allocation, "event_deployed_gbp", None)),
+        event_room_gbp=_text(getattr(allocation, "event_room_gbp", None)),
+        max_opportunity_gbp=_text(getattr(allocation, "max_opportunity_gbp", None)),
+        opportunity_deployed_gbp=_text(getattr(allocation, "opportunity_deployed_gbp", None)),
+        opportunity_room_gbp=_text(getattr(allocation, "opportunity_room_gbp", None)),
+        max_one_time_gbp=_text(getattr(allocation, "max_one_time_gbp", None)),
     )
 
 
@@ -525,6 +559,13 @@ def _capital_json(item: ExecutionCapitalEvidence | None) -> dict[str, Any] | Non
         "solver_model": item.solver_model,
         "hard_constraints": list(item.hard_constraints),
         "paper_only": item.paper_only,
+        "max_event_gbp": item.max_event_gbp,
+        "event_deployed_gbp": item.event_deployed_gbp,
+        "event_room_gbp": item.event_room_gbp,
+        "max_opportunity_gbp": item.max_opportunity_gbp,
+        "opportunity_deployed_gbp": item.opportunity_deployed_gbp,
+        "opportunity_room_gbp": item.opportunity_room_gbp,
+        "max_one_time_gbp": item.max_one_time_gbp,
     }
 
 

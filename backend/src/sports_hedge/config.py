@@ -391,7 +391,12 @@ class Settings(BaseSettings):
     # COMPETITION_SEASON qualification fails closed and never inherits fixture
     # min_net_edge. Do not invent a numeric default here.
     outright_min_net_edge: float | None = Field(default=None, ge=0, lt=1)
+    # Deprecated. Runtime PAPER placement uses max_event_gbp, max_opportunity_gbp
+    # and max_one_time_gbp. Fresh installs inherit this ceiling for all three.
     max_allocated_per_trade_gbp: float = Field(default=1000.0, gt=0)
+    max_event_gbp: float | None = Field(default=None, gt=0)
+    max_opportunity_gbp: float | None = Field(default=None, gt=0)
+    max_one_time_gbp: float | None = Field(default=None, gt=0)
     max_slippage_bps: int = Field(default=25, ge=0)
     max_event_exposure_gbp: float = Field(default=1000.0, gt=0)
     max_total_exposure_gbp: float = Field(default=5000.0, gt=0)

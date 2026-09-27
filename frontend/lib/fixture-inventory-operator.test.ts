@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { PreparablePaperOpportunity, Venue, VenueMarketFacts, VenueQuoteFact } from "./api";
-import { compactQuoteLines, compactVenueMeta, failingVenueChecks } from "./fixture-inventory-display";
+import {
+  compactQuoteLines,
+  compactVenueMeta,
+  failingVenueChecks,
+  settlementLabel,
+} from "./fixture-inventory-display";
 import {
   decisionBadgeClass,
   inventoryCardViewModel,
@@ -376,6 +381,22 @@ describe("compact venue mini-cards", () => {
     const healthy = facts("polymarket", yesNo, { fx_status: "known", settlement_complete: true });
     expect(compactVenueMeta(healthy)).not.toContain("FX");
     expect(failingVenueChecks(healthy).join(" ")).not.toContain("Settlement fingerprint complete");
+  });
+
+  it("names PAPER-assumed NFL settlement instead of an unknown fingerprint", () => {
+    const paper = facts("kalshi", yesNo, {
+      settlement_complete: false,
+      settlement_status: "paper_assumed",
+      settlement_provenance: "exceptional_settlement_mismatch_possible",
+    });
+    expect(settlementLabel(paper)).toContain("PAPER-assumed settlement");
+    expect(settlementLabel(paper)).not.toContain("incomplete/unknown");
+    expect(failingVenueChecks(paper).join(" ")).not.toContain("incomplete/unknown");
+    const unknown = facts("kalshi", yesNo, {
+      settlement_complete: false,
+      settlement_status: "incomplete",
+    });
+    expect(failingVenueChecks(unknown)).toContain("Settlement fingerprint incomplete/unknown");
   });
 });
 

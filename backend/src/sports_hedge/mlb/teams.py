@@ -6,6 +6,7 @@ current aliases. This registry is not consulted for soccer or NFL.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from sports_hedge.normalization.text import AliasRegistry, normalize_text
@@ -112,6 +113,47 @@ _HISTORICAL_REJECT = frozenset(
 )
 
 
+def _is_short_code(value: str) -> bool:
+    token = value.strip()
+    return bool(token) and " " not in token and token.isalpha() and token.upper() == token and len(token) <= 4
+
+
+def _provider_nicknames(canonical: str, aliases: tuple[str, ...]) -> tuple[str, ...]:
+    """Nicknames used beside a provider abbreviation, such as ``Red Sox``."""
+
+    words = canonical.split()
+    found: list[str] = []
+    for alias in aliases:
+        alias_words = alias.split()
+        if not alias_words or alias == canonical:
+            continue
+        if words[-len(alias_words) :] != alias_words:
+            continue
+        if _is_short_code(alias):
+            continue
+        found.append(alias)
+    for alias in aliases:
+        if " " in alias or alias == canonical or _is_short_code(alias):
+            continue
+        if alias not in found:
+            found.append(alias)
+    if not found:
+        found.append(words[-1])
+    unique: list[str] = []
+    for item in found:
+        if item not in unique:
+            unique.append(item)
+    return tuple(unique)
+
+
+def _provider_codes(abbreviation: str, aliases: tuple[str, ...]) -> tuple[str, ...]:
+    codes = [abbreviation]
+    for alias in aliases:
+        if _is_short_code(alias) and alias not in codes:
+            codes.append(alias)
+    return tuple(codes)
+
+
 def _build_registry() -> tuple[AliasRegistry, dict[str, str], frozenset[str]]:
     registry = AliasRegistry()
     abbrev_by_canonical: dict[str, str] = {}
@@ -124,6 +166,9 @@ def _build_registry() -> tuple[AliasRegistry, dict[str, str], frozenset[str]]:
         registry.add(club.abbreviation, club.canonical)
         for alias in club.aliases:
             registry.add(alias, club.canonical)
+        for code in _provider_codes(club.abbreviation, club.aliases):
+            for nickname in _provider_nicknames(club.canonical, club.aliases):
+                registry.add(f"{code} {nickname}", club.canonical)
     return registry, abbrev_by_canonical, frozenset(canonicals)
 
 
@@ -180,6 +225,57 @@ def require_resolved_mlb_team(value: str | None) -> str:
         reason = resolved.reason or "unresolved_mlb_team"
         raise ValueError(reason)
     return resolved.canonical
+
+
+def mlb_team_codes() -> tuple[str, ...]:
+    codes: list[str] = []
+    for club in _CLUBS:
+        for code in _provider_codes(club.abbreviation, club.aliases):
+            if code not in codes:
+                codes.append(code)
+    return tuple(codes)
+
+
+def split_concatenated_mlb_codes(blob: str) -> tuple[str, str] | None:
+    """Split ``STLPIT`` into ``(STL, PIT)`` only when exactly one code pair fits."""
+
+    codes = set(mlb_team_codes())
+    found: list[tuple[str, str]] = []
+    compact = str(blob or "").strip().upper()
+    for code in codes:
+        if compact.startswith(code):
+            rest = compact[len(code) :]
+            if rest in codes and rest != code:
+                found.append((code, rest))
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+_MLB_EVENT_TEAMS = re.compile(
+    r"^(?:KXMLBGAME|KXMLBTOTAL)-((?:\d{2}[A-Z]{3}\d{6})|(?:\d{2}[A-Z]{3}\d{2}))([A-Z]{4,8})$"
+)
+
+
+def mlb_away_home_from_event_ticker(ticker: str | None) -> tuple[str, str] | None:
+    """Away then home from an approved MLB event ticker, or None.
+
+    Captured tickers are ``KXMLBGAME-26SEP241235STLPIT``: away St. Louis, home Pittsburgh.
+    """
+
+    match = _MLB_EVENT_TEAMS.match(str(ticker or "").strip().upper())
+    if match is None:
+        return None
+    pair = split_concatenated_mlb_codes(match.group(2))
+    if pair is None:
+        return None
+    away = resolve_mlb_team(pair[0])
+    home = resolve_mlb_team(pair[1])
+    if not away.ok or not home.ok or not away.canonical or not home.canonical:
+        return None
+    if away.canonical == home.canonical:
+        return None
+    return away.canonical, home.canonical
 
 
 def franchise_short_name(team: str) -> str:

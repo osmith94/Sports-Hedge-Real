@@ -2,7 +2,11 @@
 
 ## Principle
 
-Sports Hedge manages capital in native venue/currency pools and treats **capital availability, lock duration, executable liquidity and capital recycling as first-class arbitrage economics**. Exceptional arbitrage opportunities may be escalated for explicit manual capital approval, but no opportunity should monopolise scarce capital merely because its headline edge or displayed depth is large.
+Sports Hedge manages capital in native venue/currency pools and treats **capital availability, lock duration, executable liquidity and capital recycling as visible arbitrage economics**. Exceptional arbitrage opportunities may be escalated for explicit manual capital approval.
+
+Discretionary PAPER placement deploys the minimum of remaining Max Event, remaining Max Opportunity, Max One-Time, genuine incremental executable liquidity, actual spendable native Treasury, and a valid complete hedge. Max Event counts capital currently locked on that canonical event. A positive lock counts for PENDING, OPEN, PARTIAL and AWAITING_MANUAL_EXTERNAL. A missing lock contributes zero. Closed or released capital contributes zero.
+
+Hidden reserve, pool-fraction, fixture-concentration, per-trade and recommendation haircuts do not size that amount. Risk score and fill confidence may remain telemetry. They do not size or reject an otherwise qualifying paper placement. Fail-closed gates still apply: structural admission, settlement equivalence, fresh quotes, complete books, known fees, known FX, minimum net edge, a valid complete hedge, and a real native Treasury balance.
 
 ## Automated Liquidity Pools
 
@@ -54,13 +58,13 @@ Manual override capital:
 
 ## Recommended size
 
-The recommendation is constrained by the **limiting executable leg**, then reduced by configured safety, liquidity, risk, reserve and operator limits.
+The deployed size is the formula above. It is not a recommendation that is then haircut.
 
-**Executable depth** here means Core Tenet 18 **taker** liquidity: current opposing size we can consume now at a known price. Displayed, resting, or passive maker/lay quotes are not executable depth and must not inflate recommended size. Tenet 18 is the authoritative home for taker vs maker fill semantics. Execution-risk scoring is a soft ranking input and runs only after those hard Tenet-18 executability gates.
+**Executable depth** here means Core Tenet 18 **taker** liquidity: current opposing size we can consume now at a known price, after previously PAPER-consumed liquidity has been subtracted. Displayed, resting, or passive maker/lay quotes are not executable depth. Tenet 18 is the authoritative home for taker vs maker fill semantics.
 
-If the mispriced leg has £500 executable and the hedge leg has £5,000, the validated size is constrained by the £500 leg before any safety haircut.
+If the mispriced leg has £500 executable and the hedge leg has £5,000, the validated size is constrained by the £500 leg, then by the three operator caps and by each venue's actual spendable balance. The complete hedge is scaled together.
 
-Available venue balance is also a hard bound, but the system should not automatically deploy the entire remaining pool when depth permits it. Sizing must preserve configured reserves and account for concentration, execution risk, quote survivability, manual-external latency and other simultaneous or likely opportunities.
+Native venue balances stay separate. A surplus on one venue does not fund another. Locked capital cannot be spent again. Treasury availability is the spendable native balance.
 
 The UI should expose:
 
@@ -118,7 +122,9 @@ Priority Alerts should support provider-neutral routing such as in-app, email, p
 - Are available, locked and conditionally releasable capital distinguished without double counting?
 - Is manual override explicitly distinguishable from auto-pool capital?
 - Is recommended size based on limiting Tenet-18 taker executable depth rather than headline, displayed, or passive/maker quotes?
-- Does sizing preserve reserve, open-capital-fraction and concentration constraints rather than blindly consuming the full pool? The standard PAPER allocator must not reject solely because N opportunities are already open.
+- Is discretionary paper size the minimum of remaining Max Event, remaining Max Opportunity, Max One-Time, Tenet-18 taker depth, actual native Treasury, and a valid complete hedge?
+- Does any hidden reserve, pool-fraction, concentration, per-trade cap, risk score, or recommendation haircut reduce that amount? It must not.
+- Does Max Event count positive locks on the canonical event regardless of lifecycle label, and exclude closed or released capital?
 - Are expected lock duration and capital opportunity cost considered where relevant?
 - Does an early unwind use executable reverse-side economics after costs rather than spread convergence alone?
 - Is fill confidence described as an estimate, not a guarantee?

@@ -30,6 +30,10 @@ class AllocationConstraintKind(StrEnum):
     NATIVE_VENUE_BALANCE = "native_venue_balance"
     VENUE_LIMIT = "venue_limit"
     PER_OPPORTUNITY_LIMIT = "per_opportunity_limit"
+    MAX_EVENT = "max_event"
+    MAX_OPPORTUNITY = "max_opportunity"
+    MAX_ONE_TIME = "max_one_time"
+    MISSING_REPORTING_GBP = "missing_reporting_gbp"
     MAX_POOL_FRACTION = "max_pool_fraction"
     FIXTURE_CONCENTRATION = "fixture_concentration"
     PORTFOLIO_CAP = "portfolio_cap"
@@ -82,6 +86,9 @@ class BankrollAllocationPolicy(BaseModel):
     max_open_capital_fraction: Decimal = Field(default=Decimal("0.70"), gt=0, le=1)
     max_same_fixture_capital_fraction: Decimal = Field(default=Decimal("0.40"), gt=0, le=1)
     per_opportunity_limit_reporting: Decimal | None = Field(default=None, gt=0)
+    max_event_reporting: Decimal | None = Field(default=None, gt=0)
+    max_opportunity_reporting: Decimal | None = Field(default=None, gt=0)
+    max_one_time_reporting: Decimal | None = Field(default=None, gt=0)
     venue_limits_native: dict[VenueName, Decimal] = Field(default_factory=dict)
     portfolio_cap_reporting: Decimal | None = Field(default=None, gt=0)
     safety_haircut: Decimal = Field(default=Decimal("0.05"), ge=0, lt=1)
@@ -149,6 +156,7 @@ class AllocationBalance(BaseModel):
 class OpenPositionExposure(BaseModel):
     opportunity_id: str
     canonical_event_id: str | None = None
+    canonical_market_id: str | None = None
     capital_native: list[VenueNativeAmount] = Field(default_factory=list)
     capital_reporting: Decimal | None = Field(default=None, ge=0)
 
@@ -193,6 +201,10 @@ class AllocationRequest(BaseModel):
     solver_model: str
     is_arbitrage: bool
     canonical_event_id: str | None = None
+    canonical_market_id: str | None = None
+    opportunity_id: str | None = None
+    event_deployed_reporting: Decimal | None = Field(default=None, ge=0)
+    opportunity_deployed_reporting: Decimal | None = Field(default=None, ge=0)
     roi: Decimal = Field(ge=0)
     guaranteed_profit_at_solver_size: Decimal
     committed_capital_at_solver_size: Decimal = Field(ge=0)
@@ -214,6 +226,7 @@ class AllocationRequest(BaseModel):
     recent_volatility_bps: Decimal | None = Field(default=None, ge=0)
     reporting_currency: str = "GBP"
     require_internal_balances: bool = True
+    discretionary_placement: bool = False
 
     @model_validator(mode="after")
     def reject_zero_stake_legs(self) -> "AllocationRequest":
@@ -325,6 +338,13 @@ class AllocationResult(BaseModel):
     rejection_reason: str | None = None
     scale_maximum: Decimal = Decimal("0")
     scale_recommended: Decimal = Decimal("0")
+    max_event_gbp: Decimal | None = None
+    event_deployed_gbp: Decimal | None = None
+    event_room_gbp: Decimal | None = None
+    max_opportunity_gbp: Decimal | None = None
+    opportunity_deployed_gbp: Decimal | None = None
+    opportunity_room_gbp: Decimal | None = None
+    max_one_time_gbp: Decimal | None = None
     paper_only: bool = True
     places_orders: bool = False
     data_kind: Literal["modelled"] = "modelled"

@@ -234,6 +234,44 @@ def complete_family_keys(evidence: FamilyDiscoveryCompleteness) -> frozenset[str
     return frozenset(complete - set(evidence.kalshi_incomplete_family_keys))
 
 
+def kalshi_event_identity_suffix(ticker: str | None) -> str | None:
+    """Date/team body shared by sibling Kalshi series for one fixture.
+
+    ``KXNFLGAME-26SEP27KCMIA`` and ``KXNFLSPREAD-26SEP27KCMIA`` share
+    ``26SEP27KCMIA``. Market tickers with a further leg are reduced to that body.
+    """
+
+    parts = str(ticker or "").strip().upper().split("-")
+    if len(parts) < 2 or not parts[1]:
+        return None
+    return parts[1]
+
+
+def incomplete_families_for_failed_sibling_normalization(
+    present_event_tickers: list[str] | tuple[str, ...],
+    failed_event_tickers: list[str] | tuple[str, ...],
+) -> frozenset[str]:
+    """Families whose sibling event failed normalization for a fixture already in hand.
+
+    A failed Spread/Total normalization must stay retryable. It must not make
+    that family look authoritatively absent, and it must not drop an unrelated
+    family that normalized.
+    """
+
+    present = {
+        suffix
+        for suffix in (kalshi_event_identity_suffix(ticker) for ticker in present_event_tickers)
+        if suffix
+    }
+    incomplete: set[str] = set()
+    for ticker in failed_event_tickers:
+        suffix = kalshi_event_identity_suffix(ticker)
+        family = family_key_from_kalshi_series(ticker)
+        if suffix and family and suffix in present:
+            incomplete.add(family)
+    return frozenset(incomplete)
+
+
 class CataloguePairIdentity:
     """Exact registered venue identity for one canonical key.
 

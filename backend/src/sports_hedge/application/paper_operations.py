@@ -18,14 +18,26 @@ from sports_hedge.accounting.paper_journal import (
 )
 from sports_hedge.accounting.strategy_books import DimensionedPosting
 from sports_hedge.application.active_trade_recovery import (
+    consumed_native_by_level,
+    liquidity_evidence_for_levels,
+    native_leg_identity,
     recovery_legs_from_plan,
+    residual_book_levels,
     residual_exposure_gbp,
     subtract_consumed_depth,
 )
 from sports_hedge.application.active_trade_lane import (
     active_trade_cadence_seconds,
     get_active_trade_registry,
-    remaining_trade_room_gbp,
+)
+from sports_hedge.paper.placement_room import (
+    REPORTING_GBP_QUANTUM,
+    PlacementValuationError,
+    current_event_deployment_gbp,
+    discretionary_cycle_cap_gbp,
+    largest_scale_not_exceeding,
+    recovery_capital_room_gbp,
+    remaining_room_gbp,
 )
 from sports_hedge.application.executable_liquidity import decision_net_edge
 from sports_hedge.application.ftts_alert_bridge import attach_ftts_ordinary_depth
@@ -274,6 +286,105 @@ def _is_expected_autofill_gate(exc: BaseException) -> bool:
     if reason in _AUTOFILL_GATE_REASONS:
         return True
     return reason.startswith("allocation_failed:")
+
+
+# Sub-penny discretionary plans are not committed. Distinct from a sizing
+# failure (missing FX, empty depth, treasury) so the cycle can stop as an
+# allocation ceiling rather than as missing liquidity.
+_NO_MATERIAL_TRANCHE = object()
+
+
+def _iterative_fill_stop(trade: PaperTrade) -> str:
+    """Why a fresh accepted snapshot did not add a tranche."""
+
+    from sports_hedge.application.execution_reprice import (
+        CYCLE_ALLOCATION_CEILING,
+        CYCLE_BELOW_MIN_NET,
+        CYCLE_NO_INCREMENTAL_LIQUIDITY,
+    )
+
+    phase = trade.active_trade_phase
+    if phase is PaperActiveTradePhase.MONITORING_CAP_REACHED:
+        return CYCLE_ALLOCATION_CEILING
+    if phase is PaperActiveTradePhase.EXIT_MANAGEMENT:
+        return CYCLE_BELOW_MIN_NET
+    return CYCLE_NO_INCREMENTAL_LIQUIDITY
+
+
+def _top_up_snapshot_id(plan: PaperFillPlan, kind: PaperTradeTrancheKind) -> str | None:
+    """Snapshot that must be stored on a discretionary top-up before commit.
+
+    Recovery hedges are not discretionary accumulation and keep their own ids.
+    """
+
+    if kind is not PaperTradeTrancheKind.TOP_UP or not plan.execution_authoritative:
+        return None
+    from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+    return execution_snapshot_id_from_json(plan.execution_snapshot_json)
+
+
+def _scale_decision_depth(
+    decision: PaperScanDecision,
+    residual_by_identity: dict,
+) -> PaperScanDecision:
+    """Scale solver stakes to residual displayed depth so allocation cannot exceed it."""
+
+    scan = decision.depth_scan
+    if scan is None or not scan.solution.is_arbitrage:
+        return decision
+    ratios: list[Decimal] = []
+    residual_for_quote: list[Decimal | None] = []
+    for quote in scan.selected_quotes:
+        venue = quote.venue.value if hasattr(quote.venue, "value") else str(quote.venue)
+        identity = (
+            venue,
+            str(quote.source_market_id),
+            str(quote.source_runner_id or ""),
+            str(quote.outcome),
+        )
+        residual = residual_by_identity.get(identity)
+        residual_for_quote.append(residual)
+        if residual is None or quote.cumulative_depth <= 0:
+            continue
+        ratios.append(min(Decimal("1"), residual / quote.cumulative_depth))
+    if not ratios:
+        return decision
+    ratio = min(ratios)
+    if ratio <= 0:
+        return decision
+    scaled_stakes = [
+        stake.model_copy(
+            update={
+                "stake": stake.stake * ratio,
+                "state_return": stake.state_return * ratio,
+            }
+        )
+        for stake in scan.solution.stakes
+    ]
+    solution = scan.solution.model_copy(
+        update={
+            "stakes": scaled_stakes,
+            "total_stake": scan.solution.total_stake * ratio,
+            "guaranteed_return": scan.solution.guaranteed_return * ratio,
+            "guaranteed_profit": scan.solution.guaranteed_profit * ratio,
+        }
+    )
+    quotes = []
+    for quote, residual in zip(scan.selected_quotes, residual_for_quote, strict=True):
+        depth = quote.cumulative_depth * ratio
+        if residual is not None:
+            depth = min(depth, residual)
+        if depth <= 0:
+            depth = quote.cumulative_depth
+        quotes.append(quote.model_copy(update={"cumulative_depth": depth}))
+    return decision.model_copy(
+        update={
+            "depth_scan": scan.model_copy(
+                update={"solution": solution, "selected_quotes": quotes}
+            )
+        }
+    )
 
 
 def _autofill_begin_rejection_reason(exc: BaseException) -> str:
@@ -1295,6 +1406,219 @@ class PaperOperationsService:
         noted = self._note_repeat_observation(trade, simulated_at)
         return self._result_from_existing_trade(noted, simulated_at)
 
+    def fill_from_execution_snapshot(
+        self,
+        opportunity_id: str,
+        decision: PaperScanDecision,
+        *,
+        snapshot_id: str,
+        snapshot_json: str,
+        pricing_lane: str | None = None,
+    ) -> str:
+        """Append one tranche from a new accepted Price-2 snapshot, or refuse it.
+
+        The decision is the only economics used. A snapshot that already has a
+        tranche does not fill again. Capital, min-net, and max-per-trade gates
+        are the existing top-up gates.
+        """
+
+        from sports_hedge.application.execution_reprice import (
+            CYCLE_DUPLICATE,
+            CYCLE_FILLED,
+            CYCLE_NOT_OPEN,
+            PHASE_FILL_ATTEMPTED,
+            log_execution_phase,
+        )
+
+        with self._fill_persist_lock:
+            trade = self._get_trade_by_opportunity(opportunity_id)
+            if trade is None or trade.state is not PaperTradeState.OPEN:
+                return CYCLE_NOT_OPEN
+            if self._snapshot_id_on_trade(trade, snapshot_id):
+                return CYCLE_DUPLICATE
+            if trade.unresolved_recovery or trade.active_trade_phase in {
+                PaperActiveTradePhase.EXIT_MANAGEMENT,
+                PaperActiveTradePhase.MONITORING_CAP_REACHED,
+                PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+            }:
+                return CYCLE_NOT_OPEN
+            plan = self._plan_from_decision(
+                decision,
+                opportunity_id,
+                trade.provenance,
+                pricing_lane=pricing_lane,
+            )
+            plan = plan.model_copy(
+                update={
+                    "execution_authoritative": True,
+                    "execution_snapshot_json": snapshot_json,
+                }
+            )
+            evidence = self._liquidity_evidence(plan, trade)
+            before_ids = {item.tranche_id for item in trade.tranches}
+            when = datetime.now(UTC)
+            log_execution_phase(
+                PHASE_FILL_ATTEMPTED,
+                opportunity_id=opportunity_id,
+                snapshot=snapshot_id,
+            )
+            self._maybe_top_up_open_trade_locked(
+                trade,
+                now=when,
+                plan=plan,
+                require_current_plan=True,
+            )
+            loaded = self.trades.get(trade.trade_id) if self.trades is not None else trade
+            if loaded is None:
+                return CYCLE_NOT_OPEN
+            added = [item for item in loaded.tranches if item.tranche_id not in before_ids]
+            if not added:
+                if self._snapshot_id_on_trade(loaded, snapshot_id):
+                    return CYCLE_DUPLICATE
+                outcome = _iterative_fill_stop(loaded)
+                self._link_execution_snapshot(
+                    snapshot_id,
+                    trade_id=loaded.trade_id,
+                    tranche_id=None,
+                    cycle_outcome=outcome,
+                    liquidity=evidence,
+                    cumulative_capital_gbp=str(loaded.capital_locked_gbp or Decimal("0")),
+                )
+                return outcome
+            tranche = added[-1]
+            self._plans[opportunity_id] = plan
+            self._link_execution_snapshot(
+                snapshot_id,
+                trade_id=loaded.trade_id,
+                tranche_id=tranche.tranche_id,
+                cycle_outcome=CYCLE_FILLED,
+                liquidity=evidence,
+                cumulative_capital_gbp=str(loaded.capital_locked_gbp or Decimal("0")),
+            )
+            return CYCLE_FILLED
+
+    def _snapshot_id_on_trade(self, trade: PaperTrade, snapshot_id: str) -> bool:
+        return any(
+            item.execution_snapshot_id == snapshot_id or item.idempotency_key == snapshot_id
+            for item in trade.tranches
+        )
+
+    def _discretionary_snapshot_authorised(self, trade: PaperTrade, plan: PaperFillPlan) -> bool:
+        """Ordinary accumulation requires a new accepted Price-2 snapshot."""
+
+        if not plan.execution_authoritative:
+            return False
+        from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+        snapshot_id = execution_snapshot_id_from_json(plan.execution_snapshot_json)
+        if not snapshot_id:
+            return False
+        return not self._snapshot_id_on_trade(trade, snapshot_id)
+
+    def _execution_snapshot_already_filled(self, trade: PaperTrade, plan: PaperFillPlan) -> bool:
+        if not plan.execution_authoritative:
+            return False
+        from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+        snapshot_id = execution_snapshot_id_from_json(plan.execution_snapshot_json)
+        if not snapshot_id:
+            return False
+        return self._snapshot_id_on_trade(trade, snapshot_id)
+
+    def _link_execution_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        trade_id: str,
+        tranche_id: str | None,
+        cycle_outcome: str,
+        liquidity: list[dict[str, str]] | None = None,
+        cumulative_capital_gbp: str | None = None,
+    ) -> None:
+        linker = getattr(self.watchlist, "link_execution_snapshot_fill", None)
+        if not callable(linker):
+            return
+        linker(
+            snapshot_id=snapshot_id,
+            trade_id=trade_id,
+            tranche_id=tranche_id,
+            cycle_outcome=cycle_outcome,
+            liquidity=liquidity,
+            cumulative_capital_gbp=cumulative_capital_gbp,
+        )
+
+    def _liquidity_evidence(self, plan: PaperFillPlan, trade: PaperTrade) -> list[dict[str, str]]:
+        legs = [
+            (
+                native_leg_identity(leg),
+                [(level.decimal_odds, level.available_stake) for level in leg.levels],
+            )
+            for leg in plan.legs
+            if leg.requested_stake > 0
+        ]
+        return liquidity_evidence_for_levels(legs, trade)
+
+    def _clamp_plan_to_residual_depth(
+        self,
+        trade: PaperTrade,
+        plan: PaperFillPlan,
+    ) -> PaperFillPlan | None:
+        """Shrink this snapshot's book by stake already PAPER-filled at the same odds."""
+
+        consumed = consumed_native_by_level(trade)
+        clamped_legs: list[PaperOpportunityLeg] = []
+        residual_by_identity: dict[tuple[str, str, str, str], Decimal] = {}
+        for leg in plan.legs:
+            if leg.requested_stake <= 0:
+                clamped_legs.append(leg)
+                continue
+            identity = native_leg_identity(leg)
+            levels = residual_book_levels(leg.levels, identity, consumed)
+            depth = sum((level.available_stake for level in levels), Decimal("0"))
+            if depth <= 0:
+                return None
+            residual_by_identity[identity] = depth
+            clamped_legs.append(
+                leg.model_copy(
+                    update={
+                        "levels": levels,
+                        "requested_stake": min(leg.requested_stake, depth),
+                    }
+                )
+            )
+        decision = _scale_decision_depth(plan.decision, residual_by_identity)
+        return plan.model_copy(update={"legs": clamped_legs, "decision": decision})
+
+    def _bind_opening_execution_snapshot(
+        self,
+        trade: PaperTrade,
+        plan: PaperFillPlan,
+    ) -> PaperTrade:
+        from sports_hedge.application.execution_reprice import CYCLE_FILLED
+        from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+        snapshot_id = execution_snapshot_id_from_json(plan.execution_snapshot_json)
+        if not snapshot_id:
+            return trade
+        changed = False
+        for tranche in trade.tranches:
+            if (
+                tranche.kind is PaperTradeTrancheKind.OPENING
+                and tranche.execution_snapshot_id != snapshot_id
+            ):
+                tranche.execution_snapshot_id = snapshot_id
+                changed = True
+        if changed and self.trades is not None:
+            trade = self.trades.save(trade)
+        self._link_execution_snapshot(
+            snapshot_id,
+            trade_id=trade.trade_id,
+            tranche_id=OPENING_TRANCHE_ID,
+            cycle_outcome=CYCLE_FILLED,
+            cumulative_capital_gbp=str(trade.capital_locked_gbp or Decimal("0")),
+        )
+        return trade
+
     def maybe_top_up_open_trade(
         self,
         trade: PaperTrade,
@@ -1339,10 +1663,11 @@ class PaperOperationsService:
         else:
             plan = plan or self._plans.get(trade.opportunity_id)
         operator = effective_operator_scanner_settings(self.settings)
-        cap = operator.max_allocated_per_trade_gbp
         trigger = plan.decision.minimum_net_edge if plan is not None else None
         if plan is None:
             return None
+        if self._execution_snapshot_already_filled(trade, plan):
+            return self._result_from_existing_trade(trade, when)
         recovering = bool(
             trade.unresolved_recovery
             or trade.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
@@ -1358,6 +1683,8 @@ class PaperOperationsService:
                 payload={"residual_gbp": trade.residual_exposure_gbp},
             )
             return self._retry_entry_recovery(trade, plan, when, config)
+        if not self._discretionary_snapshot_authorised(trade, plan):
+            return self._result_from_existing_trade(trade, when)
         current_net = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
         if current_net is None or not qualifies_min_net_arb(current_net, trigger):
             trade.active_trade_phase = PaperActiveTradePhase.EXIT_MANAGEMENT
@@ -1384,14 +1711,40 @@ class PaperOperationsService:
                 },
             )
             return self._result_from_existing_trade(trade, when)
-        room = remaining_trade_room_gbp(trade, cap)
-        if room <= 0:
+        clamped = self._clamp_plan_to_residual_depth(trade, plan)
+        if clamped is None:
+            return self._result_from_existing_trade(trade, when)
+        plan = clamped
+        try:
+            event_deployed = current_event_deployment_gbp(
+                self.list_active_trades(), trade.canonical_event_id or ""
+            )
+        except PlacementValuationError as exc:
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.NO_ACTION,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_NO_ROOM,
+                operator_copy="Placement GBP evidence missing; no new risk added",
+                occurred_at=when,
+                dedupe_key=f"missing-gbp:{trade.trade_id}:{when.isoformat()}",
+                payload={"reason": exc.reason},
+            )
+            return self._result_from_existing_trade(trade, when)
+        opportunity_locked = trade.capital_locked_gbp or Decimal("0")
+        event_room = remaining_room_gbp(operator.max_event_gbp, event_deployed)
+        opportunity_room = remaining_room_gbp(operator.max_opportunity_gbp, opportunity_locked)
+        if event_room <= 0 or opportunity_room <= 0:
+            limiting = "max_opportunity" if opportunity_room <= 0 else "max_event"
             trade.active_trade_phase = PaperActiveTradePhase.MONITORING_CAP_REACHED
             self._append_trade_event_once(
                 trade,
                 event_type=PaperTradeAuditEventType.TOP_UP_CAP_REACHED,
                 occurred_at=when,
-                detail=f"locked={trade.capital_locked_gbp} cap={cap}; monitoring continues",
+                detail=(
+                    f"locked={opportunity_locked} "
+                    f"opportunity_room={opportunity_room} event_room={event_room} "
+                    f"limiting={limiting}; monitoring continues"
+                ),
             )
             if self.trades is not None:
                 trade = self.trades.save(trade)
@@ -1399,13 +1752,58 @@ class PaperOperationsService:
                 trade,
                 event_type=ActiveTradeEventType.CAP_REACHED,
                 reason_code=ActiveTradeReasonCode.NO_ACTION_CAP_REACHED,
-                operator_copy="Cumulative max/trade reached; 5s monitoring continues",
+                operator_copy="Event or opportunity placement room is exhausted; monitoring continues",
                 occurred_at=when,
                 dedupe_key=f"cap-reached:{trade.trade_id}",
-                payload={"locked_gbp": trade.capital_locked_gbp, "cap": cap},
+                payload={
+                    "locked_gbp": opportunity_locked,
+                    "event_deployed_gbp": event_deployed,
+                    "max_event_gbp": operator.max_event_gbp,
+                    "event_room_gbp": event_room,
+                    "max_opportunity_gbp": operator.max_opportunity_gbp,
+                    "opportunity_room_gbp": opportunity_room,
+                    "max_one_time_gbp": operator.max_one_time_gbp,
+                    "limiting_constraint": limiting,
+                },
             )
             return self._result_from_existing_trade(trade, when)
-        incremental = self._size_incremental_tranche(trade, plan, remaining_gbp=room)
+        incremental = self._size_incremental_tranche(
+            trade,
+            plan,
+            event_deployed_gbp=event_deployed,
+            event_room_gbp=event_room,
+            opportunity_room_gbp=opportunity_room,
+        )
+        if incremental is _NO_MATERIAL_TRANCHE:
+            trade.active_trade_phase = PaperActiveTradePhase.MONITORING_CAP_REACHED
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.TOP_UP_CAP_REACHED,
+                occurred_at=when,
+                detail=(
+                    f"locked={opportunity_locked} "
+                    f"opportunity_room={opportunity_room} event_room={event_room} "
+                    "sub_penny_tranche_not_committed; monitoring continues"
+                ),
+            )
+            if self.trades is not None:
+                trade = self.trades.save(trade)
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.CAP_REACHED,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_CAP_REACHED,
+                operator_copy="Sub-penny discretionary room is not deployable; monitoring continues",
+                occurred_at=when,
+                dedupe_key=f"cap-reached:{trade.trade_id}",
+                payload={
+                    "locked_gbp": opportunity_locked,
+                    "event_deployed_gbp": event_deployed,
+                    "event_room_gbp": event_room,
+                    "opportunity_room_gbp": opportunity_room,
+                    "reporting_quantum_gbp": REPORTING_GBP_QUANTUM,
+                },
+            )
+            return self._result_from_existing_trade(trade, when)
         if incremental is None:
             self.record_active_lifecycle_event(
                 trade,
@@ -1486,7 +1884,6 @@ class PaperOperationsService:
                 tranche_id=tranche_id,
             )
             return self._result_from_existing_trade(trade, when)
-        existing_gbp = trade.capital_locked_gbp or Decimal("0")
         filled_gbp = _filled_gbp(fills, mapped_legs, plan)
         if not complete and actual_fills:
             return self._commit_partial_buy_and_recover(
@@ -1502,8 +1899,6 @@ class PaperOperationsService:
                 config=fill_config,
                 kind="topup",
             )
-        if existing_gbp + incremental_gbp > cap:
-            return self._result_from_existing_trade(trade, when)
         commit = lambda: self._commit_top_up_tranche(
             trade,
             plan=plan,
@@ -1533,31 +1928,33 @@ class PaperOperationsService:
         trade: PaperTrade,
         plan: PaperFillPlan,
         *,
-        remaining_gbp: Decimal,
-    ) -> tuple[list[PaperOpportunityLeg], Any, Decimal] | None:
-        policy = policy_from_settings(self.settings).model_copy(
-            update={"per_opportunity_limit_reporting": remaining_gbp}
+        event_deployed_gbp: Decimal,
+        event_room_gbp: Decimal,
+        opportunity_room_gbp: Decimal,
+    ) -> tuple[list[PaperOpportunityLeg], Any, Decimal] | object | None:
+        operator = effective_operator_scanner_settings(self.settings)
+        cycle_cap = discretionary_cycle_cap_gbp(
+            event_room_gbp=event_room_gbp,
+            opportunity_room_gbp=opportunity_room_gbp,
+            max_one_time_gbp=operator.max_one_time_gbp,
         )
+        if cycle_cap < REPORTING_GBP_QUANTUM:
+            return _NO_MATERIAL_TRANCHE
+        policy = policy_from_settings(self.settings)
         balances = []
         if self.ledger is not None:
             balances = balances_from_treasury(self.ledger.treasury.snapshot())
         siblings = [
             item for item in self.list_active_trades() if item.trade_id != trade.trade_id
         ]
-        existing = trade.capital_locked_gbp or Decimal("0")
-        if policy.portfolio_cap_reporting is not None:
-            policy = policy.model_copy(
-                update={
-                    "portfolio_cap_reporting": max(
-                        Decimal("0"), policy.portfolio_cap_reporting - existing
-                    )
-                }
-            )
         request = request_from_paper_decision(
             plan.decision,
             policy=policy,
             balances=balances,
             open_positions=exposures_from_trades(siblings),
+            event_deployed_reporting=event_deployed_gbp,
+            opportunity_deployed_reporting=trade.capital_locked_gbp or Decimal("0"),
+            opportunity_id=trade.opportunity_id,
         )
         if request is None:
             return None
@@ -1578,21 +1975,65 @@ class PaperOperationsService:
             )
         except FillPlanMappingError:
             return None
+        tight = Decimal("1")
+        for leg in mapped:
+            visible = sum((level.available_stake for level in leg.levels), Decimal("0"))
+            if visible <= 0:
+                return None
+            if leg.requested_stake > visible:
+                tight = min(tight, visible / leg.requested_stake)
+        if tight < 1:
+            mapped = [
+                leg.model_copy(update={"requested_stake": leg.requested_stake * tight})
+                for leg in mapped
+            ]
         fx = {item.currency.upper(): item.gbp_per_unit for item in plan.fx_snapshots}
         fx.setdefault("GBP", Decimal("1"))
         incremental_gbp = Decimal("0")
         for leg in mapped:
-            rate = Decimal("1") if leg.currency.upper() == "GBP" else fx.get(leg.currency.upper(), Decimal("1"))
+            rate = fx.get(leg.currency.upper())
+            if leg.currency.upper() == "GBP":
+                rate = Decimal("1")
+            if rate is None or rate <= 0:
+                return None
             incremental_gbp += leg.requested_stake * rate
         if incremental_gbp <= 0:
             return None
-        if incremental_gbp > remaining_gbp:
-            scale = remaining_gbp / incremental_gbp
+        if incremental_gbp > cycle_cap:
+            unscaled = mapped
+
+            def _exceeds_cycle_cap(scale: Decimal) -> bool:
+                if scale <= 0:
+                    return False
+                total = Decimal("0")
+                for leg in unscaled:
+                    rate = fx.get(leg.currency.upper())
+                    if leg.currency.upper() == "GBP":
+                        rate = Decimal("1")
+                    if rate is None or rate <= 0:
+                        return True
+                    total += leg.requested_stake * scale * rate
+                return total > cycle_cap
+
+            scale = largest_scale_not_exceeding(Decimal("1"), _exceeds_cycle_cap)
+            if scale <= 0:
+                return _NO_MATERIAL_TRANCHE
             mapped = [
-                leg.model_copy(update={"requested_stake": (leg.requested_stake * scale)})
-                for leg in mapped
+                leg.model_copy(update={"requested_stake": leg.requested_stake * scale})
+                for leg in unscaled
             ]
-            incremental_gbp = remaining_gbp
+            incremental_gbp = Decimal("0")
+            for leg in mapped:
+                rate = fx.get(leg.currency.upper())
+                if leg.currency.upper() == "GBP":
+                    rate = Decimal("1")
+                if rate is None or rate <= 0:
+                    return None
+                incremental_gbp += leg.requested_stake * rate
+        if incremental_gbp > cycle_cap:
+            return None
+        if incremental_gbp < REPORTING_GBP_QUANTUM:
+            return _NO_MATERIAL_TRANCHE
         try:
             self._assert_spendable_treasury(mapped)
         except PaperOperationsError:
@@ -1685,6 +2126,7 @@ class PaperOperationsService:
         trade.last_updated_at = occurred_at
         if guaranteed is not None:
             trade.guaranteed_profit_gbp_at_open = existing_guaranteed + guaranteed
+        snapshot_id = _top_up_snapshot_id(plan, kind)
         trade.tranches.append(
             PaperTradeTranche(
                 tranche_id=tranche_id,
@@ -1694,7 +2136,8 @@ class PaperOperationsService:
                 capital_locked_gbp=incremental_gbp,
                 guaranteed_profit_gbp=guaranteed,
                 fill_ids=fill_ids,
-                idempotency_key=tranche_id,
+                idempotency_key=snapshot_id or tranche_id,
+                execution_snapshot_id=snapshot_id,
             )
         )
         trade.active_trade_phase = PaperActiveTradePhase.ACCUMULATING
@@ -1706,6 +2149,15 @@ class PaperOperationsService:
                 detail=f"tranche={tranche_id} incremental_gbp={incremental_gbp}",
             )
         )
+        if snapshot_id and plan.execution_snapshot_json:
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    event_id=f"{trade.trade_id}:execution_snapshot:{snapshot_id}",
+                    occurred_at=occurred_at,
+                    event_type=PaperTradeAuditEventType.EXECUTION_SNAPSHOT,
+                    detail=plan.execution_snapshot_json,
+                )
+            )
         if self.trades is None:
             return trade
         saved = self.trades.save(trade)
@@ -1843,7 +2295,9 @@ class PaperOperationsService:
     ) -> PaperTrade:
         residual = residual_exposure_gbp(trade)
         operator = effective_operator_scanner_settings(self.settings)
-        room = remaining_trade_room_gbp(trade, operator.max_allocated_per_trade_gbp)
+        room = recovery_capital_room_gbp(
+            operator.max_opportunity_gbp, trade.capital_locked_gbp
+        )
         recovery_id = f"recovery:{origin_tranche_id}"
         if any(item.tranche_id == recovery_id for item in trade.tranches):
             sequence = 1 + max((item.sequence for item in trade.tranches), default=0)
@@ -3829,6 +4283,7 @@ class PaperOperationsService:
             )
         if saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             self._ensure_opening_tranche(saved, occurred_at)
+            saved = self._bind_opening_execution_snapshot(saved, plan)
             self._promote_active_trade(saved, occurred_at)
             reloaded = self.trades.get(saved.trade_id)
             return reloaded or saved

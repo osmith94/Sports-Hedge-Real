@@ -670,6 +670,10 @@ class WatchlistService:
         rejection_reason: str | None,
         snapshot_json: str,
         diagnostics_json: str | None = None,
+        execution_cycle: int | None = None,
+        cycle_outcome: str | None = None,
+        liquidity: list[dict[str, str]] | None = None,
+        cumulative_capital_gbp: str | None = None,
     ) -> None:
         """Store one Price-2 attempt outside the scanner lifecycle detail."""
 
@@ -686,6 +690,42 @@ class WatchlistService:
             rejection_reason=rejection_reason,
             snapshot_json=snapshot_json,
             diagnostics_json=diagnostics_json,
+            execution_cycle=execution_cycle,
+            cycle_outcome=cycle_outcome,
+            liquidity=liquidity,
+            cumulative_capital_gbp=cumulative_capital_gbp,
+        )
+
+    def next_execution_cycle(self, opportunity_id: str | None) -> int:
+        """1-based cycle number for the next Price-2 attempt on this opportunity."""
+
+        counter = getattr(self.repository, "next_execution_cycle", None)
+        if not callable(counter):
+            return 1
+        return int(counter(opportunity_id))
+
+    def link_execution_snapshot_fill(
+        self,
+        *,
+        snapshot_id: str,
+        trade_id: str,
+        tranche_id: str | None,
+        cycle_outcome: str,
+        liquidity: list[dict[str, str]] | None = None,
+        cumulative_capital_gbp: str | None = None,
+    ) -> None:
+        """Record which trade tranche, if any, consumed this snapshot."""
+
+        linker = getattr(self.repository, "link_execution_snapshot_fill", None)
+        if not callable(linker):
+            return
+        linker(
+            snapshot_id=snapshot_id,
+            trade_id=trade_id,
+            tranche_id=tranche_id,
+            cycle_outcome=cycle_outcome,
+            liquidity=liquidity,
+            cumulative_capital_gbp=cumulative_capital_gbp,
         )
 
     def close(

@@ -1150,6 +1150,9 @@ def put_operator_scanner_settings(
         universe_cadence_seconds=update.universe_cadence_seconds,
         universe_discovery_refresh_seconds=update.universe_discovery_refresh_seconds,
         max_allocated_per_trade_gbp=update.max_allocated_per_trade_gbp,
+        max_event_gbp=update.max_event_gbp,
+        max_opportunity_gbp=update.max_opportunity_gbp,
+        max_one_time_gbp=update.max_one_time_gbp,
         **(
             {"outright_min_net_edge": update.outright_min_net_edge}
             if "outright_min_net_edge" in update.model_fields_set

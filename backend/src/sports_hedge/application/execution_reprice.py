@@ -13,6 +13,7 @@ fixtures, markets, or matches.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -46,6 +47,19 @@ PHASE_REJECTED = "EXECUTION_REPRICE_REJECTED"
 PHASE_PAPER_ELIGIBLE = "PAPER_ELIGIBLE"
 PHASE_FILL_ATTEMPTED = "PAPER_FILL_ATTEMPTED"
 PHASE_FILL_COMPLETE = "PAPER_FILL_COMPLETE"
+
+CYCLE_FILLED = "filled"
+CYCLE_REJECTED = "rejected"
+CYCLE_ACCEPTED = "accepted"
+CYCLE_ALLOCATION_CEILING = "allocation_ceiling"
+CYCLE_BELOW_MIN_NET = "below_min_net"
+CYCLE_NO_INCREMENTAL_LIQUIDITY = "no_incremental_liquidity"
+CYCLE_DUPLICATE = "duplicate"
+CYCLE_NOT_OPEN = "not_open"
+
+_EXECUTION_AUDIT_LOCK = threading.Lock()
+_ITERATION_GUARD = threading.Lock()
+_ITERATION_ACTIVE: set[str] = set()
 
 # Known quote age is the only capture blocker this path may carry into the
 # execution reprice. Unknown age, missing costs, mapping, depth, and edge
@@ -150,6 +164,8 @@ def record_execution_snapshot_attempt(
     *,
     opportunity_id: str | None,
     occurred_at: datetime,
+    liquidity: list[dict[str, str]] | None = None,
+    cumulative_capital_gbp: str | None = None,
 ) -> None:
     """Persist one finished Price-2 attempt. No-op when the attempt never read."""
 
@@ -158,17 +174,59 @@ def record_execution_snapshot_attempt(
     recorder = getattr(watchlist, "record_execution_snapshot_audit", None)
     if not callable(recorder):
         return
-    recorder(
-        snapshot_id=snapshot.snapshot_id,
-        opportunity_id=opportunity_id,
-        catalogue_row_id=snapshot.catalogue_row_id,
-        canonical_market_id=snapshot.canonical_market_id,
-        occurred_at=occurred_at,
-        accepted=snapshot.accepted,
-        rejection_reason=snapshot.rejection_reason,
-        snapshot_json=snapshot.to_json(),
-        diagnostics_json=execution_diagnostics_json(diagnostics),
-    )
+    with _EXECUTION_AUDIT_LOCK:
+        if not snapshot.execution_cycle:
+            counter = getattr(watchlist, "next_execution_cycle", None)
+            snapshot.execution_cycle = (
+                int(counter(opportunity_id)) if callable(counter) else 1
+            )
+        outcome = CYCLE_REJECTED if not snapshot.accepted else CYCLE_ACCEPTED
+        recorder(
+            snapshot_id=snapshot.snapshot_id,
+            opportunity_id=opportunity_id,
+            catalogue_row_id=snapshot.catalogue_row_id,
+            canonical_market_id=snapshot.canonical_market_id,
+            occurred_at=occurred_at,
+            accepted=snapshot.accepted,
+            rejection_reason=snapshot.rejection_reason,
+            snapshot_json=snapshot.to_json(),
+            diagnostics_json=execution_diagnostics_json(diagnostics),
+            execution_cycle=snapshot.execution_cycle,
+            cycle_outcome=outcome,
+            liquidity=liquidity,
+            cumulative_capital_gbp=cumulative_capital_gbp,
+        )
+
+
+def _liquidity_for_attempt(snapshot: ExecutionSnapshot | None, trade: Any) -> list[dict[str, str]]:
+    from decimal import Decimal
+
+    from sports_hedge.application.active_trade_recovery import liquidity_evidence_for_levels
+
+    if snapshot is None:
+        return []
+    legs = []
+    for leg in snapshot.legs:
+        levels = [(Decimal(odds), Decimal(depth)) for odds, depth in leg.levels]
+        if not levels and leg.displayed_odds and leg.available_depth:
+            levels = [(Decimal(leg.displayed_odds), Decimal(leg.available_depth))]
+        identity = (
+            str(leg.venue),
+            str(leg.native_market_id),
+            str(leg.native_runner_id or ""),
+            str(leg.outcome),
+        )
+        legs.append((identity, levels))
+    return liquidity_evidence_for_levels(legs, trade)
+
+
+def _capital_text(trade: Any) -> str | None:
+    if trade is None:
+        return None
+    locked = getattr(trade, "capital_locked_gbp", None)
+    if locked is None:
+        return "0"
+    return str(locked)
 
 
 def execution_reprice_audit_detail(
@@ -312,12 +370,12 @@ async def capture_with_execution_reprice(
     watchlist: WatchlistService,
     pricing_lane: str | None,
 ) -> ExecutionCaptureResult:
-    """Qualify from the discovery decision, then fill only from one reprice.
+    """Qualify from the discovery decision, then fill only from a fresh reprice.
 
-    The discovery observation never emits PAPER_ELIGIBLE. The refreshed
-    decision is the capture snapshot. One provider failure, a still-stale
-    book, or an edge that no longer clears the trigger does not fill and
-    does not schedule another reprice.
+    The discovery observation never emits PAPER_ELIGIBLE. Each PAPER fill
+    uses its own accepted ExecutionSnapshot. After a fill, another
+    execution-candidate reprice runs immediately until an existing gate
+    rejects the next snapshot. A rejected cycle does not fabricate a fill.
     """
 
     from sports_hedge.api.paper import persist_price_engine_item_capture
@@ -383,6 +441,7 @@ async def capture_with_execution_reprice(
             refreshed.diagnostics,
             opportunity_id=opportunity_id,
             occurred_at=datetime.now(UTC),
+            liquidity=_liquidity_for_attempt(refreshed.snapshot, None),
         )
         watchlist.note_execution_reprice_miss(
             decision,
@@ -415,6 +474,7 @@ async def capture_with_execution_reprice(
             refreshed.diagnostics,
             opportunity_id=opportunity_id,
             occurred_at=datetime.now(UTC),
+            liquidity=_liquidity_for_attempt(refreshed.snapshot, None),
         )
         entry_history = _observe(
             watchlist,
@@ -458,6 +518,8 @@ async def capture_with_execution_reprice(
         refreshed.diagnostics,
         opportunity_id=opportunity_id,
         occurred_at=datetime.now(UTC),
+        liquidity=_liquidity_for_attempt(refreshed.snapshot, None),
+        cumulative_capital_gbp="0",
     )
     snapshot_json = None if refreshed.snapshot is None else refreshed.snapshot.to_json()
     entry_history = persist_price_engine_item_capture(
@@ -469,9 +531,157 @@ async def capture_with_execution_reprice(
         execution_authoritative=True,
         execution_snapshot_json=snapshot_json,
     )
+    await continue_iterative_paper_fills(
+        opportunity_id=opportunity_id,
+        runtime=runtime,
+        engine=engine,
+        watchlist=watchlist,
+        pricing_lane=pricing_lane,
+        entry_decision=refreshed.decision,
+    )
     return ExecutionCaptureResult(
         discovery_history=discovery_history,
         discovery_decision=discovery,
         entry_decision=refreshed.decision,
         entry_history=list(entry_history or []),
     )
+
+
+def _claim_iteration(opportunity_id: str) -> bool:
+    with _ITERATION_GUARD:
+        if opportunity_id in _ITERATION_ACTIVE:
+            return False
+        _ITERATION_ACTIVE.add(opportunity_id)
+        return True
+
+
+def _release_iteration(opportunity_id: str) -> None:
+    with _ITERATION_GUARD:
+        _ITERATION_ACTIVE.discard(opportunity_id)
+
+
+def _paper_operations(watchlist: WatchlistService) -> Any:
+    from sports_hedge.api.paper import get_paper_operations_service, get_priority_alert_service
+
+    return get_paper_operations_service(watchlist, get_priority_alert_service())
+
+
+def _open_iterative_trade(operations: Any, opportunity_id: str) -> Any | None:
+    from sports_hedge.paper.trades import PaperActiveTradePhase, PaperTradeState
+
+    getter = getattr(operations, "_get_trade_by_opportunity", None)
+    trade = getter(opportunity_id) if callable(getter) else None
+    if trade is None or trade.state is not PaperTradeState.OPEN:
+        return None
+    if trade.unresolved_recovery or trade.active_trade_phase in {
+        PaperActiveTradePhase.EXIT_MANAGEMENT,
+        PaperActiveTradePhase.MONITORING_CAP_REACHED,
+        PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+    }:
+        return None
+    return trade
+
+
+async def continue_iterative_paper_fills(
+    *,
+    opportunity_id: str,
+    runtime: Any,
+    engine: Any,
+    watchlist: WatchlistService,
+    pricing_lane: str | None,
+    entry_decision: PaperScanDecision,
+) -> None:
+    """Immediately reprice and PAPER-fill while a fresh accepted snapshot remains.
+
+    Each cycle fetches the exact native books again and may append one tranche
+    to the existing opportunity trade. The loop stops on the first gate that
+    rejects the new snapshot or refuses the fill. It does not wait for the
+    ordinary HOT cadence and does not reuse the previous snapshot.
+    """
+
+    if not opportunity_id or not _claim_iteration(opportunity_id):
+        if opportunity_id:
+            log_execution_phase(
+                PHASE_REJECTED,
+                reason=EXECUTION_REPRICE_DUPLICATE,
+                opportunity_id=opportunity_id,
+            )
+        return
+    try:
+        decision = entry_decision
+        while True:
+            operations = _paper_operations(watchlist)
+            if _open_iterative_trade(operations, opportunity_id) is None:
+                return
+            venues = hedge_venues(decision)
+            refreshed = await engine.reprice_for_paper_entry(runtime, venues=venues)
+            if refreshed.duplicate:
+                log_execution_phase(
+                    PHASE_REJECTED,
+                    reason=EXECUTION_REPRICE_DUPLICATE,
+                    opportunity_id=opportunity_id,
+                )
+                return
+            occurred_at = datetime.now(UTC)
+            trade = _open_iterative_trade(operations, opportunity_id)
+            record_execution_snapshot_attempt(
+                watchlist,
+                refreshed.snapshot,
+                refreshed.diagnostics,
+                opportunity_id=opportunity_id,
+                occurred_at=occurred_at,
+                liquidity=_liquidity_for_attempt(refreshed.snapshot, trade),
+                cumulative_capital_gbp=_capital_text(trade),
+            )
+            snapshot = refreshed.snapshot
+            accepted = (
+                refreshed.decision is not None
+                and snapshot is not None
+                and snapshot.accepted
+            )
+            if not accepted:
+                reason = refreshed.reason or EXECUTION_REPRICE_FAILED
+                if refreshed.decision is not None or snapshot is not None:
+                    watchlist.note_execution_reprice_miss(
+                        refreshed.decision or decision,
+                        occurred_at=occurred_at,
+                        reason=reason,
+                        pricing_lane=pricing_lane,
+                        detail=execution_reprice_audit_detail(
+                            reason,
+                            refreshed.diagnostics,
+                            snapshot,
+                        ),
+                        quote_age_ms=_diagnostic_quote_age(refreshed.diagnostics),
+                    )
+                log_execution_phase(
+                    PHASE_REJECTED,
+                    reason=reason,
+                    opportunity_id=opportunity_id,
+                    snapshot=None if snapshot is None else snapshot.audit_line(),
+                )
+                return
+            outcome = operations.fill_from_execution_snapshot(
+                opportunity_id,
+                refreshed.decision,
+                snapshot_id=snapshot.snapshot_id,
+                snapshot_json=snapshot.to_json(),
+                pricing_lane=pricing_lane,
+            )
+            if outcome != CYCLE_FILLED:
+                log_execution_phase(
+                    PHASE_REJECTED,
+                    reason=outcome,
+                    opportunity_id=opportunity_id,
+                    snapshot=snapshot.snapshot_id,
+                )
+                return
+            decision = refreshed.decision
+            log_execution_phase(
+                PHASE_FILL_COMPLETE,
+                opportunity_id=opportunity_id,
+                snapshot=snapshot.snapshot_id,
+                execution_cycle=snapshot.execution_cycle,
+            )
+    finally:
+        _release_iteration(opportunity_id)

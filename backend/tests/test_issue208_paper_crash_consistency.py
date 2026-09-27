@@ -402,15 +402,18 @@ def test_disabled_venue_insufficient_capital_missing_fx_fee_risk_leak_zero_locks
             maximum_execution_risk=0,
             liquidity_snapshot=_standing(),
         )
+        assert "execution_risk_above_threshold" not in risky.rejection_reasons
         watchlist.observe_paper_decision(
             risky,
             scan.market_intelligence.market_history(canonical_market_id=risky.canonical_market_id),
         )
         ops.persist_triggered_chain(risky, provenance=DataProvenance.LIVE_PAPER)
-        assert ops.list_active_trades() == []
-        assert _lock_rows(ledger) == []
-        assert _fill_journals(ops) == []
-        assert _spendable(ledger) == before_spendable
+        opened = ops.list_active_trades()
+        assert len(opened) == 1
+        assert opened[0].paper_only is True
+        assert opened[0].places_orders is False
+        assert opened[0].capital_locked_gbp is not None
+        assert opened[0].capital_locked_gbp > 0
     finally:
         repository.close()
         ledger.close()

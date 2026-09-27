@@ -222,10 +222,13 @@ class _ScriptMatchbook(FakeMatchbook):
         self.get_market_calls.append((str(event_id), str(market_id)))
         index = len(self.get_market_calls) - 1
         if index >= len(self._payloads):
-            raise AssertionError("extra matchbook execution read")
+            raise MatchbookMarketGoneError(event_id, market_id, 404)
         payload = self._payloads[index]
         if payload is None:
             raise MatchbookMarketGoneError(event_id, market_id, 404)
+        hook = getattr(self, "on_index", None)
+        if hook is not None:
+            await hook(index)
         return payload
 
 
@@ -246,7 +249,7 @@ class _ScriptKalshi(FakeKalshi):
         self.book_calls.append(ticker)
         index = len(self.book_calls) - 1
         if index >= len(self._books):
-            raise AssertionError("extra kalshi execution read")
+            return None
         book = self._books[index]
         if book is None:
             return None
@@ -319,8 +322,27 @@ async def _run(
     matchbook_payloads: list[dict | None],
     kalshi_books: list[dict | None],
     treasury: Decimal = Decimal(5000),
+    max_allocated_per_trade_gbp: float | None = None,
+    max_one_time_gbp: float | None = None,
+    max_event_gbp: float | None = None,
+    max_opportunity_gbp: float | None = None,
+    extra_settings: dict | None = None,
+    ready: dict | None = None,
+    matchbook_hook=None,
 ):
-    settings = Settings(paper_autofill_enabled=True)
+    settings_kwargs: dict[str, object] = {"paper_autofill_enabled": True}
+    if max_allocated_per_trade_gbp is not None:
+        settings_kwargs["max_allocated_per_trade_gbp"] = max_allocated_per_trade_gbp
+        settings_kwargs["allocation_per_opportunity_limit_gbp"] = max_allocated_per_trade_gbp
+    if max_event_gbp is not None:
+        settings_kwargs["max_event_gbp"] = max_event_gbp
+    if max_opportunity_gbp is not None:
+        settings_kwargs["max_opportunity_gbp"] = max_opportunity_gbp
+    if max_one_time_gbp is not None:
+        settings_kwargs["max_one_time_gbp"] = max_one_time_gbp
+    if extra_settings:
+        settings_kwargs.update(extra_settings)
+    settings = Settings(**settings_kwargs)
     repository = SqliteMarketIntelligenceRepository()
     scan = _RecordingScan(
         MarketIntelligenceService(repository),
@@ -364,6 +386,7 @@ async def _run(
         kalshi_event="KXEPLBTTS-RICH",
     )
     matchbook = _ScriptMatchbook(matchbook_payloads)
+    matchbook.on_index = matchbook_hook
     kalshi = _ScriptKalshi(kalshi_books)
     engine, _, _, _layer = _engine(
         [row],
@@ -380,6 +403,14 @@ async def _run(
         audit=SqlitePaperScanRepository(tmp_path / f"{name}-audit.sqlite"),
         watchlist=watchlist,
     )
+    if ready is not None:
+        ready.update(
+            engine=engine,
+            watchlist=watchlist,
+            operations=operations,
+            row=row,
+            scan=scan,
+        )
     result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
     await engine.drain_item_captures()
     return SimpleNamespace(
@@ -442,8 +473,8 @@ async def test_stale_discovery_fresh_execution_opens_paper_trade(
         assert bundle.kalshi.list_events_calls == 0
         assert bundle.matchbook.list_markets_calls == []
         assert bundle.kalshi.list_markets_calls == []
-        assert len(bundle.matchbook.get_market_calls) == 2
-        assert bundle.kalshi.book_calls == [TICKER, TICKER]
+        assert len(bundle.matchbook.get_market_calls) == 3
+        assert bundle.kalshi.book_calls == [TICKER, TICKER, TICKER]
         assert bundle.result.decisions == [discovery]
 
         trade = _open_trade(bundle)
@@ -624,8 +655,8 @@ async def test_fresh_discovery_still_reprices_once_before_fill(
         discovery, execution = bundle.scan.seen
         assert discovery.eligible_for_paper_simulation is True
         assert execution.eligible_for_paper_simulation is True
-        assert len(bundle.matchbook.get_market_calls) == 2
-        assert len(bundle.kalshi.book_calls) == 2
+        assert len(bundle.matchbook.get_market_calls) == 3
+        assert len(bundle.kalshi.book_calls) == 3
         trade = _open_trade(bundle)
         types = [event.event_type for event in _events(bundle.watchlist, trade.opportunity_id)]
         assert [item for item in types if item in ENTRY_ORDER] == list(ENTRY_ORDER)
@@ -718,10 +749,12 @@ async def test_exactly_one_complete_set_reprice(
     )
     try:
         assert len(bundle.scan.seen) == 2
-        assert len(bundle.matchbook.get_market_calls) == 2
-        assert len(bundle.kalshi.book_calls) == 2
+        assert len(bundle.matchbook.get_market_calls) == 3
+        assert len(bundle.kalshi.book_calls) == 3
         assert bundle.engine._execution_reprice_open == set()
-        assert len(_open_trade(bundle).legs) > 0
+        trade = _open_trade(bundle)
+        assert len(trade.legs) > 0
+        assert len(trade.tranches) == 1
     finally:
         _close(bundle)
 

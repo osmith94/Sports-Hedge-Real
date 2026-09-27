@@ -81,6 +81,7 @@ class PaperTradeTranche(BaseModel):
     guaranteed_profit_gbp: Decimal | None = None
     fill_ids: list[str] = Field(default_factory=list)
     idempotency_key: str
+    execution_snapshot_id: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> PaperTradeTranche:
