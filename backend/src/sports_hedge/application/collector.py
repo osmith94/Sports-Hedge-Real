@@ -16,6 +16,7 @@ from sports_hedge.application import polymarket_fixture_discovery as polymarket_
 from sports_hedge.application.adaptive_scheduler import work_from_lane
 from sports_hedge.application.approved_market_catalogue import FEE_SOURCE_GET_SERIES
 from sports_hedge.application.catalogue_maintenance import (
+    CATALOGUE_NATIVE_IDENTITY_CONFLICT,
     FamilyDiscoveryCompleteness,
     family_key_from_kalshi_series,
     pair_identity_from_markets,
@@ -98,8 +99,10 @@ from sports_hedge.application.opportunity_viability import (
     NO_CROSS_VENUE_CANDIDATE,
     UPPER_BOUND_BELOW_MIN_NET,
     assess_cluster_viability,
+    build_market_relationship_evidence,
     build_viability_evidence,
     get_opportunity_viability_cache,
+    market_relationship_not_collected,
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.polymarket_fixture_discovery import (
@@ -673,6 +676,7 @@ class DiscoveredFixture(BaseModel):
     event_match_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     event_match_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     viability_evidence: dict[str, Any] | None = None
+    market_relationship_evidence: dict[str, Any] | None = None
 
 
 class FixturePaperEntry(BaseModel):
@@ -3898,19 +3902,33 @@ class ReadOnlyCrossVenueCollector:
         matched_market_pairs = 0
         lane_label = str(self._op_request_lane or "universe")
         listed_market_count = sum(len(items) for items in venue_markets.values())
+        pair_observations: list[dict[str, Any]] = []
         with sync_subphase(
             lane_label, "market_relationships", events=1, candidates=listed_market_count
         ):
             for left_venue, right_venue in pair_specs:
                 left_markets = venue_markets[left_venue]
                 right_markets = venue_markets[right_venue]
-                if not left_markets or not right_markets:
-                    continue
-                market_pairs = _select_prioritized_market_pairs(
-                    _greedy_unique_market_pairs(
-                        left_markets, right_markets, matcher=self.market_matcher
-                    ),
-                    max_market_pairs_per_event,
+                counter = _MatcherCallCounter(self.market_matcher)
+                market_pairs: list[
+                    tuple[_NormalizedMarket, _NormalizedMarket, MarketMatchResult]
+                ] = []
+                if left_markets and right_markets:
+                    market_pairs = _select_prioritized_market_pairs(
+                        _greedy_unique_market_pairs(
+                            left_markets, right_markets, matcher=counter
+                        ),
+                        max_market_pairs_per_event,
+                    )
+                pair_observations.append(
+                    observe_venue_pair_markets(
+                        left_venue,
+                        right_venue,
+                        left_markets,
+                        right_markets,
+                        matcher_calls=counter.calls,
+                        selected=market_pairs,
+                    )
                 )
                 matched_market_pairs += len(market_pairs)
                 selected_pairs.extend(
@@ -3942,7 +3960,7 @@ class ReadOnlyCrossVenueCollector:
         # observations after a leftover depth attempt — leftover books are
         # never fetched.
         self._kalshi_books_skipped_unapproved += len(leftover_kalshi)
-        await self._persist_universe_catalogue_from_pairs(
+        persisted_catalogue_keys = await self._persist_universe_catalogue_from_pairs(
             fixture=fixture,
             eligible_pairs=catalogue_pairs,
             k_events=k_events,
@@ -4115,7 +4133,17 @@ class ReadOnlyCrossVenueCollector:
             polymarket_matched=bool(fixture.polymarket_matched),
             target_competition_code=fixture.target_competition_code,
         )
-        _attach_viability_evidence(fixture, inventory_rows)
+        discovered_families = _normalized_market_families(venue_markets)
+        market_evidence = build_market_relationship_evidence(
+            pair_observations,
+            discovered_archetypes=discovered_families,
+            persisted_catalogue_keys=persisted_catalogue_keys,
+        )
+        _attach_viability_evidence(
+            fixture,
+            inventory_rows,
+            market_relationship_evidence=market_evidence,
+        )
         return (
             fixture,
             decisions,
@@ -4157,12 +4185,12 @@ class ReadOnlyCrossVenueCollector:
         k_events: list[_NormalizedEvent],
         family_discovery: FamilyDiscoveryCompleteness,
         issues: list[CollectorIssue],
-    ) -> None:
+    ) -> list[str] | None:
         """Persist approved-family identity before depth/solver (Tenet 19 / #341)."""
 
         store = self.catalogue_store
         if store is None or self._op_request_lane == ScanLane.HOT.value:
-            return
+            return None
         identities = []
         series_by_event: dict[str, dict[str, Any] | None] = {}
         for left_venue, right_venue, left_market, right_market, _match in eligible_pairs:
@@ -4203,6 +4231,7 @@ class ReadOnlyCrossVenueCollector:
             if identity is not None:
                 identities.append(identity)
         generation = self._op_universe_generation_id
+        identity_conflicts: list[Any] = []
         async with self._catalogue_persist_sema:
             await persist_universe_catalogue_pass_offloop(
                 store,
@@ -4218,7 +4247,27 @@ class ReadOnlyCrossVenueCollector:
                 terminal=False,
                 generation_selected_codes=self._op_selected_competition_codes,
                 allow_disappearance=not self._op_generation_superseded,
+                identity_conflicts=identity_conflicts,
             )
+        for conflict in identity_conflicts:
+            venue = None
+            try:
+                venue = VenueName(str(conflict.venue))
+            except ValueError:
+                venue = None
+            issues.append(
+                CollectorIssue(
+                    stage=CATALOGUE_NATIVE_IDENTITY_CONFLICT,
+                    venue=venue,
+                    source_id=str(conflict.canonical_event_id),
+                    detail=conflict.audit_detail(),
+                )
+            )
+        return [
+            str(identity.register_canonical_key)
+            for identity in identities
+            if str(getattr(identity, "register_canonical_key", "") or "").strip()
+        ]
 
     async def _refresh_hot_cluster(
         self,
@@ -6504,29 +6553,19 @@ def _fixture_from_cluster(
 def _attach_viability_evidence(
     fixture: DiscoveredFixture,
     inventory_rows: list[Any] | None = None,
+    market_relationship_evidence: dict[str, Any] | None = None,
 ) -> None:
-    """Record event vs market evidence without starting provider work."""
+    """Record event vs market evidence without starting provider work.
 
-    discovered: list[str] = []
-    registered: list[str] = []
+    Relationship lists are catalogue evidence only after market pairing.
+    Identity and pre-market callers leave those lists empty and label the stage.
+    """
+
     structural: list[str] = []
     for row in inventory_rows or []:
-        canonical = getattr(row, "canonical", None)
-        family = getattr(canonical, "family", None)
-        if family is not None:
-            name = getattr(family, "value", None) or str(family)
-            if name not in discovered:
-                discovered.append(str(name))
         relation = str(getattr(row, "relation", "") or getattr(row, "comparison_state", "") or "")
         if relation and relation not in structural:
             structural.append(relation)
-    coverage = fixture.catalogue_coverage
-    if coverage is not None:
-        for item in getattr(coverage, "rows", None) or []:
-            archetype = getattr(item, "archetype", None)
-            key = str(getattr(archetype, "value", archetype) or "")
-            if key and key not in registered:
-                registered.append(key)
     venues = [
         name
         for name, present in (
@@ -6539,13 +6578,37 @@ def _attach_viability_evidence(
     final = fixture.market_evaluation_reason or fixture.no_comparison_reason
     if fixture.matched_equivalent_count == 0 and not final:
         final = "no_comparable_markets"
+    if market_relationship_evidence is None:
+        from sports_hedge.application.opportunity_viability import PRE_MARKET_RELATIONSHIP_SCOPE
+
+        market_relationship_evidence = market_relationship_not_collected(
+            "market_processing_not_run"
+        )
+        evidence_stage = "pre_market"
+        relationship_scope = PRE_MARKET_RELATIONSHIP_SCOPE
+        discovered: list[str] = []
+        attempted: list[str] = []
+        registered: list[str] = []
+    else:
+        from sports_hedge.application.opportunity_viability import POST_MARKET_RELATIONSHIP_SCOPE
+
+        evidence_stage = str(market_relationship_evidence.get("evidence_stage") or "post_market")
+        relationship_scope = POST_MARKET_RELATIONSHIP_SCOPE
+        discovered = list(market_relationship_evidence.get("discovered_archetypes") or [])
+        attempted = list(market_relationship_evidence.get("attempted_relationships") or [])
+        registered = list(market_relationship_evidence.get("registered_relationships") or [])
+    fixture.market_relationship_evidence = market_relationship_evidence
     fixture.viability_evidence = build_viability_evidence(
         fixture.canonical_event_id,
         venues_present=venues,
         final_reason=final,
         discovered_archetypes=discovered,
+        attempted_relationships=attempted,
         registered_relationships=registered,
         structural_rejections=structural,
+        evidence_stage=evidence_stage,
+        relationship_fields_scope=relationship_scope,
+        market_relationship_evidence=market_relationship_evidence,
     )
 
 
@@ -6986,6 +7049,87 @@ def _select_prioritized_market_pairs(
     others = [item for item in pairs if not _is_priority_match_result_pair(item[0], item[1])]
     remaining = max(0, max_market_pairs_per_event - len(baseline))
     return baseline + others[:remaining]
+
+
+class _MatcherCallCounter:
+    """Counts matcher.match calls. Does not invent a call that did not happen."""
+
+    def __init__(self, matcher: MarketMatcher) -> None:
+        self._matcher = matcher
+        self.calls = 0
+
+    def match(self, left: CanonicalMarket, right: CanonicalMarket) -> MarketMatchResult:
+        self.calls += 1
+        return self._matcher.match(left, right)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._matcher, name)
+
+
+def _normalized_market_families(
+    venue_markets: dict[VenueName, list[_NormalizedMarket]],
+) -> list[str]:
+    families: list[str] = []
+    for markets in venue_markets.values():
+        for market in markets:
+            family = getattr(market.canonical.family, "value", None) or str(market.canonical.family)
+            if family and family not in families:
+                families.append(str(family))
+    return families
+
+
+def observe_venue_pair_markets(
+    left_venue: VenueName,
+    right_venue: VenueName,
+    left_markets: list[_NormalizedMarket],
+    right_markets: list[_NormalizedMarket],
+    *,
+    matcher_calls: int,
+    selected: list[tuple[_NormalizedMarket, _NormalizedMarket, MarketMatchResult]],
+) -> dict[str, Any]:
+    """One venue-pair result. Matcher-not-invoked is not an attempted relationship."""
+
+    from sports_hedge.matching.approved_register import registered_canonical_key
+
+    pair = f"{left_venue.value}/{right_venue.value}"
+    if not left_markets or not right_markets:
+        return {
+            "venue_pair": pair,
+            "matcher_invoked": False,
+            "matcher_call_count": 0,
+            "normalized_market_counts": {
+                left_venue.value: len(left_markets),
+                right_venue.value: len(right_markets),
+            },
+            "selected_count": 0,
+            "registered_keys": [],
+            "rejection_reason": "no_normalized_markets",
+        }
+    registered: list[str] = []
+    for left_market, right_market, match in selected:
+        if not scan_eligible_pair(left_market.canonical, right_market.canonical, match):
+            continue
+        key = registered_canonical_key(left_market.canonical, right_market.canonical)
+        if key and key not in registered:
+            registered.append(key)
+    if matcher_calls <= 0:
+        reason = "matcher_not_invoked_no_shared_register_key"
+    elif not registered:
+        reason = "no_registered_relationship"
+    else:
+        reason = None
+    return {
+        "venue_pair": pair,
+        "matcher_invoked": matcher_calls > 0,
+        "matcher_call_count": matcher_calls,
+        "normalized_market_counts": {
+            left_venue.value: len(left_markets),
+            right_venue.value: len(right_markets),
+        },
+        "selected_count": len(selected),
+        "registered_keys": registered,
+        "rejection_reason": reason,
+    }
 
 
 def _greedy_unique_market_pairs(

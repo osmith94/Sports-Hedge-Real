@@ -1,9 +1,9 @@
-"""MLB structural catalogue keys. No venue pair is PAPER-admitted.
+"""MLB structural catalogue keys.
 
-Game Winner and Total Runs x.5 are the only candidate families. Run line,
-first-five, inning, props, series, and futures do not receive a key.
-Settlement equivalence was not proven on 2026-09-24, so registered_canonical_key
-stays empty and those families remain non-executable.
+Game Winner and exact Total Runs x.5 are the only families that receive a key.
+Run line, first-five, inning, props, series, and futures do not. The owner
+approved PAPER venue-pair comparison for those structural keys on 2026-09-26.
+Fixture identity, team identity, line, and outcome-shape gates are unchanged.
 """
 
 from __future__ import annotations
@@ -16,10 +16,14 @@ from sports_hedge.domain.football import (
     FootballPeriod,
     MarketFamily,
 )
+from sports_hedge.domain.models import VenueName
 from sports_hedge.mlb.constants import CANONICAL_MLB_GAME_WINNER, CANONICAL_MLB_TOTAL_RUNS
 from sports_hedge.mlb.detect import is_mlb_canonical_event, is_mlb_market_family
 from sports_hedge.mlb.markets import is_exact_half_line
 
+MLB_PAPER_VENUES = frozenset(
+    {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
+)
 GAME_WINNER_OUTCOMES = frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY})
 TOTAL_OUTCOMES = frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER})
 
@@ -66,13 +70,15 @@ def mlb_canonical_key_for_market(market: CanonicalMarket) -> str | None:
 
 
 def mlb_approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> bool:
-    del left, right
-    return False
+    """Only cross-venue pairs among the three owner-approved PAPER venues."""
+
+    if left.source_venue == right.source_venue:
+        return False
+    venues = {left.source_venue, right.source_venue}
+    return venues <= MLB_PAPER_VENUES
 
 
-def mlb_registered_canonical_key(
-    left: CanonicalMarket, right: CanonicalMarket
-) -> str | None:
+def mlb_registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
     if not is_mlb_register_market(left) or not is_mlb_register_market(right):
         return None
     if not mlb_approved_paper_venue_pair(left, right):

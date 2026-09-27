@@ -226,8 +226,8 @@ def test_polymarket_regulation_time_first_team_to_score_matches_matchbook() -> N
         _ftts_mb_payload(),
     )
     result = MarketMatcher().match(matchbook, market)
-    assert result.matched is False
-    assert "not_registered" in result.reasons
+    assert result.matched is True
+    assert "not_registered" not in result.reasons
     assert generalized_payoff_eligible_market(market) is True
     assert solver_eligible_market(market) is False
     assert market.family not in STEP7_COMPLETE_SET_FAMILIES

@@ -265,19 +265,21 @@ def test_identity_gates_remain_fail_closed() -> None:
     assert ftts.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
 
 
-def test_polymarket_incomplete_settlement_is_not_registered() -> None:
+def test_polymarket_structural_pairs_stay_paper_admitted_without_settlement_text() -> None:
     one_x_two = classify_payload_pair(
         _mb([_mb_1x2()]),
         _pm([_pm_1x2(description="See market rules.")]),
     )
-    assert one_x_two.state is CatalogueApprovalState.UNSUPPORTED
-    assert one_x_two.paper_mode_admitted is False
+    assert one_x_two.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert one_x_two.paper_mode_admitted is True
+    assert one_x_two.execution_eligible is False
     btts = classify_payload_pair(
         _mb([_census_mb_btts()]),
         _pm([_pm_btts(description="See market rules.")]),
     )
-    assert btts.state is CatalogueApprovalState.UNSUPPORTED
-    assert btts.paper_mode_admitted is False
+    assert btts.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
+    assert btts.paper_mode_admitted is True
+    assert btts.execution_eligible is False
 
 
 def _incomplete_kalshi_events() -> list[dict[str, Any]]:

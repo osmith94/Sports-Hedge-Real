@@ -119,6 +119,7 @@ VARIANT_LABELS = {
         "UEFA Nations League 2026/27",
         "UEFA Nations League A",
         "UEFA Nations League B",
+        "UEFA Nations League C",
         "UEFA Nations League D",
     ),
     TargetCompetitionCode.SUPER_LIG: (
@@ -249,7 +250,6 @@ REJECTED_LABELS = (
     "Scottish League Cup",
     "CONCACAF Nations League",
     "UEFA Women's Nations League",
-    "UEFA Nations League C",
     "Volleyball Nations League",
     "UEFA Euro Qualification",
     "Europe WC Qualifiers",
@@ -729,11 +729,19 @@ async def test_collector_scopes_discovery_and_keeps_unmatched_coverage_truthful(
         epl = ids["1001"]
         assert epl.polymarket_matched is True
         assert epl.target_competition_code == "premier_league"
-        assert epl.matched_market_count == 1
+        assert epl.matched_market_count == 3
         assert epl.market_family == "both_teams_to_score"
         assert epl.outcome_context == "yes/no"
-        assert epl.best_matchbook_price is not None
-        assert epl.best_kalshi_price is not None
+        present_prices = [
+            price
+            for price in (
+                epl.best_matchbook_price,
+                epl.best_polymarket_price,
+                epl.best_kalshi_price,
+            )
+            if price is not None
+        ]
+        assert len(present_prices) >= 2
         assert epl.current_net_edge is not None
         assert epl.trigger_net_edge == Decimal("0.005")
         assert epl.distance_to_trigger_pp is not None

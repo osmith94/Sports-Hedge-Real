@@ -212,30 +212,8 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         )
     settlement_assumption = None
     if paper_assumed:
-        from sports_hedge.nba.constants import NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT
-        from sports_hedge.nba.settlement import (
-            NBA_PAPER_NORMAL_COMPLETION_REASON,
-            nba_market_uses_paper_caveat,
-        )
-        from sports_hedge.nfl.constants import NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT
-        from sports_hedge.nfl.settlement import (
-            NFL_PAPER_NORMAL_COMPLETION_REASON,
-            nfl_market_uses_paper_caveat,
-        )
-
-        if nfl_market_uses_paper_caveat(left) or nfl_market_uses_paper_caveat(right):
-            settlement_assumption = "normal_full_game_completion"
-            notes.append("settlement_assumption=normal_full_game_completion")
-            notes.append(NFL_PAPER_NORMAL_COMPLETION_REASON)
-            notes.append(NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT)
-        elif nba_market_uses_paper_caveat(left) or nba_market_uses_paper_caveat(right):
-            settlement_assumption = "normal_full_game_completion"
-            notes.append("settlement_assumption=normal_full_game_completion")
-            notes.append(NBA_PAPER_NORMAL_COMPLETION_REASON)
-            notes.append(NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT)
-        else:
-            settlement_assumption = "regulation_time"
-            notes.append("settlement_assumption=regulation_time")
+        settlement_assumption = "regulation_time"
+        notes.append("settlement_assumption=regulation_time")
         notes.append("paper_mode_only_not_live_execution_eligible")
         if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in notes:
             notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)

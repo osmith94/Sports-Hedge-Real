@@ -147,7 +147,6 @@ def resolve_paper_trade_settlement(
         nfl_automatic_settlement_lifecycle_blocker,
         nfl_exceptional_status_blocker,
         nfl_tied_score_blocker,
-        NFL_SETTLEMENT_FAIL_CLOSED_REASON,
     )
 
     if is_nfl_paper_trade(trade):
@@ -184,7 +183,7 @@ def resolve_paper_trade_settlement(
         if trade.market_family is MarketFamily.GAME_WINNER and score_outcome == "draw":
             return _blocked(
                 trade,
-                NFL_SETTLEMENT_FAIL_CLOSED_REASON,
+                "canonical_outcome_not_determined",
                 matchbook_market,
                 matchbook_event,
                 kalshi_markets,
@@ -218,7 +217,6 @@ def resolve_paper_trade_settlement(
         nba_automatic_settlement_lifecycle_blocker,
         nba_exceptional_status_blocker,
         nba_tied_score_blocker,
-        NBA_SETTLEMENT_FAIL_CLOSED_REASON,
     )
 
     if is_nba_paper_trade(trade):
@@ -262,7 +260,7 @@ def resolve_paper_trade_settlement(
         if trade.market_family is MarketFamily.GAME_WINNER and score_outcome == "draw":
             return _blocked(
                 trade,
-                NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+                "canonical_outcome_not_determined",
                 matchbook_market,
                 matchbook_event,
                 kalshi_markets,
@@ -519,12 +517,17 @@ def _family_blocker(trade: PaperTrade) -> str | None:
     ncaab_block = ncaab_family_settlement_blocker(trade)
     if ncaab_block is not None:
         return ncaab_block
-    from sports_hedge.mlb.constants import MLB_SETTLEMENT_NOT_EXECUTABLE
     from sports_hedge.mlb.settlement import is_mlb_paper_trade
 
-    if is_mlb_paper_trade(trade):
-        return MLB_SETTLEMENT_NOT_EXECUTABLE
     family = trade.market_family
+    if is_mlb_paper_trade(trade):
+        if family not in {MarketFamily.GAME_WINNER, MarketFamily.TOTAL_RUNS}:
+            return "unsupported_market_family"
+        if family is MarketFamily.TOTAL_RUNS:
+            line = _line_from_trade(trade)
+            if line is None or line_push_possible(line) is not False:
+                return "unsupported_mlb_line"
+        return None
     if is_nfl_paper_trade(trade):
         if family not in {
             MarketFamily.GAME_WINNER,
@@ -872,8 +875,6 @@ def _polymarket_market_evidence(
     market_payload: Mapping[str, Any] | None,
     event_payload: Mapping[str, Any] | None = None,
 ) -> ProviderOutcomeEvidence:
-    from sports_hedge.nba.constants import NBA_SETTLEMENT_FAIL_CLOSED_REASON
-
     pm_legs = [leg for leg in trade.legs if leg.venue is VenueName.POLYMARKET]
     event_id = _first_source_event(trade, VenueName.POLYMARKET)
     market_id = _first_source_market(trade, VenueName.POLYMARKET)
@@ -919,7 +920,7 @@ def _polymarket_market_evidence(
             source_result_id=str(market_payload.get("id") or market_id or ""),
             status="50-50",
             winning_outcome=None,
-            blocker=NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+            blocker="canonical_outcome_not_determined",
             observed={**observed, "outcomePrices": [str(item) for item in prices]},
         )
     if uma and uma not in GRADED_RESULT_STATUSES and uma not in {
@@ -934,7 +935,7 @@ def _polymarket_market_evidence(
             source_result_id=str(market_payload.get("id") or market_id or ""),
             status=uma,
             winning_outcome=None,
-            blocker=NBA_SETTLEMENT_FAIL_CLOSED_REASON,
+            blocker="canonical_outcome_not_determined",
             observed=observed,
         )
     if uma == "proposed":
@@ -1130,13 +1131,21 @@ def _outcome_from_scores(
             return CanonicalOutcome.AWAY.value, None
         return CanonicalOutcome.DRAW.value, None
     if family is MarketFamily.GAME_WINNER:
-        from sports_hedge.nfl.constants import NFL_SETTLEMENT_FAIL_CLOSED_REASON
-
         if home > away:
             return CanonicalOutcome.HOME.value, None
         if away > home:
             return CanonicalOutcome.AWAY.value, None
-        return None, NFL_SETTLEMENT_FAIL_CLOSED_REASON
+        return None, "canonical_outcome_not_determined"
+    if family is MarketFamily.TOTAL_RUNS:
+        line = _line_from_trade(trade)
+        if line is None or line_push_possible(line) is not False:
+            return None, "unsupported_mlb_line"
+        total = Decimal(home + away)
+        if total > line:
+            return CanonicalOutcome.OVER.value, None
+        if total < line:
+            return CanonicalOutcome.UNDER.value, None
+        return None, "canonical_outcome_not_determined"
     if family is MarketFamily.POINT_SPREAD:
         from sports_hedge.nfl.markets import is_exact_half_line
 
@@ -1148,9 +1157,7 @@ def _outcome_from_scores(
             return CanonicalOutcome.HOME.value, None
         if margin + line < 0:
             return CanonicalOutcome.AWAY.value, None
-        from sports_hedge.nfl.constants import NFL_SETTLEMENT_FAIL_CLOSED_REASON
-
-        return None, NFL_SETTLEMENT_FAIL_CLOSED_REASON
+        return None, "canonical_outcome_not_determined"
     if family is MarketFamily.TOTAL_POINTS:
         from sports_hedge.nfl.markets import is_exact_half_line
 
@@ -1162,9 +1169,7 @@ def _outcome_from_scores(
             return CanonicalOutcome.OVER.value, None
         if total < line:
             return CanonicalOutcome.UNDER.value, None
-        from sports_hedge.nfl.constants import NFL_SETTLEMENT_FAIL_CLOSED_REASON
-
-        return None, NFL_SETTLEMENT_FAIL_CLOSED_REASON
+        return None, "canonical_outcome_not_determined"
     if family is MarketFamily.BOTH_TEAMS_TO_SCORE:
         if home > 0 and away > 0:
             return CanonicalOutcome.YES.value, None

@@ -785,7 +785,7 @@ def test_unregistered_pair_does_not_invoke_mapping_review_or_confidence_gate(
     )
     from sports_hedge.catalogue.corpus import census_corpus
 
-    entry = next(item for item in census_corpus() if item.entry_id == "bad-1x2-mb-pm-unknown-settlement")
+    entry = next(item for item in census_corpus() if item.entry_id == "review-team-total-mb-pm")
     left_m = normalize_payload_side(entry.left).model_copy(update={"confidence": 0.11})
     right_m = normalize_payload_side(entry.right).model_copy(update={"confidence": 0.11})
     intelligence = MarketIntelligenceService(SqliteMarketIntelligenceRepository())
@@ -849,6 +849,7 @@ def test_independently_proven_unregistered_pair_is_not_runtime_admitted() -> Non
     from sports_hedge.application.complete_set import scan_eligible_pair
     from sports_hedge.catalogue.admission import (
         assess_catalogue_admission,
+        catalogue_allows_live_execution,
         catalogue_allows_solver,
     )
     from sports_hedge.catalogue.corpus import census_corpus
@@ -859,18 +860,25 @@ def test_independently_proven_unregistered_pair_is_not_runtime_admitted() -> Non
     from sports_hedge.matching.paper_assumed import both_independently_proven_regulation
 
     assert both_independently_proven_regulation(left, right) is True
-    assert registered_structural_match(left, right) is False
+    assert registered_structural_match(left, right) is True
     match = MarketMatcher().match(left, right)
-    assert match.matched is False
-    assert "not_registered" in match.reasons
-    assert "independently_proven_settlement" not in match.reasons
+    assert match.matched is True
+    assert "not_registered" not in match.reasons
     assessment = classify_payload_pair(entry.left, entry.right)
     assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
-    assert assessment.paper_mode_admitted is False
-    assert assessment.matcher_matched is False
-    assert catalogue_allows_solver(left, right) is False
-    assert scan_eligible_pair(left, right, match) is False
+    assert assessment.paper_mode_admitted is True
+    assert assessment.execution_eligible is False
+    assert assessment.matcher_matched is True
+    assert catalogue_allows_solver(left, right) is True
+    assert catalogue_allows_live_execution(left, right) is True
+    assert assessment.execution_eligible is False
+    from sports_hedge.config import Settings
+
+    assert Settings().sports_hedge_execution_enabled is False
+    assert scan_eligible_pair(left, right, match) is True
     admission = assess_catalogue_admission(left, right)
-    assert admission.allowed is False
-    assert admission.rejection_reason == "catalogue_not_registered"
+    assert admission.allowed is True
+    assert admission.paper_mode_admitted is True
+    assert admission.live_execution_eligible is False
+    assert admission.rejection_reason is None
 

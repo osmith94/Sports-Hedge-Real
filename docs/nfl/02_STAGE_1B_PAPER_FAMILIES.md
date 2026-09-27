@@ -23,21 +23,15 @@ Exactly three full-game families:
 
 Unsupported in this stage: integer spreads/totals; first half / second half / quarter; overtime-only series; team totals; player props; exact margin / first TD; parlays.
 
-## Equivalence and caveat
+## Equivalence
 
-Normal completed-game payoff is owner-approved for PAPER comparison when canonical fixture + family + exact line/side match.
+Owner decision 2026-09-26: exceptional lifecycle differences are not a PAPER admission or automatic-settlement blocker. GAME_WINNER, exact `.5` spread, and exact `.5` total stay PAPER-admitted when fixture, family, line, and outcome space match.
 
-Audit marker: `exceptional_settlement_mismatch_possible`.
+New PAPER trades do not record `exceptional_settlement_mismatch_possible`. Historical rows that already stored that string remain readable.
 
-This is **not** live-execution-grade settlement equivalence. Cancellation, suspension, and final-tie handling can differ across venues.
+Live execution stays disabled.
 
-Automatic NFL settlement requires **durable exceptional-lifecycle evidence**:
-- append-only provider-status observations on the PAPER trade;
-- at least one pre-result normal observation (scheduled / in-play / open);
-- no postpone / suspend / cancel / reschedule / tie / 50-50 token in that history;
-- a later graded, non-tied completed-game payload.
-
-A lone final score plus current closed/settled state is **not** proof of normal completion. Without that history, automatic settlement stays fail-closed (`nfl_normal_completion_not_proven`).
+Automatic PAPER settlement uses a graded result that determines the canonical outcome. A postponed or similar token in lifecycle history does not by itself block that result. A current cancelled/void status does not invent a winner (`provider_status_*`). A tied two-way score stays `canonical_outcome_not_determined`.
 
 ## Provider identity retained for refresh
 

@@ -56,7 +56,9 @@ def test_registry_is_one_version_with_mlb_atp_and_wta() -> None:
     for code in ("mlb", "atp", "wta"):
         assert catalog[code]["selectable"] is True
         assert catalog[code]["default_selected"] is False
-        assert catalog[code]["paper_executable"] is False
+    assert catalog["mlb"]["paper_executable"] is True
+    for code in ("atp", "wta"):
+        assert catalog[code]["paper_executable"] is True
     assert catalog["atp"]["selector_label"] == "ATP (Hangzhou, Chengdu)"
     assert catalog["wta"]["selector_label"] == "WTA (Singapore, Seoul)"
     assert catalog["premier_league"]["paper_executable"] is True
@@ -157,9 +159,9 @@ def test_tennis_observation_rows_do_not_widen_other_sports(monkeypatch) -> None:
     left, right = tennis_fixtures._pair_markets()
     matched = MarketMatcher().match(left, right)
     tennis_pair = _wrapped(left, right, matched)
-    assert scan_eligible_pair(left, right, matched) is False
-    assert catalogue_allows_solver(left, right) is False
-    assert paper_assumed_solver_model(left, right) is None
+    assert scan_eligible_pair(left, right, matched) is True
+    assert catalogue_allows_solver(left, right) is True
+    assert paper_assumed_solver_model(left, right) == "simple_complete_set"
     assert universe_catalogue_pairs([tennis_pair]) == [tennis_pair]
 
     football_event = CanonicalEvent(

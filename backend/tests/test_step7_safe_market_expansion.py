@@ -408,8 +408,8 @@ def test_totals_different_lines_never_match_exact_line_can_scan() -> None:
     matcher = MarketMatcher()
     assert matcher.match(mb_25, pm_30).matched is False
     assert "line_mismatch" in matcher.match(mb_25, pm_30).reasons
-    assert matcher.match(mb_25, pm_25).matched is False
-    assert "not_registered" in matcher.match(mb_25, pm_25).reasons
+    assert matcher.match(mb_25, pm_25).matched is True
+    assert "not_registered" not in matcher.match(mb_25, pm_25).reasons
     decision, _, _ = _scan(
         {
             "id": 7202,

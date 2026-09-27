@@ -273,14 +273,18 @@ def test_mb_kalshi_internal_fills_and_settlement(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_pm_kalshi_without_matchbook_is_not_register_admitted(tmp_path: Path) -> None:
+def test_pm_kalshi_structural_btts_replays_in_paper(tmp_path: Path) -> None:
     demo, ops, watchlist, ledger, repository = _bundle(tmp_path)
     try:
-        with pytest.raises(PaperOperationsError, match="not_registered"):
-            demo.replay(
-                FixtureReplayRequest(venue_pair="polymarket_kalshi", close_via="settlement")
-            )
+        result = demo.replay(
+            FixtureReplayRequest(venue_pair="polymarket_kalshi", close_via="settlement")
+        )
+        assert result.trade is not None
+        assert result.trade.places_orders is False
+        assert result.trade.state is PaperTradeState.CLOSED
+        assert {leg.venue for leg in result.trade.legs} == {VenueName.POLYMARKET, VenueName.KALSHI}
         assert ops.list_active_trades() == []
+        assert Settings().sports_hedge_execution_enabled is False
     finally:
         repository.close()
         ledger.close()

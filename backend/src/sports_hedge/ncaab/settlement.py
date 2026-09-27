@@ -26,7 +26,6 @@ from sports_hedge.ncaab.constants import (
     NCAAB_MISSING_VENUE_EVIDENCE_REASON,
     NCAAB_NOT_LIVE_EXECUTION_REASON,
     NCAAB_PAIR_UNAPPROVED_REASON,
-    NCAAB_SETTLEMENT_FAIL_CLOSED_REASON,
 )
 from sports_hedge.ncaab.detect import is_ncaab_canonical_event, is_ncaab_competition_label
 
@@ -87,7 +86,13 @@ def ncaab_paper_settlement(
 
 
 def ncaab_paper_audit_reasons() -> list[str]:
-    return list(NCAAB_PAPER_AUDIT_REASONS)
+    """New rows keep the ordinary-contract block, not an exceptional-settlement caveat."""
+
+    return [
+        NCAAB_PAIR_UNAPPROVED_REASON,
+        NCAAB_NOT_LIVE_EXECUTION_REASON,
+        NCAAB_AUTO_SETTLEMENT_DISABLED_REASON,
+    ]
 
 
 def is_ncaab_paper_trade(trade) -> bool:
@@ -103,16 +108,9 @@ def is_ncaab_paper_trade(trade) -> bool:
 
 
 def ncaab_exceptional_status_blocker(*values: object) -> str | None:
-    for value in values:
-        text = str(value or "").strip().casefold()
-        if not text:
-            continue
-        if text in _EXCEPTIONAL_STATUS_TOKENS:
-            return NCAAB_SETTLEMENT_FAIL_CLOSED_REASON
-        compact = text.replace("_", " ")
-        for token in _EXCEPTIONAL_STATUS_TOKENS:
-            if token in compact:
-                return NCAAB_SETTLEMENT_FAIL_CLOSED_REASON
+    """Exceptional lifecycle tokens are not the NCAAB PAPER block."""
+
+    del values
     return None
 
 

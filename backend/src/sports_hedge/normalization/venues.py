@@ -2352,6 +2352,39 @@ def _assemble_match_result(
     )
 
 
+_EXPLICIT_DRAW_PREDICATES = (
+    "end in a draw",
+    "ends in a draw",
+    "ending in a draw",
+    "end in a tie",
+    "ends in a tie",
+    "ending in a tie",
+    "be a draw",
+    "be a tie",
+    "is a draw",
+    "is a tie",
+    "result in a draw",
+    "results in a draw",
+    "finish in a draw",
+    "finishes in a draw",
+)
+_AMBIGUOUS_DRAW_TOKENS = (
+    "or draw",
+    "draw or",
+    "or tie",
+    "tie or",
+    "double chance",
+    "draw no bet",
+    "to qualify",
+    "either team",
+    "either side",
+    "no draw",
+    "not a draw",
+    "not end",
+    "win or draw",
+)
+
+
 def polymarket_moneyline_yes_outcome(
     question: str,
     *,
@@ -2360,7 +2393,10 @@ def polymarket_moneyline_yes_outcome(
 ) -> CanonicalOutcome | None:
     """Map a Polymarket moneyline question to the YES-side 3-way outcome.
 
-    Fail closed on ambiguous titles (both teams, home-or-draw, etc.).
+    An explicit draw predicate may name both clubs as the fixture title
+    ("Will England vs. Spain end in a draw?"). Double chance, either-team,
+    and draw-no-bet wording stays fail-closed. Both team names without an
+    explicit draw predicate are not a draw.
     """
 
     text = normalize_text(question)
@@ -2368,8 +2404,14 @@ def polymarket_moneyline_yes_outcome(
     away = normalize_text(away_team)
     if not text:
         return None
-    if any(token in text for token in ("or draw", "double chance", "draw no bet", "to qualify")):
+    if any(token in text for token in _AMBIGUOUS_DRAW_TOKENS):
         return None
+    if any(predicate in text for predicate in _EXPLICIT_DRAW_PREDICATES):
+        # A pure draw question does not also ask who wins. Mixed wording
+        # ("win or end in a draw") is double chance and stays fail-closed.
+        if "win" in text or "beat" in text:
+            return None
+        return CanonicalOutcome.DRAW
     draw_like = "draw" in text or "tie" in text
     home_present = bool(home) and home in text
     away_present = bool(away) and away in text
@@ -2820,6 +2862,15 @@ def _polymarket_market_family(
         return MarketFamily.PLAYER_PROPS, line
     if "both teams to score" in combined or "btts" in combined:
         return MarketFamily.BOTH_TEAMS_TO_SCORE, None
+    if sports_type == "totals":
+        if _polymarket_structured_full_time_total(
+            question,
+            line=line,
+            home_team=home_team,
+            away_team=away_team,
+        ):
+            return MarketFamily.TOTAL_GOALS, line
+        raise VenueNormalizationError(f"Unsupported Polymarket sports market: {question}")
     if "total goal" in combined or ("over under" in combined and "goal" in combined):
         extra = normalize_text(str(_first(payload, "groupItemTitle", "group_item_title") or ""))
         scoped = f"{combined} {extra}".strip()
@@ -3170,6 +3221,50 @@ def _text_mentions_exactly_one_team(text: str, *, home_team: str, away_team: str
     home_in = bool(home) and home in normalized
     away_in = bool(away) and away in normalized
     return home_in != away_in
+
+
+def _polymarket_structured_full_time_total(
+    question: str,
+    *,
+    line: Decimal | None,
+    home_team: str,
+    away_team: str,
+) -> bool:
+    """True for a structured full-time match total, such as sportsMarketType=totals.
+
+    Requires an x.5 line and an over/under signal. Team, half, corner, and card
+    scope stay unsupported. A fixture title that names both clubs is not itself
+    a team total.
+    """
+
+    if line is None or line_push_possible(line) is not False:
+        return False
+    if _period_from_text(question) is not FootballPeriod.FULL_TIME:
+        return False
+    text = normalize_text(question)
+    if any(token in text for token in ("corner", "card", "booking", "handicap", "spread", "team total", "player")):
+        return False
+    remainder = _strip_fixture_title(text, home_team=home_team, away_team=away_team)
+    home = normalize_text(home_team)
+    away = normalize_text(away_team)
+    if (home and home in remainder) or (away and away in remainder):
+        return False
+    return any(token in remainder for token in ("o u", "over", "under", "total"))
+
+
+def _strip_fixture_title(text: str, *, home_team: str, away_team: str) -> str:
+    home = normalize_text(home_team)
+    away = normalize_text(away_team)
+    if not home or not away:
+        return text
+    for left, right in ((home, away), (away, home)):
+        for separator in (" vs ", " v ", " versus "):
+            prefix = f"{left}{separator}{right}"
+            if text == prefix:
+                return ""
+            if text.startswith(prefix + " "):
+                return text[len(prefix) :].strip()
+    return text
 
 
 def _is_named_team_or_participant_total(

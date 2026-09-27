@@ -532,8 +532,8 @@ def test_incomplete_settlement_fingerprints_are_not_equivalent() -> None:
         )
 
     result = MarketMatcher().match(market(VenueName.MATCHBOOK), market(VenueName.POLYMARKET))
-    assert result.matched is False
-    assert "not_registered" in result.reasons
+    assert result.matched is True
+    assert "not_registered" not in result.reasons
 
 
 def test_legacy_fee_snapshot_alone_cannot_produce_a_strike() -> None:

@@ -112,6 +112,34 @@ MATCHBOOK_LIFECYCLE_SOURCE = "matchbook"
 EVICTION_TERMINAL_FROM_MATCHBOOK = "terminal_status_from_matchbook"
 EVICTION_TERMINAL = "terminal_status"
 EVICTION_CLOCK_EXPIRED_CURRENT_RADAR = "clock_expired_current_radar"
+# Successful post-kickoff evaluation found no ApprovedEquivalent markets.
+# Current-radar closure only. Not a fabricated completed/in_running status.
+EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF = (
+    "no_current_equivalent_markets_post_kickoff"
+)
+SUCCESSFUL_MARKET_EVALUATION_STATE = "evaluated"
+# Incomplete work must not be read as "equivalents no longer exist".
+INCOMPLETE_MARKET_EVALUATION_REASONS = frozenset(
+    {
+        "not_evaluated_scan_deadline",
+        "scan_budget_exhausted",
+        "list_markets_unavailable",
+        "market_fetch_unavailable",
+        "hot_relationship_missing",
+        "single_venue_no_cross_venue_candidate",
+        "cross_venue_unavailable",
+        "upper_bound_below_min_net",
+        "hot_revalidation_needed",
+        "retry_wait",
+        "provider_timeout",
+        "timeout",
+        "degraded",
+        "deferred",
+        "partial",
+        "provider_capacity_exhausted",
+        "failed_exact_id_refresh",
+    }
+)
 
 
 def classify_scan_lane(
@@ -186,6 +214,8 @@ def current_radar_eviction_reason(
 
     Elapsed-time expiry is ``clock_expired_current_radar``, never completed.
     Explicit terminal still uses the provider-terminal eviction reason.
+    A successful post-kickoff evaluation with zero matched equivalents is
+    ``no_current_equivalent_markets_post_kickoff``. Incomplete scans are not.
     """
 
     classify_kwargs = {
@@ -193,18 +223,98 @@ def current_radar_eviction_reason(
         "post_kickoff_unknown_horizon": post_kickoff_unknown_horizon,
         "post_kickoff_current_radar_ceiling": post_kickoff_current_radar_ceiling,
     }
-    if classify_scan_lane(fixture, now, **classify_kwargs) is not ScanLane.DROP:
+    evaluated = require_aware_instant(now, "now")
+    lane = classify_scan_lane(fixture, evaluated, **classify_kwargs)
+    if lane is not ScanLane.DROP:
+        if authoritative_post_kickoff_zero_equivalents(fixture, evaluated):
+            return EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF
         return None
     if is_explicit_terminal(fixture):
         return terminal_eviction_reason(fixture)
     kickoff = getattr(fixture, "kickoff_utc", None)
     if kickoff is None:
         return None
-    evaluated = require_aware_instant(now, "now")
     kickoff_utc = require_aware_instant(kickoff, "kickoff_utc")
     if evaluated - kickoff_utc > post_kickoff_current_radar_ceiling:
         return EVICTION_CLOCK_EXPIRED_CURRENT_RADAR
+    if authoritative_post_kickoff_zero_equivalents(fixture, evaluated):
+        return EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF
     return None
+
+
+def explicit_matched_equivalent_count(fixture: Any) -> int | None:
+    """Return a stated equivalent count. ``None`` is unknown, never zero."""
+
+    raw = getattr(fixture, "matched_equivalent_count", None)
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    return None
+
+
+def market_evaluation_reason_is_incomplete(fixture: Any) -> bool:
+    raw = getattr(fixture, "market_evaluation_reason", None)
+    if raw is None:
+        return False
+    text = str(raw).strip().casefold()
+    if not text:
+        return False
+    return text in INCOMPLETE_MARKET_EVALUATION_REASONS
+
+
+def successful_complete_market_evaluation(fixture: Any) -> bool:
+    """True only when this observation finished a current market evaluation.
+
+    ``evaluated`` is the collector/price-engine success state. Timeout,
+    scan-budget leftover, degraded venues, retry-wait and other incomplete
+    reasons are not success, even if a count field happens to be present.
+    """
+
+    state = str(getattr(fixture, "market_evaluation_state", "") or "").strip().casefold()
+    if state != SUCCESSFUL_MARKET_EVALUATION_STATE:
+        return False
+    return not market_evaluation_reason_is_incomplete(fixture)
+
+
+def kickoff_has_passed(fixture: Any, now: datetime) -> bool:
+    kickoff = getattr(fixture, "kickoff_utc", None)
+    if kickoff is None:
+        return False
+    evaluated = require_aware_instant(now, "now")
+    kickoff_utc = require_aware_instant(kickoff, "kickoff_utc")
+    return kickoff_utc <= evaluated
+
+
+def operator_post_kickoff_in_play(fixture: Any, now: datetime) -> bool:
+    """Operator IN PLAY. Does not read or write provider ``in_running``."""
+
+    if not kickoff_has_passed(fixture, now):
+        return False
+    if str(getattr(fixture, "market_evaluation_state", "") or "").strip().casefold() != (
+        SUCCESSFUL_MARKET_EVALUATION_STATE
+    ):
+        return False
+    count = explicit_matched_equivalent_count(fixture)
+    return count is not None and count > 0
+
+
+def authoritative_post_kickoff_zero_equivalents(fixture: Any, now: datetime) -> bool:
+    """True when a finished post-kickoff evaluation confirms zero equivalents.
+
+    Provider ``in_running=True``, explicit terminal status, schedule
+    exceptions, pre-kickoff fixtures and incomplete scans are not this signal.
+    """
+
+    if getattr(fixture, "in_running", None) is True:
+        return False
+    if is_explicit_terminal(fixture) or is_schedule_exception(fixture):
+        return False
+    if not kickoff_has_passed(fixture, now):
+        return False
+    if not successful_complete_market_evaluation(fixture):
+        return False
+    return explicit_matched_equivalent_count(fixture) == 0
 
 
 def kickoff_horizon_reason_label(hot_horizon: timedelta = DEFAULT_HOT_HORIZON) -> str:
@@ -234,6 +344,9 @@ def hot_reason_labels(
     NET PROXIMITY is below Min Net Arb but within 0.50pp of the operator
     trigger. SURVEILLANCE remains already-triggered economics that are not
     executable-fresh. Elapsed time never fabricates live or completed status.
+    Provider ``in_running`` is unchanged. Post-kickoff IN PLAY is also the
+    operator read-model when a successful current evaluation still has
+    matched equivalents.
     """
 
     resolved_membership = ScanLane(membership) if not isinstance(membership, ScanLane) else membership
@@ -253,7 +366,10 @@ def hot_reason_labels(
             if timedelta(0) < until_kickoff <= hot_horizon:
                 labels.append(kickoff_horizon_reason_label(hot_horizon))
             elif kickoff_utc <= evaluated and resolved_lifecycle is ScanLane.HOT:
-                labels.append(HOT_REASON_POST_KICKOFF_STATUS_PENDING)
+                if operator_post_kickoff_in_play(fixture, evaluated):
+                    labels.append(HOT_REASON_IN_PLAY)
+                else:
+                    labels.append(HOT_REASON_POST_KICKOFF_STATUS_PENDING)
     if resolved_lifecycle is ScanLane.UNIVERSE:
         if qualifying_promotion:
             labels.append(HOT_REASON_ARB_PROMOTION)

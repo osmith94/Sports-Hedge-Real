@@ -1658,6 +1658,7 @@ def _persist_collection_report(
         (report.scan_diagnostics or {}).get(PRICE_ENGINE_ITEM_COMPLETION_CAPTURE)
     )
     if not already_captured:
+        lane = getattr(scan_lane, "value", scan_lane)
         for decision in report.paper_decisions:
             _persist_decision(
                 decision,
@@ -1666,6 +1667,7 @@ def _persist_collection_report(
                 watchlist=watchlist,
                 operations=operations,
                 refreshed_venues=report.enabled_venues,
+                pricing_lane=None if lane is None else str(lane),
             )
     _run_paper_position_management(report, operations=operations)
 
@@ -1882,12 +1884,32 @@ def scheduled_paper_scan_service() -> PaperScanService:
     )
 
 
+def note_expired_qualifying_episodes_on_tick(coordinator) -> None:
+    """Close radar-expired qualifying episodes on the server tick.
+
+    No provider calls and no scanner-cadence change. Event time is the existing
+    lane TTL boundary. Safe to repeat: a closed episode is no longer open.
+    """
+
+    from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
+    from sports_hedge.arbitrage.watchlist.service import note_expired_qualifying_episodes
+
+    radar = coordinator.radar_horizon_kwargs()
+    note_expired_qualifying_episodes(
+        get_watchlist_service(get_watchlist_repository()),
+        coordinator.now(),
+        hot_ttl_seconds=int(radar["hot_ttl_seconds"]),
+        universe_ttl_seconds=int(radar["universe_ttl_seconds"]),
+    )
+
+
 async def server_owned_refresh_tick(plan=None) -> None:
     """Background tick used when PAPER_LIVE_REFRESH_ENABLED is true."""
 
     coordinator = get_live_refresh_coordinator()
     if coordinator.operator_scanner_stopped:
         return
+    note_expired_qualifying_episodes_on_tick(coordinator)
     if coordinator._catalogue_store is None:
         coordinator.bind_catalogue_store(get_approved_market_catalogue_store())
     resolved = plan if plan is not None else coordinator.plan_tick()
@@ -2373,6 +2395,7 @@ def persist_price_engine_item_capture(
     watchlist: WatchlistService,
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     pricing_lane: str | None = None,
+    execution_authoritative: bool = False,
 ) -> list[Any] | None:
     """Capture-critical watchlist + ``persist_triggered_chain`` only.
 
@@ -2397,6 +2420,7 @@ def persist_price_engine_item_capture(
             ),
             write_audit=False,
             pricing_lane=pricing_lane,
+            execution_authoritative=execution_authoritative,
         )
 
 
@@ -2464,13 +2488,23 @@ def bind_price_engine_item_persist(
     """
 
     async def _handoff(decision: PaperScanDecision, runtime: Any) -> None:
-        history = await asyncio.to_thread(
-            persist_price_engine_item_capture,
+        from sports_hedge.application.execution_reprice import capture_with_execution_reprice
+
+        captured = await capture_with_execution_reprice(
             decision,
+            runtime=runtime,
+            engine=engine,
             service=service,
             watchlist=watchlist,
             pricing_lane=_pricing_lane_from_runtime(runtime),
         )
+        history = (
+            captured.entry_history
+            if captured.entry_history is not None
+            else captured.discovery_history
+        )
+        observed_discovery = captured.discovery_decision or decision
+        audit_decision = captured.entry_decision or observed_discovery
         if decision.canonical_market_id:
             operations = get_paper_operations_service(watchlist, get_priority_alert_service())
             miss = operations.consume_execution_miss(
@@ -2486,11 +2520,26 @@ def bind_price_engine_item_persist(
                     zero_fill_reason=miss.reason,
                     pricing_lane=miss.pricing_lane or _pricing_lane_from_runtime(runtime),
                 )
-        engine.schedule_observability(
-            lambda captured=history, item=decision: record_price_engine_item_audit(
-                item, audit=audit, history=captured
+        if captured.entry_decision is not None and captured.entry_decision is not decision:
+            discovery_rows = list(captured.discovery_history)
+            engine.schedule_observability(
+                lambda discovery_history=discovery_rows, item=observed_discovery: (
+                    record_price_engine_item_audit(
+                        item, audit=audit, history=discovery_history
+                    )
+                )
             )
-        )
+            engine.schedule_observability(
+                lambda entry_history=captured.entry_history, item=captured.entry_decision: (
+                    record_price_engine_item_audit(item, audit=audit, history=entry_history)
+                )
+            )
+        else:
+            engine.schedule_observability(
+                lambda history_rows=history, item=audit_decision: record_price_engine_item_audit(
+                    item, audit=audit, history=history_rows
+                )
+            )
 
     def _persist_hot_promotion(fact: HotPromotionFact) -> None:
         watchlist.record_hot_promotion(
@@ -2521,6 +2570,7 @@ def _persist_decision(
     refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
     write_audit: bool = True,
     pricing_lane: str | None = None,
+    execution_authoritative: bool = False,
 ) -> list[Any] | None:
     if not decision.canonical_market_id:
         return None
@@ -2531,12 +2581,18 @@ def _persist_decision(
     )
     if write_audit and audit is not None and history:
         audit.append_scan(build_paper_scan_record(decision, history))
-    watchlist.observe_paper_decision(decision, history, quote_age_ms=quote_age_ms)
+    watchlist.observe_paper_decision(
+        decision,
+        history,
+        quote_age_ms=quote_age_ms,
+        pricing_lane=pricing_lane,
+    )
     if operations is not None:
         operations.persist_triggered_chain(
             decision,
             refreshed_venues=refreshed_venues,
             pricing_lane=pricing_lane,
+            execution_authoritative=execution_authoritative,
         )
     return history
 

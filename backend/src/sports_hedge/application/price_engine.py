@@ -87,6 +87,7 @@ from sports_hedge.application.opportunity_viability import (
     UPPER_BOUND_BELOW_MIN_NET,
     assess_identity_viability,
     build_viability_evidence,
+    market_relationship_not_collected,
     catalogue_ready_venues,
     venue_blocked_for_identity,
     get_opportunity_viability_cache,
@@ -132,6 +133,7 @@ from sports_hedge.application.quote_freshness import (
 from sports_hedge.application.scan_lanes import (
     DEFAULT_BACKGROUND_INTERVAL_SECONDS,
     DEFAULT_HOT_INTERVAL_SECONDS,
+    EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF,
     ScanLane,
     classify_scan_lane,
 )
@@ -452,6 +454,7 @@ class CataloguePriceEngine:
         }
         self._slice_remaining: Callable[[], float | None] | None = None
         self._pending_item_captures: set[asyncio.Task[Any]] = set()
+        self._execution_reprice_open: set[str] = set()
         self._last_slice_not_started: dict[str, int] = {
             PriceEnginePriority.HOT.value: 0,
             PriceEnginePriority.BACKGROUND.value: 0,
@@ -572,9 +575,14 @@ class CataloguePriceEngine:
         """Scheduler HOT vs BACKGROUND from lifecycle + engine-local promotion.
 
         UI/current-state projection is not scheduler authority. A lagged
-        ``FixtureCurrentStateStore`` upsert cannot grant or revoke priority.
+        ``FixtureCurrentStateStore`` upsert cannot grant HOT priority.
+        A post-kickoff market-closure tombstone may revoke HOT priority only:
+        the fixture is no longer a useful live pricing fixture. Cadence is
+        unchanged, and provider ``in_running`` is not rewritten.
         """
 
+        if self._post_kickoff_market_closed(identity.canonical_event_id):
+            return PriceEnginePriority.BACKGROUND
         fixture = _fixture_like(identity)
         lifecycle = classify_scan_lane(fixture, self.now())
         if lifecycle is ScanLane.HOT:
@@ -584,6 +592,16 @@ class CataloguePriceEngine:
         if identity.canonical_event_id in self._promoted_hot_ids:
             return PriceEnginePriority.HOT
         return PriceEnginePriority.BACKGROUND
+
+    def _post_kickoff_market_closed(self, canonical_event_id: str) -> bool:
+        store = self.fixture_state
+        if store is None or not canonical_event_id:
+            return False
+        tombstone = store.tombstone_for(canonical_event_id)
+        return (
+            tombstone is not None
+            and tombstone.reason == EVICTION_NO_CURRENT_EQUIVALENT_MARKETS_POST_KICKOFF
+        )
 
     def coverage_cursor(self, priority: PriceEnginePriority) -> CoverageCursor:
         return self._coverage[priority.value]
@@ -2041,6 +2059,248 @@ class CataloguePriceEngine:
             fee_snapshot=self._polymarket_fee_snapshot_payload(identity),
         )
 
+    async def reprice_for_paper_entry(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        *,
+        venues: tuple[VenueName, ...] | list[VenueName],
+    ) -> Any:
+        """Fetch the persisted exact books for one hedge and rescan them once.
+
+        Bypasses the slice coalescer so this is a new read, not the discovery
+        snapshot. Does not schedule a HOT/BACKGROUND retry, does not change
+        cadence, and does not call list_events or list_markets.
+        """
+
+        from sports_hedge.application.execution_reprice import (
+            EXECUTION_REPRICE_FAILED,
+            ExecutionRepriceResult,
+        )
+
+        identity = runtime.identity
+        row_id = identity.catalogue_row_id
+        if row_id in self._execution_reprice_open:
+            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        required = tuple(dict.fromkeys(venues))
+        if len(required) < 2:
+            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        if not self._execution_identity_ready(identity, required):
+            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        self._execution_reprice_open.add(row_id)
+        try:
+            return await self._reprice_exact_books(runtime, required)
+        finally:
+            self._execution_reprice_open.discard(row_id)
+
+    def _execution_identity_ready(
+        self,
+        identity: DerivedPriceEngineItem,
+        venues: tuple[VenueName, ...],
+    ) -> bool:
+        for venue in venues:
+            if venue is VenueName.MATCHBOOK:
+                if not identity.matchbook_event_id or not identity.matchbook_market_id:
+                    return False
+            elif venue is VenueName.KALSHI:
+                if not identity.kalshi_event_ticker or not _kalshi_tickers(identity):
+                    return False
+            elif venue is VenueName.POLYMARKET:
+                tokens = executable_polymarket_token_ids(
+                    list(identity.polymarket_token_ids),
+                    event_id=identity.polymarket_event_id,
+                    market_id=identity.polymarket_market_id,
+                    condition_id=identity.polymarket_condition_id,
+                    required_outcomes=list(identity.required_outcomes)
+                    or required_outcomes_for_key(identity.register_canonical_key),
+                )
+                if not tokens:
+                    return False
+            else:
+                return False
+        return True
+
+    async def _reprice_exact_books(
+        self,
+        runtime: PriceEngineRuntimeItem,
+        venues: tuple[VenueName, ...],
+    ) -> Any:
+        from sports_hedge.application.execution_reprice import (
+            EXECUTION_REPRICE_FAILED,
+            ExecutionRepriceResult,
+        )
+
+        identity = runtime.identity
+        # Slot priority only. This does not enqueue a HOT scan or change cadence.
+        lane = ScanLane.HOT.value
+        matchbook: RetrievedVenuePayload | None = None
+        kalshi_books: dict[str, RetrievedVenuePayload] | None = None
+        polymarket_books: dict[str, RetrievedVenuePayload] | None = None
+        if VenueName.MATCHBOOK in venues:
+            matchbook = await self._execution_fetch_matchbook(identity, lane=lane)
+            if matchbook is None:
+                return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        if VenueName.KALSHI in venues:
+            kalshi_books = await self._execution_fetch_kalshi(identity, lane=lane)
+            if kalshi_books is None:
+                return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        if VenueName.POLYMARKET in venues:
+            polymarket_books = await self._execution_fetch_polymarket(identity, lane=lane)
+            if polymarket_books is None:
+                return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        # Age the books at evaluation time, after both legs are in hand, matching
+        # discovery. A clock that moves during the fetch must not look future-dated.
+        evaluated_at = self.now()
+        observations: dict[VenueName, VenueMarketObservation] = {}
+        try:
+            if matchbook is not None:
+                observations[VenueName.MATCHBOOK] = self._build_matchbook_obs(
+                    identity, matchbook, evaluated_at
+                )
+            if kalshi_books is not None:
+                observations[VenueName.KALSHI] = self._build_kalshi_obs(
+                    identity, kalshi_books, evaluated_at
+                )
+            if polymarket_books is not None:
+                observations[VenueName.POLYMARKET] = self._build_polymarket_obs(
+                    identity, polymarket_books, evaluated_at
+                )
+        except Exception:
+            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        ordered = [
+            venue
+            for venue in (VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET)
+            if venue in observations
+        ]
+        if len(ordered) != 2 or self.paper_scan is None:
+            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        try:
+            decision = self.paper_scan.scan_pair(
+                observations[ordered[0]],
+                observations[ordered[1]],
+                **self._scan_kwargs(identity),
+            )
+        except Exception:
+            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+        # Provider age is already measured against the evaluation clock. The
+        # paper-entry gate adds capture→decision elapsed, so both instants have
+        # to be this entry. Leaving a fake engine clock on the legs would count
+        # that gap as quote age and reject a book the provider age already scored.
+        entry_at = datetime.now(UTC)
+        decision = decision.model_copy(
+            update={
+                "scanned_at": entry_at,
+                "fill_legs": [
+                    leg.model_copy(update={"quote_captured_at": entry_at})
+                    for leg in decision.fill_legs
+                ],
+            }
+        )
+        return ExecutionRepriceResult(
+            decision=decision,
+            refreshed_venues=tuple(ordered),
+        )
+
+    async def _execution_fetch_matchbook(
+        self,
+        identity: DerivedPriceEngineItem,
+        *,
+        lane: str,
+    ) -> RetrievedVenuePayload | None:
+        getter = getattr(self.matchbook, "get_market", None)
+        if not callable(getter):
+            return None
+        try:
+            payload, status = await self._provider_call_execute(
+                VenueName.MATCHBOOK,
+                lane=lane,
+                stage="get_market",
+                source_id=str(identity.matchbook_market_id),
+                coro=getter(identity.matchbook_event_id, identity.matchbook_market_id),
+                runtime=None,
+            )
+        except MatchbookMarketGoneError:
+            return None
+        if status is not None or payload is None:
+            return None
+        market = extract_matchbook_market_payload(payload)
+        if market is None or matchbook_payload_is_terminal(market):
+            return None
+        if str(market.get("id") or "") != str(identity.matchbook_market_id):
+            return None
+        return RetrievedVenuePayload(payload=market, retrieved_at=self.now())
+
+    async def _execution_fetch_kalshi(
+        self,
+        identity: DerivedPriceEngineItem,
+        *,
+        lane: str,
+    ) -> dict[str, RetrievedVenuePayload] | None:
+        getter = getattr(self.kalshi, "get_order_book", None) if self.kalshi is not None else None
+        if not callable(getter):
+            return None
+        tickers = _required_tickers(identity)
+        if not tickers:
+            return None
+        books: dict[str, RetrievedVenuePayload] = {}
+        for ticker in tickers:
+            payload, status = await self._provider_call_execute(
+                VenueName.KALSHI,
+                lane=lane,
+                stage="order_book",
+                source_id=ticker,
+                coro=getter(identity.kalshi_event_ticker, ticker),
+                runtime=None,
+            )
+            if status is not None or payload is None:
+                return None
+            books[ticker] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
+        return books
+
+    async def _execution_fetch_polymarket(
+        self,
+        identity: DerivedPriceEngineItem,
+        *,
+        lane: str,
+    ) -> dict[str, RetrievedVenuePayload] | None:
+        getter = (
+            getattr(self.polymarket, "get_order_book", None)
+            if self.polymarket is not None
+            else None
+        )
+        if not callable(getter):
+            return None
+        tokens = executable_polymarket_token_ids(
+            list(identity.polymarket_token_ids),
+            event_id=identity.polymarket_event_id,
+            market_id=identity.polymarket_market_id,
+            condition_id=identity.polymarket_condition_id,
+            required_outcomes=list(identity.required_outcomes)
+            or required_outcomes_for_key(identity.register_canonical_key),
+        )
+        if not tokens:
+            return None
+        books: dict[str, RetrievedVenuePayload] = {}
+        for item in tokens:
+            token = str(getattr(item, "native_id", item) or "").strip()
+            if not token:
+                return None
+            payload, status = await self._provider_call_execute(
+                VenueName.POLYMARKET,
+                lane=lane,
+                stage="order_book",
+                source_id=token,
+                coro=getter(
+                    identity.polymarket_event_id,
+                    identity.polymarket_market_id,
+                    token,
+                ),
+                runtime=None,
+            )
+            if status is not None or payload is None:
+                return None
+            books[token] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
+        return books
+
     def _refresh_promoted_hot_ids(self) -> None:
         """Derive fixture HOT from any live interesting catalogue row.
 
@@ -2848,6 +3108,11 @@ class CataloguePriceEngine:
                 ],
                 final_reason=reason,
                 registered_relationships=[str(identity.register_canonical_key or "")],
+                evidence_stage="price_engine_skip",
+                relationship_fields_scope="single_catalogue_row_skip_not_universe_search",
+                market_relationship_evidence=market_relationship_not_collected(
+                    "price_engine_skip_not_universe_catalogue"
+                ),
             ),
             no_comparison_reason=reason,
             opportunity_state="not_evaluated",

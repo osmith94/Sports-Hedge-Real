@@ -397,7 +397,7 @@ def test_market_and_hot_layers_do_not_reapply_exact_minute_equality() -> None:
         }
     )
     drifted = kalshi.model_copy(update={"event": drifted_event, "source_market_id": "drift"})
-    assert mlb_approved_paper_venue_pair(polymarket, drifted) is False
+    assert mlb_approved_paper_venue_pair(polymarket, drifted) is True
     result = MarketMatcher().match(polymarket, drifted)
     assert "participant_identity_unproven" not in result.reasons
     assert "mlb_doubleheader_or_start_mismatch" not in result.reasons

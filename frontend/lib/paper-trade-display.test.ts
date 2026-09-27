@@ -15,6 +15,8 @@ import {
   formatStoredLine,
   isNcaabPaperTrade,
   isNflPaperTrade,
+  tradeShowsNbaSettlementCaveat,
+  tradeShowsNflSettlementCaveat,
 } from "./paper-trade-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -232,11 +234,14 @@ describe("active-trade canonical line and compact odds", () => {
     assert.equal(compactMarketHeading(nbaWinner), "Game winner");
     assert.match(compactLegLine(nbaWinner, nbaWinner.legs[0]), /Pistons · Game winner/);
     const bookSrc = readFileSync(join(frontendRoot, "components/paper-trade-book.tsx"), "utf8");
-    assert.match(bookSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
-    assert.match(bookSrc, /NBA_SETTLEMENT_CAVEAT_TEXT/);
+    assert.doesNotMatch(bookSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
+    assert.doesNotMatch(bookSrc, /NBA_SETTLEMENT_CAVEAT_TEXT/);
+    assert.doesNotMatch(bookSrc, /normal completed NFL game/);
     const detailSrc = readFileSync(join(frontendRoot, "app/paper/[tradeId]/page.tsx"), "utf8");
-    assert.match(detailSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
-    assert.match(detailSrc, /NBA_SETTLEMENT_CAVEAT_TEXT/);
+    assert.doesNotMatch(detailSrc, /NFL_SETTLEMENT_CAVEAT_TEXT/);
+    assert.doesNotMatch(detailSrc, /NBA_SETTLEMENT_CAVEAT_TEXT/);
+    assert.equal(tradeShowsNflSettlementCaveat(winner), false);
+    assert.equal(tradeShowsNbaSettlementCaveat(nbaWinner), false);
   });
 
   it("does not treat NCAAB game-winner trades as NFL", () => {

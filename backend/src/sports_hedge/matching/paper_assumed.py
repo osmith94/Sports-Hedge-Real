@@ -9,11 +9,11 @@ READ-ONLY mode. The scanner must not re-litigate settlement text on every scan.
 This path is never live-execution eligible. Independently proven complete
 fingerprints remain APPROVED_EQUIVALENT. Proven extra-time / penalties /
 to-qualify contradictions, wrong fixture/family/period, TOTAL line mismatch,
-and incomplete outcome-space identity stay fail-closed. Kalshi
-cancel/reschedule-to-fair-price wording does not block PAPER admission.
+and incomplete outcome-space identity stay fail-closed. Exceptional
+cancel/postpone/void/fair-price differences do not block PAPER admission.
 
-Polymarket is out of scope. Integer/quarter TOTAL push markets stay outside
-this Phase-1 paper-assumed set.
+Polymarket joins Matchbook and Kalshi when it normalizes to the same
+canonical key. Integer/quarter TOTAL push markets stay outside this set.
 """
 
 from __future__ import annotations

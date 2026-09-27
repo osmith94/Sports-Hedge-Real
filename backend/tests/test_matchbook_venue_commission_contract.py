@@ -355,7 +355,8 @@ def _scan_service(
     fee_store: SqliteMatchbookAccountFeeStore | None = None,
 ) -> tuple[PaperScanService, SqliteMarketIntelligenceRepository]:
     fx = FxRateService(SqliteFxRateRepository())
-    fx.persist_ecb_closes([fresh_usd_ecb_close(Decimal("0.75000000"), as_of=OBSERVED)])
+    # Scanner FX age is measured from wall-clock now, not the fixture kickoff.
+    fx.persist_ecb_closes([fresh_usd_ecb_close(Decimal("0.75000000"))])
     repository = SqliteMarketIntelligenceRepository()
     service = PaperScanService(
         MarketIntelligenceService(repository),

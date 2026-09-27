@@ -12,7 +12,6 @@ import { formatObservationAge, parseObservationTimestampMs } from "./observation
 import { backgroundPriceCopy, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 import { trackedMarketHref } from "./tracked-markets-display";
 import { lastScanVenuesLabel } from "./venue-participation-display";
-import { NBA_SETTLEMENT_CAVEAT_TEXT, NFL_SETTLEMENT_CAVEAT_TEXT, reasonsIncludeNflSettlementCaveat } from "./paper-trade-display";
 
 export const OPPORTUNITY_MONITOR_SORT_COLUMNS = [
   "age",
@@ -234,18 +233,6 @@ export function opportunityMonitorStateTone(
   return "reject";
 }
 
-function _exceptionalSettlementCaveatText(
-  competition: string | null | undefined,
-  reasons: string[] | null | undefined,
-): string {
-  const joined = (reasons ?? []).join(" ");
-  const nba =
-    (competition ?? "").trim().toUpperCase() === "NBA" ||
-    joined.includes("nba_paper") ||
-    joined.includes("owner_approved_nba");
-  return nba ? NBA_SETTLEMENT_CAVEAT_TEXT : NFL_SETTLEMENT_CAVEAT_TEXT;
-}
-
 export function opportunityMonitorStateTitle(item: NearOpportunity): string {
   const reasons = [...item.rejection_reasons, ...item.insufficiency_reasons]
     .map((reason) => reason.replaceAll("_", " "))
@@ -254,10 +241,6 @@ export function opportunityMonitorStateTitle(item: NearOpportunity): string {
   const classification = item.classification.replaceAll("_", " ");
   const parts = [status, classification];
   if (reasons) parts.push(reasons);
-  const caveatReasons = [...item.rejection_reasons, ...item.insufficiency_reasons, ...(item.mapping_reasons ?? [])];
-  if (reasonsIncludeNflSettlementCaveat(caveatReasons)) {
-    parts.push(_exceptionalSettlementCaveatText(item.competition, caveatReasons));
-  }
   if (isPreTradeTrigger(item) && !isExecutableRadarFreshness(item.freshness_class)) {
     const freshness = freshnessLabel(item.freshness_class);
     parts.push(
@@ -299,9 +282,6 @@ export function mappingDisplay(item?: NearOpportunity | null): {
     provenanceLabel,
     reasons,
   ].filter(Boolean);
-  if (reasonsIncludeNflSettlementCaveat(item?.mapping_reasons)) {
-    titleParts.push(_exceptionalSettlementCaveatText(item?.competition, item?.mapping_reasons));
-  }
   return {
     text: `${mappingConfidencePercent(confidence)} · ${provenanceLabel}`,
     title: titleParts.join(" · "),

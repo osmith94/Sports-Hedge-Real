@@ -148,8 +148,14 @@ def test_paper_scan_does_not_inherit_registry_zero_when_metadata_missing() -> No
     )
     try:
         decision = service.scan_pair(matchbook, polymarket, maximum_execution_risk=100)
+        assert decision.market_match.matched is True
         assert decision.eligible_for_paper_simulation is False
-        assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
+        assert any(
+            "unknown_required_venue_cost" in reason
+            or "unknown_costs" in reason
+            or "missing_fx" in reason
+            for reason in decision.rejection_reasons
+        )
     finally:
         repository.close()
 
@@ -176,8 +182,9 @@ def test_paper_scan_fee_disabled_polymarket_is_known_zero() -> None:
     )
     try:
         decision = service.scan_pair(matchbook, polymarket, maximum_execution_risk=100)
-        assert decision.eligible_for_paper_simulation is False
-        assert "not_registered" in decision.rejection_reasons or "market_not_equivalent" in decision.rejection_reasons
+        assert decision.market_match.matched is True
+        assert "unknown_required_venue_cost:polymarket" not in decision.rejection_reasons
+        assert "not_registered" not in decision.market_match.reasons
     finally:
         repository.close()
 

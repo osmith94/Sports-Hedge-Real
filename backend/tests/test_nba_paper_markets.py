@@ -73,9 +73,7 @@ from sports_hedge.nba.constants import (
     CANONICAL_NBA_TOTAL_POINTS,
     MATCHBOOK_NBA_COMPETITION_TAG_ID,
     NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT,
-    NBA_NORMAL_COMPLETION_NOT_PROVEN,
     NBA_POLYMARKET_EVIDENCE_REQUIRED,
-    NBA_SETTLEMENT_FAIL_CLOSED_REASON,
     NBA_SPORT,
     NBA_UNSUPPORTED_FAMILY_REASON,
 )
@@ -435,12 +433,12 @@ def test_game_winner_kalshi_polymarket_is_paper_admitted() -> None:
     result = matcher.match(kalshi, pm)
     assert result.matched, result.reasons
     assert registered_canonical_key(kalshi, pm) == CANONICAL_NBA_GAME_WINNER
-    assert NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT in result.reasons
+    assert NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT not in result.reasons
     assert catalogue_allows_solver(kalshi, pm)
     assert catalogue_allows_live_execution(kalshi, pm) is False
     assessment = classify_pair(kalshi, pm)
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-    assert assessment.settlement_assumption == "normal_full_game_completion"
+    assert assessment.settlement_assumption == "regulation_time"
     assert solver_model_for_pair(kalshi, pm) == "simple_complete_set"
 
 
@@ -588,14 +586,14 @@ def test_nearby_games_do_not_collapse_on_close_tipoff() -> None:
 
 
 def test_automatic_settlement_fails_closed_without_lifecycle_proof() -> None:
-    assert nba_tied_score_blocker(100, 100) == NBA_SETTLEMENT_FAIL_CLOSED_REASON
-    assert nba_exceptional_status_blocker("cancelled") == NBA_SETTLEMENT_FAIL_CLOSED_REASON
-    assert nba_exceptional_status_blocker("fair price") == NBA_SETTLEMENT_FAIL_CLOSED_REASON
-    assert nba_exceptional_status_blocker("50-50") == NBA_SETTLEMENT_FAIL_CLOSED_REASON
+    assert nba_tied_score_blocker(100, 100) == "canonical_outcome_not_determined"
+    assert nba_exceptional_status_blocker("cancelled") is None
+    assert nba_exceptional_status_blocker("fair price") is None
+    assert nba_exceptional_status_blocker("50-50") is None
     trade = _nba_game_winner_trade()
     kalshi_only = resolve_paper_trade_settlement(trade, kalshi_markets=_kalshi_bos_finalized())
     assert kalshi_only.winning_outcome is None
-    assert kalshi_only.blocker == NBA_NORMAL_COMPLETION_NOT_PROVEN
+    assert kalshi_only.blocker == NBA_POLYMARKET_EVIDENCE_REQUIRED
     proven = _with_nba_pre_result(trade)
     still_kalshi_only = resolve_paper_trade_settlement(
         proven,
@@ -617,8 +615,8 @@ def test_automatic_settlement_fails_closed_without_lifecycle_proof() -> None:
         kalshi_markets=_kalshi_bos_finalized(),
         polymarket_market=_pm_resolved(celtics_win=True),
     )
-    assert later.winning_outcome is None
-    assert later.blocker == NBA_SETTLEMENT_FAIL_CLOSED_REASON
+    assert later.blocker is None
+    assert later.winning_outcome == "away"
 
 
 def test_nba_kalshi_polymarket_winner_requires_polymarket_evidence() -> None:
@@ -635,7 +633,7 @@ def test_nba_kalshi_polymarket_winner_requires_polymarket_evidence() -> None:
         polymarket_market=_pm_resolved(celtics_win=True, prices=["0.5", "0.5"]),
     )
     assert split.winning_outcome is None
-    assert split.blocker == NBA_SETTLEMENT_FAIL_CLOSED_REASON
+    assert split.blocker == "canonical_outcome_not_determined"
     unknown = resolve_paper_trade_settlement(
         proven,
         kalshi_markets=_kalshi_bos_finalized(),
@@ -648,10 +646,7 @@ def test_nba_kalshi_polymarket_winner_requires_polymarket_evidence() -> None:
         },
     )
     assert unknown.winning_outcome is None
-    assert unknown.blocker in {
-        NBA_SETTLEMENT_FAIL_CLOSED_REASON,
-        NBA_NORMAL_COMPLETION_NOT_PROVEN,
-    }
+    assert unknown.blocker == "canonical_outcome_not_determined"
     cancelled_pm = resolve_paper_trade_settlement(
         proven,
         kalshi_markets=_kalshi_bos_finalized(),
@@ -665,7 +660,7 @@ def test_nba_kalshi_polymarket_winner_requires_polymarket_evidence() -> None:
         },
     )
     assert cancelled_pm.winning_outcome is None
-    assert cancelled_pm.blocker == NBA_SETTLEMENT_FAIL_CLOSED_REASON
+    assert cancelled_pm.blocker == "canonical_outcome_not_determined"
     ready = resolve_paper_trade_settlement(
         proven,
         kalshi_markets=_kalshi_bos_finalized(),

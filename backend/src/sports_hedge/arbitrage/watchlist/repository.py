@@ -226,6 +226,12 @@ class SqliteWatchlistRepository:
             "trigger_net_edge": "TEXT",
             "min_net_edge_scope": "TEXT",
             "min_net_edge_source": "TEXT",
+            "gross_edge": "TEXT",
+            "limiting_depth_gbp": "TEXT",
+            "guaranteed_profit_gbp": "TEXT",
+            "quote_age_ms": "INTEGER",
+            "pricing_lane": "TEXT",
+            "venue_pair": "TEXT",
         }
         for name, ddl in event_extras.items():
             if name not in event_columns:
@@ -420,8 +426,10 @@ class SqliteWatchlistRepository:
                     current_net_edge, distance_to_trigger_pp, detail,
                     fixture_label, market_family, canonical_event_id,
                     canonical_market_id, capture_eligible, attempt_id,
-                    trigger_net_edge, min_net_edge_scope, min_net_edge_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trigger_net_edge, min_net_edge_scope, min_net_edge_source,
+                    gross_edge, limiting_depth_gbp, guaranteed_profit_gbp,
+                    quote_age_ms, pricing_lane, venue_pair
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -441,6 +449,12 @@ class SqliteWatchlistRepository:
                     _stringify(event.trigger_net_edge),
                     event.min_net_edge_scope,
                     event.min_net_edge_source,
+                    _stringify(event.gross_edge),
+                    _stringify(event.limiting_depth_gbp),
+                    _stringify(event.guaranteed_profit_gbp),
+                    event.quote_age_ms,
+                    event.pricing_lane,
+                    event.venue_pair,
                 ),
             )
             self._commit()
@@ -547,6 +561,95 @@ class SqliteWatchlistRepository:
                 parameters,
             ).fetchall()
             return [_event_from_row(row) for row in rows]
+
+    def count_events(self, opportunity_id: str, event_type: LifecycleEventType) -> int:
+        """Indexed count for one opportunity. Used only at episode boundaries."""
+
+        with self.exclusive():
+            row = self._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM watchlist_lifecycle_events
+                WHERE opportunity_id = ? AND event_type = ?
+                """,
+                (opportunity_id, event_type.value),
+            ).fetchone()
+            return int(row[0] if row is not None else 0)
+
+    def latest_qualifying_boundary(
+        self, opportunity_id: str
+    ) -> tuple[LifecycleEventType, str | None] | None:
+        """Newest qualifying episode boundary for one opportunity. One indexed read."""
+
+        types = (
+            LifecycleEventType.QUALIFYING_DETECTED.value,
+            LifecycleEventType.QUALIFYING_LOST.value,
+            LifecycleEventType.QUALIFYING_EXPIRED.value,
+        )
+        placeholders = ", ".join("?" for _ in types)
+        with self.exclusive():
+            row = self._connection.execute(
+                f"""
+                SELECT event_type, pricing_lane
+                FROM watchlist_lifecycle_events
+                WHERE opportunity_id = ? AND event_type IN ({placeholders})
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (opportunity_id, *types),
+            ).fetchone()
+            if row is None:
+                return None
+            lane = row[1]
+            return LifecycleEventType(row[0]), None if lane in (None, "") else str(lane)
+
+    def list_open_qualifying_episodes(self) -> list[tuple[NearOpportunity, str | None]]:
+        """TRIGGERED rows whose newest qualifying boundary is still detection.
+
+        Uses the status index, then one indexed latest-boundary lookup per
+        triggered row. It does not scan the lifecycle table.
+        """
+
+        types = (
+            LifecycleEventType.QUALIFYING_DETECTED.value,
+            LifecycleEventType.QUALIFYING_LOST.value,
+            LifecycleEventType.QUALIFYING_EXPIRED.value,
+        )
+        placeholders = ", ".join("?" for _ in types)
+        with self.exclusive():
+            rows = self._connection.execute(
+                f"""
+                SELECT opportunities.*, boundary.pricing_lane AS qualifying_pricing_lane
+                FROM watchlist_opportunities AS opportunities
+                JOIN watchlist_lifecycle_events AS boundary
+                  ON boundary.rowid = (
+                    SELECT events.rowid
+                    FROM watchlist_lifecycle_events AS events
+                    WHERE events.opportunity_id = opportunities.opportunity_id
+                      AND events.event_type IN ({placeholders})
+                    ORDER BY events.rowid DESC
+                    LIMIT 1
+                  )
+                WHERE opportunities.status = ?
+                  AND IFNULL(opportunities.data_kind, '') != 'demo_fixture_replay'
+                  AND boundary.event_type = ?
+                """,
+                (
+                    *types,
+                    OpportunityStatus.TRIGGERED.value,
+                    LifecycleEventType.QUALIFYING_DETECTED.value,
+                ),
+            ).fetchall()
+        opened: list[tuple[NearOpportunity, str | None]] = []
+        for row in rows:
+            lane = row["qualifying_pricing_lane"]
+            opened.append(
+                (
+                    _opportunity_from_row(row),
+                    None if lane in (None, "") else str(lane),
+                )
+            )
+        return opened
 
     def upsert_paper_fill_attempt(self, attempt: PaperFillAttempt) -> None:
         with self.exclusive():
@@ -720,6 +823,12 @@ def _event_from_row(row: sqlite3.Row) -> OpportunityLifecycleEvent:
         trigger_net_edge=_decimal(_row_get(row, "trigger_net_edge")),
         min_net_edge_scope=_row_get(row, "min_net_edge_scope"),
         min_net_edge_source=_row_get(row, "min_net_edge_source"),
+        gross_edge=_decimal(_row_get(row, "gross_edge")),
+        limiting_depth_gbp=_decimal(_row_get(row, "limiting_depth_gbp")),
+        guaranteed_profit_gbp=_decimal(_row_get(row, "guaranteed_profit_gbp")),
+        quote_age_ms=_optional_int(_row_get(row, "quote_age_ms")),
+        pricing_lane=_row_get(row, "pricing_lane"),
+        venue_pair=_row_get(row, "venue_pair"),
     )
 
 

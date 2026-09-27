@@ -20,10 +20,8 @@ from sports_hedge.nba.constants import (
     NBA_COMPETITION,
     NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT,
     NBA_LIFECYCLE_AUDIT_KIND,
-    NBA_NORMAL_COMPLETION_NOT_PROVEN,
     NBA_NOT_LIVE_EXECUTION_REASON,
     NBA_PAPER_NORMAL_COMPLETION_REASON,
-    NBA_SETTLEMENT_FAIL_CLOSED_REASON,
     NBA_SPORT,
 )
 from sports_hedge.nba.detect import is_nba_canonical_event, is_nba_market_family
@@ -138,7 +136,9 @@ def nba_paper_settlement(
 
 
 def nba_paper_audit_reasons() -> list[str]:
-    return list(NBA_PAPER_AUDIT_REASONS)
+    """New PAPER rows record the live-execution boundary only."""
+
+    return [NBA_NOT_LIVE_EXECUTION_REASON]
 
 
 def is_nba_paper_trade(trade) -> bool:
@@ -156,18 +156,9 @@ def is_nba_paper_trade(trade) -> bool:
 
 
 def nba_exceptional_status_blocker(*values: object) -> str | None:
-    """Fail closed when provider evidence names an exceptional lifecycle."""
+    """Exceptional lifecycle tokens do not block PAPER settlement by themselves."""
 
-    for value in values:
-        text = str(value or "").strip().casefold()
-        if not text:
-            continue
-        if text in _EXCEPTIONAL_STATUS_TOKENS:
-            return NBA_SETTLEMENT_FAIL_CLOSED_REASON
-        compact = text.replace("_", " ")
-        for token in _EXCEPTIONAL_STATUS_TOKENS:
-            if token in compact:
-                return NBA_SETTLEMENT_FAIL_CLOSED_REASON
+    del values
     return None
 
 
@@ -175,7 +166,7 @@ def nba_tied_score_blocker(home_score: int | None, away_score: int | None) -> st
     if home_score is None or away_score is None:
         return None
     if home_score == away_score:
-        return NBA_SETTLEMENT_FAIL_CLOSED_REASON
+        return "canonical_outcome_not_determined"
     return None
 
 
@@ -251,15 +242,7 @@ def nba_automatic_settlement_lifecycle_blocker(
     normal observation and never records postpone/suspend/cancel/tie/50-50.
     """
 
-    history = list(nba_lifecycle_observations_from_trade(trade))
-    current = nba_lifecycle_observation(current_tokens)
-    all_observations = [*history, current]
-    if any(item.phase == NBA_LIFECYCLE_EXCEPTIONAL for item in all_observations):
-        return NBA_SETTLEMENT_FAIL_CLOSED_REASON
-    if not any(item.phase == NBA_LIFECYCLE_PRE_RESULT for item in history):
-        return NBA_NORMAL_COMPLETION_NOT_PROVEN
-    if current.phase == NBA_LIFECYCLE_UNKNOWN:
-        return NBA_NORMAL_COMPLETION_NOT_PROVEN
+    del trade, current_tokens
     return None
 
 

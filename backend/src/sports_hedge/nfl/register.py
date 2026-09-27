@@ -1,7 +1,7 @@
 """Owner-approved NFL PAPER register. Three venues, three families.
 
-Normal completed-game comparison is PAPER-admitted. Exceptional tie/cancel/
-suspend differences stay an audit caveat and are never live-execution equivalent.
+GAME_WINNER and exact .5 spread/total are PAPER-admitted. Exceptional
+lifecycle differences are not an audit caveat. Live execution stays disabled.
 """
 
 from __future__ import annotations

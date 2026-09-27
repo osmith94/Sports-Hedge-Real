@@ -36,6 +36,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     hot_promotion_opportunity_id,
     lifecycle_identity_from_opportunity,
     paper_fill_lifecycle_event_id,
+    qualifying_lifecycle_event_id,
     strike_distance_narrative,
     OpportunityObservationPoint,
 )
@@ -81,12 +82,14 @@ class WatchlistService:
         *,
         quote_age_ms: int | None = None,
         quote_age_basis: str | None = None,
+        pricing_lane: str | None = None,
     ) -> NearOpportunity | None:
         observation = observation_from_paper_decision(
             decision,
             history,
             quote_age_ms=quote_age_ms,
             quote_age_basis=quote_age_basis,
+            pricing_lane=pricing_lane,
         )
         if observation is None:
             return None
@@ -613,6 +616,46 @@ class WatchlistService:
                 )
             return current
 
+    def note_execution_reprice_miss(
+        self,
+        decision: PaperScanDecision,
+        *,
+        occurred_at,
+        reason: str,
+        pricing_lane: str | None = None,
+    ) -> OpportunityLifecycleEvent | None:
+        """Record one fail-closed execution reprice without changing radar status.
+
+        Discovery QUALIFYING stays in place when the second price fails, is
+        still stale, or is no longer the capture snapshot. This does not open
+        a paper trade and does not schedule another reprice.
+        """
+
+        if not decision.canonical_market_id:
+            return None
+        opportunity_id = opportunity_id_for_canonical_market(decision.canonical_market_id)
+        current = self.repository.get(opportunity_id)
+        if current is None:
+            return None
+        event = OpportunityLifecycleEvent(
+            event_id=f"{opportunity_id}:{reason}:{uuid4()}",
+            opportunity_id=opportunity_id,
+            occurred_at=occurred_at,
+            event_type=LifecycleEventType.PAPER_FILL_REJECTED,
+            status=current.status,
+            current_net_edge=current.current_net_edge,
+            distance_to_trigger_pp=current.distance_to_trigger_pp,
+            detail=reason,
+            gross_edge=current.gross_edge,
+            limiting_depth_gbp=current.limiting_depth_gbp,
+            guaranteed_profit_gbp=current.guaranteed_profit_gbp,
+            quote_age_ms=current.quote_age_ms,
+            pricing_lane=pricing_lane,
+            **lifecycle_identity_from_opportunity(current),
+        )
+        self.repository.append_event(event)
+        return event
+
     def close(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
     ) -> NearOpportunity:
@@ -672,6 +715,65 @@ class WatchlistService:
         )
         self.repository.append_event(event)
         return event
+
+    def note_qualifying_radar_expiry(
+        self,
+        now: datetime,
+        *,
+        hot_ttl_seconds: int | None = None,
+        universe_ttl_seconds: int | None = None,
+    ) -> list[OpportunityLifecycleEvent]:
+        """Close an open qualifying episode when the existing radar TTL has elapsed.
+
+        Does not change opportunity status, classification, quote-freshness gates,
+        or TTL values. Executable quote age alone stays `radar_current` inside the
+        TTL and does not close the episode. Generic `expired` remains a separate
+        terminal status and is not written here. ``occurred_at`` is the radar TTL
+        boundary (`last_seen_at` plus the existing lane TTL), not the caller clock.
+        """
+
+        from sports_hedge.application.scan_lanes import (
+            DEFAULT_HOT_TTL_SECONDS,
+            DEFAULT_UNIVERSE_TTL_SECONDS,
+            FRESHNESS_EXPIRED,
+            freshness_class,
+            observation_expires_at,
+        )
+
+        evaluated = require_aware_instant(now, "now")
+        hot_ttl = DEFAULT_HOT_TTL_SECONDS if hot_ttl_seconds is None else hot_ttl_seconds
+        universe_ttl = (
+            DEFAULT_UNIVERSE_TTL_SECONDS if universe_ttl_seconds is None else universe_ttl_seconds
+        )
+        emitted: list[OpportunityLifecycleEvent] = []
+        for opportunity, pricing_lane in self.repository.list_open_qualifying_episodes():
+            lane = _radar_lane_for_pricing(pricing_lane)
+            if (
+                freshness_class(
+                    lane=lane,
+                    last_scanned_at=opportunity.last_seen_at,
+                    now=evaluated,
+                    quote_age_ms=opportunity.quote_age_ms,
+                    max_quote_age_ms=self.max_quote_age_ms,
+                    hot_ttl_seconds=hot_ttl,
+                    universe_ttl_seconds=universe_ttl,
+                )
+                != FRESHNESS_EXPIRED
+            ):
+                continue
+            # The durable time is the radar TTL boundary, not this maintenance call.
+            expires = observation_expires_at(
+                opportunity.last_seen_at,
+                lane,
+                hot_ttl_seconds=hot_ttl,
+                universe_ttl_seconds=universe_ttl,
+            )
+            event = self._append_qualifying_radar_expiry(
+                opportunity, expires, pricing_lane=pricing_lane
+            )
+            if event is not None:
+                emitted.append(event)
+        return emitted
 
     def expire(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
@@ -1002,6 +1104,27 @@ class WatchlistService:
                             capture_eligible=previous.capture_eligible,
                         )
                     )
+                    if not previous.capture_eligible:
+                        lost = self._qualifying_episode_event(
+                            current,
+                            observation,
+                            LifecycleEventType.QUALIFYING_LOST,
+                            detail=_qualifying_lost_detail(current),
+                        )
+                        if lost is not None:
+                            events.append(lost)
+
+        if _entered_qualifying_episode(previous, current) or self._qualifying_episode_closed_by_radar(
+            previous, current
+        ):
+            detected = self._qualifying_episode_event(
+                current,
+                observation,
+                LifecycleEventType.QUALIFYING_DETECTED,
+                detail="solver_qualified",
+            )
+            if detected is not None:
+                events.append(detected)
 
         if _entered_capture_eligible_triggered_episode(previous, current):
             events.append(
@@ -1117,6 +1240,102 @@ class WatchlistService:
             )
         return emitted
 
+    def _qualifying_episode_closed_by_radar(
+        self,
+        previous: NearOpportunity | None,
+        current: NearOpportunity,
+    ) -> bool:
+        """True when this repricing follows a radar-TTL close of the same TRIGGERED row.
+
+        Status stays TRIGGERED. The next solver-qualified observation is a new episode.
+        """
+
+        if previous is None or previous.status is not OpportunityStatus.TRIGGERED:
+            return False
+        if current.status is not OpportunityStatus.TRIGGERED:
+            return False
+        boundary = self.repository.latest_qualifying_boundary(current.opportunity_id)
+        return boundary is not None and boundary[0] is LifecycleEventType.QUALIFYING_EXPIRED
+
+    def _append_qualifying_radar_expiry(
+        self,
+        opportunity: NearOpportunity,
+        occurred_at: datetime,
+        *,
+        pricing_lane: str | None,
+    ) -> OpportunityLifecycleEvent | None:
+        detected = self.repository.count_events(
+            opportunity.opportunity_id,
+            LifecycleEventType.QUALIFYING_DETECTED,
+        )
+        if detected <= 0:
+            return None
+        if (
+            self.repository.count_events(
+                opportunity.opportunity_id,
+                LifecycleEventType.QUALIFYING_EXPIRED,
+            )
+            >= detected
+        ):
+            return None
+        venues = [venue.value for venue in opportunity.venues]
+        event = self._event(
+            opportunity,
+            LifecycleEventType.QUALIFYING_EXPIRED,
+            detail="radar expired",
+            event_id=qualifying_lifecycle_event_id(
+                opportunity.opportunity_id,
+                LifecycleEventType.QUALIFYING_EXPIRED,
+                detected,
+            ),
+            gross_edge=opportunity.gross_edge,
+            limiting_depth_gbp=opportunity.limiting_depth_gbp,
+            guaranteed_profit_gbp=opportunity.guaranteed_profit_gbp,
+            quote_age_ms=opportunity.quote_age_ms,
+            pricing_lane=pricing_lane,
+            venue_pair=",".join(venues) if venues else None,
+        )
+        event.occurred_at = occurred_at
+        self.repository.append_event(event)
+        return event
+
+    def _qualifying_episode_event(
+        self,
+        opportunity: NearOpportunity,
+        observation: WatchObservation,
+        event_type: LifecycleEventType,
+        *,
+        detail: str,
+    ) -> OpportunityLifecycleEvent | None:
+        """Durable qualifying episode boundary. Count is the persisted episode index."""
+
+        detected = self.repository.count_events(
+            opportunity.opportunity_id,
+            LifecycleEventType.QUALIFYING_DETECTED,
+        )
+        episode = (
+            detected + 1 if event_type is LifecycleEventType.QUALIFYING_DETECTED else detected
+        )
+        if episode <= 0:
+            return None
+        venues = [venue.value for venue in opportunity.venues]
+        return self._event(
+            opportunity,
+            event_type,
+            detail=detail,
+            event_id=qualifying_lifecycle_event_id(
+                opportunity.opportunity_id,
+                event_type,
+                episode,
+            ),
+            gross_edge=opportunity.gross_edge,
+            limiting_depth_gbp=opportunity.limiting_depth_gbp,
+            guaranteed_profit_gbp=opportunity.guaranteed_profit_gbp,
+            quote_age_ms=opportunity.quote_age_ms,
+            pricing_lane=observation.pricing_lane,
+            venue_pair=",".join(venues) if venues else None,
+        )
+
     def _event(
         self,
         opportunity: NearOpportunity,
@@ -1124,7 +1343,20 @@ class WatchlistService:
         *,
         detail: str | None,
         capture_eligible: bool | None = None,
+        event_id: str | None = None,
+        gross_edge: Decimal | None = None,
+        limiting_depth_gbp: Decimal | None = None,
+        guaranteed_profit_gbp: Decimal | None = None,
+        quote_age_ms: int | None = None,
+        pricing_lane: str | None = None,
+        venue_pair: str | None = None,
     ) -> OpportunityLifecycleEvent:
+        identity = lifecycle_identity_from_opportunity(
+            opportunity, capture_eligible=capture_eligible
+        )
+        payload: dict[str, object] = {}
+        if event_id is not None:
+            payload["event_id"] = event_id
         return OpportunityLifecycleEvent(
             opportunity_id=opportunity.opportunity_id,
             occurred_at=opportunity.last_seen_at,
@@ -1133,9 +1365,14 @@ class WatchlistService:
             current_net_edge=opportunity.current_net_edge,
             distance_to_trigger_pp=opportunity.distance_to_trigger_pp,
             detail=detail,
-            **lifecycle_identity_from_opportunity(
-                opportunity, capture_eligible=capture_eligible
-            ),
+            gross_edge=gross_edge,
+            limiting_depth_gbp=limiting_depth_gbp,
+            guaranteed_profit_gbp=guaranteed_profit_gbp,
+            quote_age_ms=quote_age_ms,
+            pricing_lane=pricing_lane,
+            venue_pair=venue_pair,
+            **identity,
+            **payload,
         )
 
     def _fill_attempt_started(self, opportunity_id: str) -> bool:
@@ -1162,6 +1399,60 @@ def _episode_capture_eligible(
         and previous.capture_eligible
     )
     return sticky or observation.eligible_for_paper_simulation
+
+
+def note_expired_qualifying_episodes(
+    service: WatchlistService,
+    now: datetime,
+    *,
+    hot_ttl_seconds: int,
+    universe_ttl_seconds: int,
+) -> list[OpportunityLifecycleEvent]:
+    """Server-owned close of open qualifying episodes past the existing radar TTL."""
+
+    return service.note_qualifying_radar_expiry(
+        now,
+        hot_ttl_seconds=hot_ttl_seconds,
+        universe_ttl_seconds=universe_ttl_seconds,
+    )
+
+
+def _radar_lane_for_pricing(pricing_lane: str | None):
+    """Map a stored pricing lane onto the radar TTL lane already used by current state.
+
+    HOT uses the hot radar TTL. BACKGROUND pricing is published on the non-hot
+    radar lane, which uses the universe TTL. Missing lane uses that same non-hot TTL.
+    """
+
+    from sports_hedge.application.scan_lanes import ScanLane
+
+    if (pricing_lane or "").strip().lower() == ScanLane.HOT.value:
+        return ScanLane.HOT
+    return ScanLane.UNIVERSE
+
+
+def _entered_qualifying_episode(
+    previous: NearOpportunity | None,
+    current: NearOpportunity,
+) -> bool:
+    """True when this observation opens a solver-qualified TRIGGERED episode.
+
+    QUALIFYING is the economic trigger (`solver_is_arbitrage` and net edge at
+    or above the configured minimum). It is not paper-capture eligibility.
+    The previous row is the durable episode boundary, including after restart.
+    """
+
+    if current.status != OpportunityStatus.TRIGGERED:
+        return False
+    return previous is None or previous.status != OpportunityStatus.TRIGGERED
+
+
+def _qualifying_lost_detail(current: NearOpportunity) -> str:
+    if current.rejection_reasons:
+        reason = ", ".join(reason.replace("_", " ") for reason in current.rejection_reasons)
+    else:
+        reason = current.status.value.lower()
+    return f"qualifying lost · {reason}"
 
 
 def _entered_capture_eligible_triggered_episode(

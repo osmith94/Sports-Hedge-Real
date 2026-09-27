@@ -367,10 +367,14 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
         CorpusEntry(
             entry_id="bad-1x2-mb-pm-unknown-settlement",
             archetype=CatalogueArchetype.MATCH_RESULT_1X2,
-            expected_state=unsupported,
-            known_kind="known_bad",
+            expected_state=paper_assumed,
+            known_kind="paper_assumed",
             left=_mb([_mb_1x2()]),
             right=_pm([_pm_1x2(description="See market rules.")]),
+            notes=[
+                "exceptional_or_unknown_settlement_text_is_not_a_paper_blocker",
+                "never_live_execution_eligible",
+            ],
         ),
         CorpusEntry(
             entry_id="bad-1x2-period-mismatch",

@@ -1,4 +1,4 @@
-"""Tennis catalogue identity. Match Winner is not paper/solver executable."""
+"""Tennis catalogue identity. Structurally identical singles Match Winner is PAPER-admitted."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def tennis_canonical_key_for_market(market: CanonicalMarket) -> str | None:
 def tennis_registered_canonical_key(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> str | None:
-    """Catalogue key for exact-ID pricing. Not solver admission."""
+    """Catalogue key for exact-ID PAPER pricing. Live execution stays disabled."""
 
     if left.source_venue == right.source_venue:
         return None

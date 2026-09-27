@@ -713,7 +713,7 @@ async def test_collector_clusters_malaga_villarreal_suffix_names() -> None:
         assert clustered, report.discovered_fixtures
         fixture = clustered[0]
         assert fixture.market_evaluation_state == MarketEvaluationState.EVALUATED.value
-        assert fixture.matched_market_count == 1
+        assert fixture.matched_market_count == 3
     finally:
         repository.close()
 

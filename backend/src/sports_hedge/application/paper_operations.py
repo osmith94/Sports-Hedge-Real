@@ -424,6 +424,7 @@ class PaperOperationsService:
         refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None = None,
         now: datetime | None = None,
         pricing_lane: str | None = None,
+        execution_authoritative: bool = False,
     ) -> PriorityAlertCandidate | None:
         if not decision.canonical_market_id:
             return None
@@ -439,9 +440,12 @@ class PaperOperationsService:
         current_watch = self.watchlist.repository.get(opportunity_id)
         existing_trade = self._get_trade_by_opportunity(opportunity_id)
         if opening_legs:
-            self._plans[opportunity_id] = self._plan_from_decision(
+            plan = self._plan_from_decision(
                 decision, opportunity_id, provenance, pricing_lane=pricing_lane
             )
+            if execution_authoritative:
+                plan = plan.model_copy(update={"execution_authoritative": True})
+            self._plans[opportunity_id] = plan
         candidate = None
         solver_arb = _solver_is_arbitrage(decision)
         if decision.eligible_for_paper_simulation and solver_arb:
@@ -629,7 +633,13 @@ class PaperOperationsService:
         legs: list,
         refreshed_venues: list[VenueName] | tuple[VenueName, ...] | None,
     ) -> bool:
-        """Stale/disabled-venue legs are never executable-fresh auto-capture truth."""
+        """Require every fill leg's venue to be in the caller's refresh set.
+
+        Direct capture passes the venues refreshed in that pricing cycle.
+        An execution reprice passes only the venues fetched for that entry
+        attempt, which replaces the earlier scanner snapshot as entry truth.
+        None means the caller did not scope a venue set.
+        """
 
         if refreshed_venues is None:
             return True
@@ -2210,11 +2220,12 @@ class PaperOperationsService:
         bound_autofill = self.watchlist.has_active_bound_attempt(opportunity_id)
         demo_frozen_snapshot = current.data_kind == "demo_fixture_replay"
         snapshot_bound = bound_autofill or demo_frozen_snapshot
-        # Operator contract: a min-net qualifying fill plan is the capture
-        # snapshot. Wall-clock quote-age is telemetry, not a second admission
-        # veto. Fail-closed gates remain current-cycle venue refresh (autofill),
-        # arrival odds/slippage, post-trigger min-net, depth, hedge, treasury.
+        # A discovery snapshot that already cleared min-net may still fill when
+        # later wall-clock age is only telemetry. An execution reprice is the
+        # authoritative entry snapshot: its quote age stays a hard gate, and
+        # max_quote_age_ms is not cleared because the discovery row qualified.
         bound_min_net = _plan_satisfies_min_net_arb(plan)
+        execution_authoritative = bool(plan.execution_authoritative)
         if not self.watchlist.allows_bound_snapshot_entry(
             current, bound_autofill=bound_autofill
         ):
@@ -2264,11 +2275,12 @@ class PaperOperationsService:
                 )
             except ValueError:
                 self._fail_entry(opportunity_id, MARKET_REVALIDATION_FAILED, simulated_at)
-        if freshness.rejection_reason and not bound_min_net:
+        if freshness.rejection_reason and (not bound_min_net or execution_authoritative):
             self._fail_entry(opportunity_id, freshness.rejection_reason, simulated_at)
-        if bound_min_net:
-            # Post-trigger: model movement for fill outcome/tolerance only.
-            # Do not requalify via a second exact-odds refresh or quote-age veto.
+        if bound_min_net and not execution_authoritative:
+            # Post-trigger telemetry for a discovery snapshot that was not
+            # replaced by an execution reprice. The execution snapshot keeps
+            # the configured paper-entry quote-age gate.
             fill_config = fill_config.model_copy(update={"max_quote_age_ms": None})
         bound_prepared_id: str | None = None
         if prepared_deployment_id is not None or requested_size_gbp is not None:
@@ -3828,12 +3840,7 @@ class PaperOperationsService:
                 detail="paper trade opened; guaranteed opening profit is recorded only after the complete hedge validates",
             )
         ]
-        from sports_hedge.nba.constants import NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT
-        from sports_hedge.nba.labels import NBA_SETTLEMENT_CAVEAT_OPERATOR_TEXT
-        from sports_hedge.ncaab.constants import NCAAB_EXCEPTIONAL_SETTLEMENT_CAVEAT, NCAAB_PAIR_UNAPPROVED_REASON
-        from sports_hedge.ncaab.labels import NCAAB_SETTLEMENT_CAVEAT_OPERATOR_TEXT
-        from sports_hedge.nfl.constants import NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT
-        from sports_hedge.nfl.labels import NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT
+        from sports_hedge.ncaab.constants import NCAAB_PAIR_UNAPPROVED_REASON
 
         if is_ncaab_paper_trade(opportunity) or "ncaa" in str(opportunity.competition or "").casefold():
             audit.append(
@@ -3841,25 +3848,7 @@ class PaperOperationsService:
                     event_id=f"{paper_trade_id(plan.opportunity_id)}:{NCAAB_PAIR_UNAPPROVED_REASON}",
                     occurred_at=occurred_at,
                     event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail=f"{NCAAB_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NCAAB_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
-                )
-            )
-        elif competition_name == "NFL":
-            audit.append(
-                PaperTradeAuditEvent(
-                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}",
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail=f"{NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NFL_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
-                )
-            )
-        elif competition_name == "NBA":
-            audit.append(
-                PaperTradeAuditEvent(
-                    event_id=f"{paper_trade_id(plan.opportunity_id)}:{NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT}",
-                    occurred_at=occurred_at,
-                    event_type=PaperTradeAuditEventType.TRADE_OPENED,
-                    detail=f"{NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT}: {NBA_SETTLEMENT_CAVEAT_OPERATOR_TEXT}",
+                    detail=NCAAB_PAIR_UNAPPROVED_REASON,
                 )
             )
         return PaperTrade(

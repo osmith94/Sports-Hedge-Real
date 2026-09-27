@@ -7,8 +7,10 @@ each scan.
 Venue-native archetypes map to canonical keys so a future Polymarket/Smarkets
 onboarding adds one mapping per native market rather than N² pair rules.
 
-Current PAPER / READ-ONLY pair: Matchbook ↔ Kalshi for the four locked
-full-time football families. Live execution remains ineligible.
+Current PAPER / READ-ONLY football venues: Matchbook, Kalshi, and Polymarket
+for the four locked full-time families when a venue market normalizes to the
+same canonical key. Live execution remains ineligible. Exceptional settlement
+differences are not an admission gate.
 """
 
 from __future__ import annotations
@@ -37,7 +39,9 @@ CANONICAL_BTTS_FT = "BTTS_FT"
 CANONICAL_TOTAL_GOALS_FT = "TOTAL_GOALS_FT"
 CANONICAL_FTTS_FT = "FTTS_FT"
 
-APPROVED_PAPER_VENUE_PAIR = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
+APPROVED_PAPER_VENUE_PAIR = frozenset(
+    {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
+)
 REGISTER_ADMITTED_REASON = "approved_match_register"
 REGISTER_PAPER_MODE_REASON = "register_paper_admitted_not_live_execution"
 NOT_REGISTERED_REASON = "not_registered"
@@ -148,6 +152,44 @@ VENUE_NATIVE_ARCHETYPES: tuple[VenueNativeArchetype, ...] = (
         period=FootballPeriod.FULL_TIME,
         required_outcomes=FTTS_OUTCOMES,
     ),
+    VenueNativeArchetype(
+        venue=VenueName.POLYMARKET,
+        native_archetype="moneyline",
+        display_name="Moneyline",
+        canonical_key=CANONICAL_MATCH_RESULT_FT,
+        family=MarketFamily.MATCH_RESULT,
+        period=FootballPeriod.FULL_TIME,
+        required_outcomes=MATCH_RESULT_OUTCOMES,
+    ),
+    VenueNativeArchetype(
+        venue=VenueName.POLYMARKET,
+        native_archetype="both_teams_to_score",
+        display_name="Both Teams To Score",
+        canonical_key=CANONICAL_BTTS_FT,
+        family=MarketFamily.BOTH_TEAMS_TO_SCORE,
+        period=FootballPeriod.FULL_TIME,
+        required_outcomes=BTTS_OUTCOMES,
+    ),
+    VenueNativeArchetype(
+        venue=VenueName.POLYMARKET,
+        native_archetype="totals",
+        display_name="Total Goals",
+        canonical_key=CANONICAL_TOTAL_GOALS_FT,
+        family=MarketFamily.TOTAL_GOALS,
+        period=FootballPeriod.FULL_TIME,
+        required_outcomes=TOTAL_OUTCOMES,
+        parameterized_line=True,
+        safe_half_line_only=True,
+    ),
+    VenueNativeArchetype(
+        venue=VenueName.POLYMARKET,
+        native_archetype="first_team_to_score",
+        display_name="First Team To Score",
+        canonical_key=CANONICAL_FTTS_FT,
+        family=MarketFamily.FIRST_TEAM_TO_SCORE,
+        period=FootballPeriod.FULL_TIME,
+        required_outcomes=FTTS_OUTCOMES,
+    ),
 )
 
 
@@ -245,7 +287,8 @@ def canonical_key_for_market(market: CanonicalMarket) -> str | None:
 
 
 def approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> bool:
-    return {left.source_venue, right.source_venue} == APPROVED_PAPER_VENUE_PAIR
+    venues = {left.source_venue, right.source_venue}
+    return len(venues) == 2 and venues <= APPROVED_PAPER_VENUE_PAIR
 
 
 def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:

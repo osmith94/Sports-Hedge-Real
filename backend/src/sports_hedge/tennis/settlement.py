@@ -17,8 +17,10 @@ Matchbook tennis Moneyline (sport-id 9) event/market payloads contain no
 retirement, walkover, void or postponement rule text.
 
 Fair-price versus explicit 50-50, the unstable postponement window, and the
-absent Matchbook rule are not the same settlement contract. Match Winner stays
-non-executable.
+absent Matchbook rule were captured as different exceptional contracts. Owner
+decision 2026-09-26: those differences do not block PAPER comparison of a
+structurally identical singles Match Winner. Live execution stays disabled.
+The historical reason string remains readable on old audit rows.
 """
 
 from __future__ import annotations
@@ -26,12 +28,10 @@ from __future__ import annotations
 from sports_hedge.domain.football import (
     CanonicalMarket,
     FootballPeriod,
-    MarketFamily,
     SettlementFingerprint,
     SettlementScope,
 )
 from sports_hedge.tennis.constants import TENNIS_RETIREMENT_SETTLEMENT_NOT_EQUIVALENT
-from sports_hedge.tennis.detect import is_tennis_canonical_event, is_tennis_market_family
 
 
 def tennis_match_winner_settlement() -> SettlementFingerprint:
@@ -49,12 +49,12 @@ def tennis_match_winner_settlement() -> SettlementFingerprint:
 def tennis_executable_block_reason(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> str | None:
-    """Explicit non-executable reason for a tennis match-winner pair."""
+    """Retirement/walkover differences do not block PAPER comparison.
 
-    if not is_tennis_canonical_event(left.event) or not is_tennis_canonical_event(right.event):
-        return None
-    if not is_tennis_market_family(left.family) or not is_tennis_market_family(right.family):
-        return None
-    if left.family is not MarketFamily.GAME_WINNER or right.family is not MarketFamily.GAME_WINNER:
-        return None
-    return TENNIS_RETIREMENT_SETTLEMENT_NOT_EQUIVALENT
+    Structural identity, singles, tournament, round, and two-outcome Match
+    Winner checks stay in the tennis register. Live execution stays disabled.
+    The historical reason string remains defined for old audit rows.
+    """
+
+    del left, right
+    return None

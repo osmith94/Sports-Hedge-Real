@@ -31,9 +31,9 @@ No doubleheader was on the 41 open Kalshi games that day. Kalshi tickers embed a
 
 Sports Hedge stores a scheduled game key: UTC start truncated to the minute, plus `|game-N` when the provider text says Game 1 or Game 2. Missing or unequal keys do not cluster. Same clubs and the same calendar date are not enough.
 
-## Settlement (not equivalent)
+## Settlement
 
-No venue pair is executable.
+The 2026-09-24 census recorded wording differences across venues. On 2026-09-26 the owner independently reviewed that evidence and approved PAPER venue-pair comparison for structurally valid Game Winner and exact x.5 Total Runs markets. That approval does not add a new settlement model, and it does not admit any other family.
 
 Kalshi `BASEBALLGAMEWIN` rules, from the public contract PDF:
 
@@ -64,15 +64,15 @@ Polymarket totals:
 
 Matchbook market payloads for the sample game have runners and handicaps and no settlement wording.
 
-Conflicts that keep both families non-executable:
+Census differences the owner reviewed before approving PAPER comparison:
 
 - Kalshi’s 48-hour last-fair-price path versus Polymarket’s open-ended postponement and 50-50 cancel.
 - Extra innings are explicit only on Kalshi.
 - Matchbook settlement text is absent.
 - A pitcher-dependent market, if one appears later, is not equated with an action market.
 
-Whole-number totals are not modelled. A line mismatch stays non-executable with `mlb_total_line_mismatch`. Missing or conflicting settlement stays `mlb_settlement_equivalence_not_proven`.
+Whole-number totals are not modelled. A line mismatch stays rejected with `mlb_total_line_mismatch`. A pair that fails the structural register stays `mlb_structural_identity_not_admitted`. The historical string `mlb_settlement_equivalence_not_proven` is not a PAPER blocker. Structurally valid Game Winner and same-line x.5 Total Runs pairs receive `MLB_GAME_WINNER_FT` or `MLB_TOTAL_RUNS_FT:<line>` and follow the existing PAPER catalogue path. They are not live-execution eligible.
 
-## What this PR admits
+## What Stage 1 admits
 
-Discovery, curated team identity, and fixture identity (including doubleheader keys) are live-shaped from this census. Game Winner and Total Runs x.5 receive structural keys only. `registered_canonical_key` stays empty, `paper_executable` is false, and UNIVERSE does not fan out executable MLB order books. A previously approved ACTIVE row can still be repriced by exact IDs on BACKGROUND; this census does not create such a row.
+Discovery, curated team identity, and fixture identity (including doubleheader keys) stay as recorded in this census. Game Winner and Total Runs x.5 are the only PAPER families. Run line, first five, inning markets, props, and futures stay out. The operator catalogue marks MLB `paper_executable` for those registered families. UNIVERSE can catalogue a scan-eligible pair, and an ACTIVE row is repriced by its stored native IDs. Automatic paper settlement of those families uses the graded score when it determines a canonical outcome. `mlb_settlement_equivalence_not_proven` is not a PAPER blocker for them. A whole-number total, a tied two-way winner, or a score that does not determine the outcome stays fail-closed.
