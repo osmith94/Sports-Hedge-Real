@@ -16,10 +16,14 @@ from sports_hedge.domain.football import (
     FootballPeriod,
     MarketFamily,
 )
+from sports_hedge.domain.models import VenueName
 from sports_hedge.mlb.constants import CANONICAL_MLB_GAME_WINNER, CANONICAL_MLB_TOTAL_RUNS
 from sports_hedge.mlb.detect import is_mlb_canonical_event, is_mlb_market_family
 from sports_hedge.mlb.markets import is_exact_half_line
 
+MLB_PAPER_VENUES = frozenset(
+    {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
+)
 GAME_WINNER_OUTCOMES = frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY})
 TOTAL_OUTCOMES = frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER})
 
@@ -66,8 +70,12 @@ def mlb_canonical_key_for_market(market: CanonicalMarket) -> str | None:
 
 
 def mlb_approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> bool:
-    del left, right
-    return True
+    """Only cross-venue pairs among the three owner-approved PAPER venues."""
+
+    if left.source_venue == right.source_venue:
+        return False
+    venues = {left.source_venue, right.source_venue}
+    return venues <= MLB_PAPER_VENUES
 
 
 def mlb_registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
