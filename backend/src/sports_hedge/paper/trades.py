@@ -107,6 +107,7 @@ class PaperTradeAuditEventType(StrEnum):
     MANUAL_EXTERNAL_CONFIRMED = "manual_external_confirmed"
     HEDGE_REVALIDATED = "hedge_revalidated"
     FILLS_RECORDED = "fills_recorded"
+    EXECUTION_SNAPSHOT = "execution_snapshot"
     ENTRY_RISK_RECORDED = "entry_risk_recorded"
     SETTLED = "settled"
     SETTLEMENT_IDEMPOTENT = "settlement_idempotent"

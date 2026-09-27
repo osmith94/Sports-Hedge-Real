@@ -55,6 +55,7 @@ class OverlappingClock:
         self.current = NOW
         self._inflight = 0
         self._batch_ms = 0
+        self._release = asyncio.Event()
 
     def now(self):
         return self.current
@@ -62,12 +63,17 @@ class OverlappingClock:
     async def io(self, delay_ms: int) -> None:
         self._inflight += 1
         self._batch_ms = max(self._batch_ms, delay_ms)
+        release = self._release
         await asyncio.sleep(0)
         self._inflight -= 1
         if self._inflight == 0:
             advance = self._batch_ms
             self._batch_ms = 0
             self.current += timedelta(milliseconds=advance)
+            self._release = asyncio.Event()
+            release.set()
+        else:
+            await release.wait()
 
 
 def _overlaps(spans: list[tuple[str, str, float]]) -> bool:

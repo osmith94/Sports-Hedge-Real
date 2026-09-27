@@ -67,6 +67,7 @@ class PaperFillPlan(BaseModel):
     provenance: DataProvenance = DataProvenance.LIVE_PAPER
     pricing_lane: str | None = None
     execution_authoritative: bool = False
+    execution_snapshot_json: str | None = None
 
     @model_validator(mode="after")
     def ensure_timezone(self) -> PaperFillPlan:

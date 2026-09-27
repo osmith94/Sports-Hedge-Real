@@ -2078,6 +2078,7 @@ class CataloguePriceEngine:
         """
 
         from sports_hedge.application.execution_reprice import (
+            EXECUTION_REPRICE_DUPLICATE,
             EXECUTION_REPRICE_FAILED,
             ExecutionRepriceResult,
         )
@@ -2085,7 +2086,10 @@ class CataloguePriceEngine:
         identity = runtime.identity
         row_id = identity.catalogue_row_id
         if row_id in self._execution_reprice_open:
-            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
+            return ExecutionRepriceResult(
+                reason=EXECUTION_REPRICE_DUPLICATE,
+                duplicate=True,
+            )
         required = tuple(dict.fromkeys(venues))
         if len(required) < 2:
             return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED)
@@ -2134,7 +2138,17 @@ class CataloguePriceEngine:
             ExecutionRepriceResult,
         )
 
+        from sports_hedge.application.execution_reprice import (
+            PHASE_REPRICE_STARTED,
+            log_execution_phase,
+        )
+
         identity = runtime.identity
+        log_execution_phase(
+            PHASE_REPRICE_STARTED,
+            catalogue_row_id=identity.catalogue_row_id,
+            venues=",".join(venue.value for venue in venues),
+        )
         # Qualifying HOT rank only. This does not enqueue a HOT scan or change cadence.
         started_at = self.now()
         started_mono = monotonic()
@@ -2253,11 +2267,136 @@ class CataloguePriceEngine:
             quote_ages,
             None,
         )
+        snapshot = self._execution_snapshot(
+            identity,
+            started_at=started_at,
+            evaluated_at=evaluated_at,
+            matchbook=matchbook,
+            kalshi_books=kalshi_books,
+            polymarket_books=polymarket_books,
+            decision=decision,
+            oldest_quote_age_ms=traced.oldest_quote_age_ms(),
+        )
+        from sports_hedge.application.execution_reprice import (
+            EXECUTION_REPRICE_SKEW,
+            PHASE_SNAPSHOT_COMPLETE,
+            execution_entry_block,
+            log_execution_phase,
+        )
+
+        log_execution_phase(PHASE_SNAPSHOT_COMPLETE, detail=snapshot.audit_line())
+        if snapshot.skew_exceeded():
+            snapshot.rejection_reason = EXECUTION_REPRICE_SKEW
+            traced.reason = EXECUTION_REPRICE_SKEW
+            self._log_execution_reprice(identity.catalogue_row_id, traced)
+            return ExecutionRepriceResult(
+                reason=EXECUTION_REPRICE_SKEW,
+                refreshed_venues=tuple(ordered),
+                diagnostics=traced,
+                snapshot=snapshot,
+            )
+        block = execution_entry_block(decision)
+        if block is not None:
+            snapshot.rejection_reason = block
+            traced.reason = block
+            self._log_execution_reprice(identity.catalogue_row_id, traced)
+            return ExecutionRepriceResult(
+                decision=decision,
+                reason=block,
+                refreshed_venues=tuple(ordered),
+                diagnostics=traced,
+                snapshot=snapshot,
+            )
+        snapshot.accepted = True
         self._log_execution_reprice(identity.catalogue_row_id, traced)
         return ExecutionRepriceResult(
             decision=decision,
             refreshed_venues=tuple(ordered),
             diagnostics=traced,
+            snapshot=snapshot,
+        )
+
+    def _execution_snapshot(
+        self,
+        identity: DerivedPriceEngineItem,
+        *,
+        started_at: datetime,
+        evaluated_at: datetime,
+        matchbook: RetrievedVenuePayload | None,
+        kalshi_books: Mapping[str, RetrievedVenuePayload] | None,
+        polymarket_books: Mapping[str, RetrievedVenuePayload] | None,
+        decision: PaperScanDecision,
+        oldest_quote_age_ms: int | None,
+    ) -> Any:
+        from sports_hedge.application.execution_reprice import (
+            PHASE_BOOK_RETRIEVED,
+            log_execution_phase,
+        )
+        from sports_hedge.application.execution_snapshot import (
+            ExecutionRetrieval,
+            ExecutionSnapshot,
+            execution_max_snapshot_skew_ms,
+            leg_quotes_from_decision,
+            snapshot_economics,
+        )
+
+        retrievals: list[ExecutionRetrieval] = []
+        if matchbook is not None:
+            retrievals.append(
+                ExecutionRetrieval(
+                    venue=VenueName.MATCHBOOK.value,
+                    native_id=str(identity.matchbook_market_id),
+                    event_id=str(identity.matchbook_event_id),
+                    retrieved_at=matchbook.retrieved_at,
+                )
+            )
+        for ticker, book in (kalshi_books or {}).items():
+            retrievals.append(
+                ExecutionRetrieval(
+                    venue=VenueName.KALSHI.value,
+                    native_id=str(ticker),
+                    event_id=str(identity.kalshi_event_ticker),
+                    retrieved_at=book.retrieved_at,
+                )
+            )
+        for token, book in (polymarket_books or {}).items():
+            retrievals.append(
+                ExecutionRetrieval(
+                    venue=VenueName.POLYMARKET.value,
+                    native_id=str(token),
+                    event_id=str(identity.polymarket_event_id or ""),
+                    retrieved_at=book.retrieved_at,
+                )
+            )
+        for item in retrievals:
+            log_execution_phase(
+                PHASE_BOOK_RETRIEVED,
+                venue=item.venue,
+                native_id=item.native_id,
+                retrieved_at=item.retrieved_at.isoformat(),
+            )
+        retrieved_at_by_venue: dict[str, datetime] = {}
+        for item in retrievals:
+            current = retrieved_at_by_venue.get(item.venue)
+            if current is None or item.retrieved_at < current:
+                retrieved_at_by_venue[item.venue] = item.retrieved_at
+        settings = getattr(self.paper_scan, "settings", None)
+        max_age = 2000
+        if settings is not None:
+            max_age = int(getattr(settings, "paper_entry_max_quote_age_ms", 2000) or 2000)
+        edge, profit = snapshot_economics(decision)
+        return ExecutionSnapshot(
+            catalogue_row_id=identity.catalogue_row_id,
+            canonical_market_id=decision.canonical_market_id,
+            started_at=started_at,
+            evaluated_at=evaluated_at,
+            retrievals=tuple(retrievals),
+            legs=leg_quotes_from_decision(decision, retrieved_at_by_venue=retrieved_at_by_venue),
+            oldest_quote_age_ms=oldest_quote_age_ms,
+            max_quote_age_ms=max_age,
+            max_skew_ms=execution_max_snapshot_skew_ms(settings),
+            net_edge=edge,
+            guaranteed_profit=profit,
         )
 
     def _execution_scheduler_work(

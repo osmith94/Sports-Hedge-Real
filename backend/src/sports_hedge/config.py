@@ -405,6 +405,11 @@ class Settings(BaseSettings):
     # Authoritative paper-entry freshness cap. Snapshot age at T1 plus simulated
     # latency must stay strictly below this. Backend dispatch delay is telemetry.
     paper_entry_max_quote_age_ms: int = Field(default=2000, ge=250, le=10000)
+    # Maximum latest-minus-earliest retrieval skew for one Price-2 hedge.
+    # Default 500 ms is the initial PAPER validation bound. It cannot be set
+    # above the 2,000 ms freshness ceiling here; evaluation also clamps it to
+    # the active quote-age gate. A wider skew does not relax freshness.
+    paper_execution_max_snapshot_skew_ms: int = Field(default=500, ge=0, le=2000)
     simulate_partial_fills: bool = True
     fx_spread_bps: int = Field(default=10, ge=0)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from logging import getLogger
 from typing import Any
 
 from sports_hedge.application.executable_liquidity import (
@@ -23,12 +24,27 @@ from sports_hedge.application.executable_liquidity import (
 )
 from sports_hedge.application.paper_scan import _paper_blocking_reasons
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
+from sports_hedge.application.execution_snapshot import ExecutionSnapshot
+from sports_hedge.arbitrage.watchlist.ranking import opportunity_id_for_canonical_market
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.models import PaperScanDecision
+
+LOGGER = getLogger("sports_hedge.execution_reprice")
 
 EXECUTION_REPRICE_FAILED = "execution_reprice_failed"
 EXECUTION_REPRICE_STALE = "execution_reprice_stale"
 EXECUTION_REPRICE_NO_LONGER_QUALIFYING = "execution_reprice_no_longer_qualifying"
+EXECUTION_REPRICE_SKEW = "execution_reprice_skew"
+EXECUTION_REPRICE_DUPLICATE = "execution_reprice_duplicate"
+
+PHASE_DISCOVERY_PRICE = "DISCOVERY_PRICE"
+PHASE_REPRICE_STARTED = "EXECUTION_REPRICE_STARTED"
+PHASE_BOOK_RETRIEVED = "EXECUTION_BOOK_RETRIEVED"
+PHASE_SNAPSHOT_COMPLETE = "EXECUTION_SNAPSHOT_COMPLETE"
+PHASE_REJECTED = "EXECUTION_REPRICE_REJECTED"
+PHASE_PAPER_ELIGIBLE = "PAPER_ELIGIBLE"
+PHASE_FILL_ATTEMPTED = "PAPER_FILL_ATTEMPTED"
+PHASE_FILL_COMPLETE = "PAPER_FILL_COMPLETE"
 
 # Known quote age is the only capture blocker this path may carry into the
 # execution reprice. Unknown age, missing costs, mapping, depth, and edge
@@ -90,18 +106,30 @@ class ExecutionRepriceDiagnostics:
         return " ".join(parts)
 
 
+def log_execution_phase(phase: str, **fields: object) -> None:
+    """One structured audit line. Phase names are stable for log search."""
+
+    parts = [f"phase={phase}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    LOGGER.info(" ".join(parts))
+
+
 def execution_reprice_audit_detail(
     reason: str,
     diagnostics: ExecutionRepriceDiagnostics | None,
+    snapshot: ExecutionSnapshot | None = None,
 ) -> str:
-    """Reason code plus the Price-2 timings that explain a missed entry."""
+    """Reason code plus snapshot skew and the Price-2 timings."""
 
-    if diagnostics is None:
-        return reason
-    body = diagnostics.compact()
-    if not body:
-        return reason
-    return f"{reason} {body}"
+    parts = [reason]
+    if snapshot is not None:
+        parts.append(snapshot.audit_line())
+    if diagnostics is not None and diagnostics.compact():
+        parts.append(diagnostics.compact())
+    return " ".join(parts)
 
 
 @dataclass
@@ -112,6 +140,8 @@ class ExecutionRepriceResult:
     reason: str | None = None
     refreshed_venues: tuple[VenueName, ...] = ()
     diagnostics: ExecutionRepriceDiagnostics | None = None
+    snapshot: ExecutionSnapshot | None = None
+    duplicate: bool = False
 
 
 @dataclass
@@ -261,8 +291,36 @@ async def capture_with_execution_reprice(
         discovery,
         pricing_lane=pricing_lane,
     )
+    log_execution_phase(
+        PHASE_DISCOVERY_PRICE,
+        canonical_market_id=decision.canonical_market_id,
+        quote_age_ms=decision.quote_age_ms,
+        net_edge=decision_net_edge(decision),
+        pricing_lane=pricing_lane,
+    )
+    opportunity_id = opportunity_id_for_canonical_market(decision.canonical_market_id or "")
+    if watchlist.has_active_bound_attempt(opportunity_id):
+        log_execution_phase(
+            PHASE_REJECTED,
+            reason=EXECUTION_REPRICE_DUPLICATE,
+            canonical_market_id=decision.canonical_market_id,
+        )
+        return ExecutionCaptureResult(
+            discovery_history=discovery_history,
+            discovery_decision=discovery,
+        )
     venues = hedge_venues(decision)
     refreshed = await engine.reprice_for_paper_entry(runtime, venues=venues)
+    if refreshed.duplicate:
+        log_execution_phase(
+            PHASE_REJECTED,
+            reason=EXECUTION_REPRICE_DUPLICATE,
+            canonical_market_id=decision.canonical_market_id,
+        )
+        return ExecutionCaptureResult(
+            discovery_history=discovery_history,
+            discovery_decision=discovery,
+        )
     if refreshed.decision is None:
         reason = refreshed.reason or EXECUTION_REPRICE_FAILED
         watchlist.note_execution_reprice_miss(
@@ -270,8 +328,18 @@ async def capture_with_execution_reprice(
             occurred_at=datetime.now(UTC),
             reason=reason,
             pricing_lane=pricing_lane,
-            detail=execution_reprice_audit_detail(reason, refreshed.diagnostics),
+            detail=execution_reprice_audit_detail(
+                reason,
+                refreshed.diagnostics,
+                refreshed.snapshot,
+            ),
             quote_age_ms=_diagnostic_quote_age(refreshed.diagnostics),
+        )
+        log_execution_phase(
+            PHASE_REJECTED,
+            reason=reason,
+            canonical_market_id=decision.canonical_market_id,
+            snapshot=None if refreshed.snapshot is None else refreshed.snapshot.audit_line(),
         )
         return ExecutionCaptureResult(
             discovery_history=discovery_history,
@@ -291,8 +359,17 @@ async def capture_with_execution_reprice(
             occurred_at=datetime.now(UTC),
             reason=block,
             pricing_lane=pricing_lane,
-            detail=execution_reprice_audit_detail(block, refreshed.diagnostics),
+            detail=execution_reprice_audit_detail(
+                block,
+                refreshed.diagnostics,
+                refreshed.snapshot,
+            ),
             quote_age_ms=_diagnostic_quote_age(refreshed.diagnostics),
+        )
+        log_execution_phase(
+            PHASE_REJECTED,
+            reason=block,
+            canonical_market_id=refreshed.decision.canonical_market_id,
         )
         return ExecutionCaptureResult(
             discovery_history=discovery_history,
@@ -301,6 +378,13 @@ async def capture_with_execution_reprice(
             entry_history=entry_history,
         )
 
+    log_execution_phase(
+        PHASE_PAPER_ELIGIBLE,
+        canonical_market_id=refreshed.decision.canonical_market_id,
+        net_edge=decision_net_edge(refreshed.decision),
+        snapshot=None if refreshed.snapshot is None else refreshed.snapshot.snapshot_id,
+    )
+    snapshot_json = None if refreshed.snapshot is None else refreshed.snapshot.to_json()
     entry_history = persist_price_engine_item_capture(
         refreshed.decision,
         service=service,
@@ -308,6 +392,7 @@ async def capture_with_execution_reprice(
         refreshed_venues=refreshed.refreshed_venues,
         pricing_lane=pricing_lane,
         execution_authoritative=True,
+        execution_snapshot_json=snapshot_json,
     )
     return ExecutionCaptureResult(
         discovery_history=discovery_history,
