@@ -7,8 +7,10 @@ books again and stops when the next snapshot fails an existing gate.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from test_execution_reprice_before_paper_entry import (
@@ -20,6 +22,7 @@ from test_execution_reprice_before_paper_entry import (
     _stale,
 )
 
+from sports_hedge.application.active_trade_recovery import consumed_native_by_level
 from sports_hedge.application.adaptive_scheduler import (
     LANE_ACTIVE,
     LANE_EXECUTION_CANDIDATE,
@@ -43,7 +46,8 @@ from sports_hedge.application.paper_operations import (
     PaperOperationsService,
 )
 from sports_hedge.config import Settings
-from sports_hedge.paper.trades import PaperTradeTrancheKind
+from sports_hedge.paper.trades import PaperTradeAuditEventType, PaperTradeTrancheKind
+from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 
 
 def _close(bundle) -> None:
@@ -535,5 +539,187 @@ async def test_active_plan_cannot_top_up_without_a_snapshot(tmp_path, monkeypatc
         assert reloaded is not None
         assert [item.tranche_id for item in reloaded.tranches] == before
         assert Settings().sports_hedge_execution_enabled is False
+    finally:
+        _close(bundle)
+
+
+def _ledger_path(ledger) -> Path:
+    row = ledger._connection.execute("PRAGMA database_list").fetchone()
+    return Path(row["file"])
+
+
+def _locked_pools(ledger) -> dict:
+    return {
+        (pool.venue, pool.native_currency): pool.locked_capital
+        for pool in ledger.treasury.snapshot().pools
+    }
+
+
+def test_top_up_snapshot_identity_is_in_the_commit_source() -> None:
+    fill_src = inspect.getsource(PaperOperationsService.fill_from_execution_snapshot)
+    commit_src = inspect.getsource(PaperOperationsService._commit_top_up_tranche)
+    assert "tranche.execution_snapshot_id = snapshot_id" not in fill_src
+    assert "tranche.idempotency_key = snapshot_id" not in fill_src
+    identity_at = commit_src.find("execution_snapshot_id=snapshot_id")
+    save_at = commit_src.find("self.trades.save")
+    assert identity_at >= 0
+    assert save_at > identity_at
+
+
+@pytest.mark.asyncio
+async def test_top_up_snapshot_identity_survives_restart(tmp_path, monkeypatch) -> None:
+    rich = _market("500")
+    thin = _market("450")
+    bundle = await _run(
+        tmp_path,
+        monkeypatch,
+        name="iterate-atomic",
+        matchbook_payloads=[_stale(rich), _fresh(rich), _fresh(thin), _fresh(thin)],
+        kalshi_books=[
+            _book("0.20", "0.70", "500.00"),
+            _book("0.20", "0.70", "500.00"),
+            _book("0.20", "0.70", "450.00"),
+            _book("0.40", "0.49", "450.00"),
+        ],
+    )
+    try:
+        trade = _open_trade(bundle)
+        opening = next(
+            item for item in trade.tranches if item.kind is PaperTradeTrancheKind.OPENING
+        )
+        top_up = next(
+            item for item in trade.tranches if item.kind is PaperTradeTrancheKind.TOP_UP
+        )
+        assert opening.idempotency_key.startswith("opening:")
+        assert opening.execution_snapshot_id
+        assert opening.idempotency_key != opening.execution_snapshot_id
+        consumed = consumed_native_by_level(trade)
+        path = _ledger_path(bundle.ledger)
+        reopened = SqlitePaperLedger(path, auto_seed=True)
+        try:
+            loaded = reopened.trades.get(trade.trade_id)
+            assert loaded is not None
+            reloaded_top = next(
+                item for item in loaded.tranches if item.kind is PaperTradeTrancheKind.TOP_UP
+            )
+            assert reloaded_top.execution_snapshot_id == top_up.execution_snapshot_id
+            assert reloaded_top.idempotency_key == top_up.execution_snapshot_id
+            assert consumed_native_by_level(loaded) == consumed
+            assert any(
+                event.event_type is PaperTradeAuditEventType.EXECUTION_SNAPSHOT
+                and top_up.execution_snapshot_id in (event.detail or "")
+                for event in loaded.audit
+            )
+            restarted = PaperOperationsService(
+                watchlist=bundle.watchlist,
+                settings=bundle.settings,
+                ledger=reopened,
+            )
+            decision = bundle.operations._plans[trade.opportunity_id].decision
+            audit = next(
+                row
+                for row in _audits(bundle, trade.opportunity_id)
+                if row["snapshot_id"] == top_up.execution_snapshot_id
+            )
+            locked = loaded.capital_locked_gbp
+            again = restarted.fill_from_execution_snapshot(
+                trade.opportunity_id,
+                decision,
+                snapshot_id=top_up.execution_snapshot_id,
+                snapshot_json=audit["snapshot_json"],
+            )
+            assert again == CYCLE_DUPLICATE
+            after = reopened.trades.get(trade.trade_id)
+            assert after is not None
+            assert len(after.tranches) == len(loaded.tranches)
+            assert after.capital_locked_gbp == locked
+        finally:
+            reopened.close()
+    finally:
+        _close(bundle)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_bind_uses_one_trade_save_and_rolls_back(tmp_path, monkeypatch) -> None:
+    rich = _market()
+    book = _book("0.20", "0.70")
+    bundle = await _run(
+        tmp_path,
+        monkeypatch,
+        name="iterate-atomic-save",
+        matchbook_payloads=[_stale(rich), _fresh(rich), _stale(rich)],
+        kalshi_books=[book, book, book],
+    )
+    try:
+        trade = _open_trade(bundle)
+        before_ids = [item.tranche_id for item in trade.tranches]
+        before_capital = trade.capital_locked_gbp
+        before_locks = _locked_pools(bundle.ledger)
+        audit = _audits(bundle, trade.opportunity_id)[0]
+        payload = json.loads(audit["snapshot_json"])
+        decision = bundle.operations._plans[trade.opportunity_id].decision
+        real_save = bundle.operations.trades.save
+
+        def _boom(item):
+            if any(tranche.execution_snapshot_id == "atomic-rollback" for tranche in item.tranches):
+                raise RuntimeError("injected_snapshot_save_failure")
+            return real_save(item)
+
+        rollback_payload = json.loads(json.dumps(payload))
+        rollback_payload["snapshot_id"] = "atomic-rollback"
+        bundle.operations.trades.save = _boom
+        with pytest.raises(RuntimeError, match="injected_snapshot_save_failure"):
+            bundle.operations.fill_from_execution_snapshot(
+                trade.opportunity_id,
+                decision,
+                snapshot_id="atomic-rollback",
+                snapshot_json=json.dumps(rollback_payload),
+            )
+        bundle.operations.trades.save = real_save
+        rolled = bundle.operations.trades.get(trade.trade_id)
+        assert rolled is not None
+        assert [item.tranche_id for item in rolled.tranches] == before_ids
+        assert not any(item.execution_snapshot_id == "atomic-rollback" for item in rolled.tranches)
+        assert rolled.capital_locked_gbp == before_capital
+        assert _locked_pools(bundle.ledger) == before_locks
+
+        snapshot_id = "atomic-top-up-snapshot"
+        payload["snapshot_id"] = snapshot_id
+        snapshot_json = json.dumps(payload)
+        saves = {"bound": 0, "unbound_new_tranche": 0}
+
+        def _counting(item):
+            new = [tranche for tranche in item.tranches if tranche.tranche_id not in before_ids]
+            bound = [
+                tranche
+                for tranche in new
+                if tranche.execution_snapshot_id == snapshot_id
+                and tranche.idempotency_key == snapshot_id
+            ]
+            if new and len(bound) != len(new):
+                saves["unbound_new_tranche"] += 1
+            if bound:
+                saves["bound"] += 1
+            return real_save(item)
+
+        bundle.operations.trades.save = _counting
+        filled = bundle.operations.fill_from_execution_snapshot(
+            trade.opportunity_id,
+            decision,
+            snapshot_id=snapshot_id,
+            snapshot_json=snapshot_json,
+        )
+        assert filled == "filled"
+        assert saves["bound"] == 1
+        assert saves["unbound_new_tranche"] == 0
+        bundle.operations.trades.save = real_save
+        loaded = bundle.operations.trades.get(trade.trade_id)
+        assert loaded is not None
+        successful = next(
+            item for item in loaded.tranches if item.execution_snapshot_id == snapshot_id
+        )
+        assert successful.idempotency_key == snapshot_id
+        assert loaded.capital_locked_gbp != before_capital
+        assert _locked_pools(bundle.ledger) != before_locks
     finally:
         _close(bundle)

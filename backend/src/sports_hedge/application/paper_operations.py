@@ -297,6 +297,19 @@ def _iterative_fill_stop(trade: PaperTrade) -> str:
     return CYCLE_NO_INCREMENTAL_LIQUIDITY
 
 
+def _top_up_snapshot_id(plan: PaperFillPlan, kind: PaperTradeTrancheKind) -> str | None:
+    """Snapshot that must be stored on a discretionary top-up before commit.
+
+    Recovery hedges are not discretionary accumulation and keep their own ids.
+    """
+
+    if kind is not PaperTradeTrancheKind.TOP_UP or not plan.execution_authoritative:
+        return None
+    from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+    return execution_snapshot_id_from_json(plan.execution_snapshot_json)
+
+
 def _scale_decision_depth(
     decision: PaperScanDecision,
     residual_by_identity: dict,
@@ -1444,10 +1457,10 @@ class PaperOperationsService:
             loaded = self.trades.get(trade.trade_id) if self.trades is not None else trade
             if loaded is None:
                 return CYCLE_NOT_OPEN
-            if self._snapshot_id_on_trade(loaded, snapshot_id):
-                return CYCLE_DUPLICATE
             added = [item for item in loaded.tranches if item.tranche_id not in before_ids]
             if not added:
+                if self._snapshot_id_on_trade(loaded, snapshot_id):
+                    return CYCLE_DUPLICATE
                 outcome = _iterative_fill_stop(loaded)
                 self._link_execution_snapshot(
                     snapshot_id,
@@ -1459,18 +1472,6 @@ class PaperOperationsService:
                 )
                 return outcome
             tranche = added[-1]
-            tranche.execution_snapshot_id = snapshot_id
-            tranche.idempotency_key = snapshot_id
-            loaded.audit.append(
-                PaperTradeAuditEvent(
-                    event_id=f"{loaded.trade_id}:execution_snapshot:{snapshot_id}",
-                    occurred_at=when,
-                    event_type=PaperTradeAuditEventType.EXECUTION_SNAPSHOT,
-                    detail=snapshot_json,
-                )
-            )
-            if self.trades is not None:
-                loaded = self.trades.save(loaded)
             self._plans[opportunity_id] = plan
             self._link_execution_snapshot(
                 snapshot_id,
@@ -2014,6 +2015,7 @@ class PaperOperationsService:
         trade.last_updated_at = occurred_at
         if guaranteed is not None:
             trade.guaranteed_profit_gbp_at_open = existing_guaranteed + guaranteed
+        snapshot_id = _top_up_snapshot_id(plan, kind)
         trade.tranches.append(
             PaperTradeTranche(
                 tranche_id=tranche_id,
@@ -2023,7 +2025,8 @@ class PaperOperationsService:
                 capital_locked_gbp=incremental_gbp,
                 guaranteed_profit_gbp=guaranteed,
                 fill_ids=fill_ids,
-                idempotency_key=tranche_id,
+                idempotency_key=snapshot_id or tranche_id,
+                execution_snapshot_id=snapshot_id,
             )
         )
         trade.active_trade_phase = PaperActiveTradePhase.ACCUMULATING
@@ -2035,6 +2038,15 @@ class PaperOperationsService:
                 detail=f"tranche={tranche_id} incremental_gbp={incremental_gbp}",
             )
         )
+        if snapshot_id and plan.execution_snapshot_json:
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    event_id=f"{trade.trade_id}:execution_snapshot:{snapshot_id}",
+                    occurred_at=occurred_at,
+                    event_type=PaperTradeAuditEventType.EXECUTION_SNAPSHOT,
+                    detail=plan.execution_snapshot_json,
+                )
+            )
         if self.trades is None:
             return trade
         saved = self.trades.save(trade)
