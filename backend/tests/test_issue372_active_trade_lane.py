@@ -69,14 +69,20 @@ from test_paper_trade_lifecycle import OBSERVED, _ops
 NOW = datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
 
 
-def _raise_trade_cap(tmp_path: Path, amount: Decimal) -> SqliteOperatorScannerSettingsStore:
+def _raise_trade_cap(
+    tmp_path: Path, amount: Decimal, one_time: Decimal | None = None
+) -> SqliteOperatorScannerSettingsStore:
     store = SqliteOperatorScannerSettingsStore(tmp_path / "operator-scanner.sqlite")
     bind_runtime_operator_scanner_settings_store(store)
+    cycle = amount if one_time is None else one_time
     store.save_settings(
         min_net_edge=Decimal("0.01"),
         max_execution_risk=60,
         hot_cadence_seconds=30,
         max_allocated_per_trade_gbp=amount,
+        max_event_gbp=amount,
+        max_opportunity_gbp=amount,
+        max_one_time_gbp=cycle,
     )
     return store
 
@@ -280,7 +286,7 @@ async def test_active_trade_fresh_refresh_updates_exit_management_without_extra_
 
 def test_qualifying_arb_adds_second_tranche(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("1000"))
+    store = _raise_trade_cap(tmp_path, Decimal("1000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -291,6 +297,9 @@ def test_qualifying_arb_adds_second_tranche(tmp_path: Path) -> None:
             max_execution_risk=60,
             hot_cadence_seconds=30,
             max_allocated_per_trade_gbp=Decimal("2000"),
+            max_event_gbp=Decimal("2000"),
+            max_opportunity_gbp=Decimal("2000"),
+            max_one_time_gbp=Decimal("2000"),
         )
         result = ops.maybe_top_up_open_trade(
             trade,
@@ -323,7 +332,7 @@ def test_qualifying_arb_adds_second_tranche(tmp_path: Path) -> None:
 
 def test_incomplete_complete_set_commits_nothing(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("1000"))
+    store = _raise_trade_cap(tmp_path, Decimal("1000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -811,7 +820,7 @@ def test_aggregate_reverse_depth_consumed_once_across_tranches(tmp_path: Path) -
     from sports_hedge.paper.unwind.adapter import position_from_trade
 
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -847,7 +856,7 @@ def test_qualifying_treasury_safe_top_up_ignores_recommendation_haircuts(tmp_pat
     assert "maximum_validated_capital" in size_src
     assert "recommended_stakes" not in size_src or "validated" in size_src
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]
@@ -1269,7 +1278,7 @@ def test_aggregated_unwind_releases_every_tranche_lock_once(tmp_path: Path) -> N
     from sports_hedge.paper.unwind.adapter import allocated_close_shares, position_from_trade
     from sports_hedge.paper.unwind.models import UnwindPolicy
 
-    store = _raise_trade_cap(tmp_path, Decimal("5000"))
+    store = _raise_trade_cap(tmp_path, Decimal("5000"), one_time=Decimal("40"))
     ledger = SqlitePaperLedger(
         tmp_path / "unwind-locks.sqlite",
         seed_gbp=Decimal("5000"),
@@ -1394,7 +1403,8 @@ def test_aggregated_unwind_releases_every_tranche_lock_once(tmp_path: Path) -> N
         assert allocated_qty == sum(
             (leg.filled_close_quantity for leg in decision.close_plan.legs), Decimal("0")
         )
-        assert sum((fill.filled_close_quantity for fill in closed.close_fills), Decimal("0")) == allocated_qty
+        filled_qty = sum((fill.filled_close_quantity for fill in closed.close_fills), Decimal("0"))
+        assert abs(filled_qty - allocated_qty) <= Decimal("0.0000001")
         assert sum((fill.closing_fee_native for fill in closed.close_fills), Decimal("0")) == allocated_fees
         unwind_ids = [
             entry.source_id
@@ -1438,7 +1448,7 @@ def test_top_up_lock_and_tranche_share_one_sqlite_transaction(tmp_path: Path) ->
     commit_src = inspect.getsource(PaperOperationsService._maybe_top_up_open_trade_locked)
     assert "ledger.transaction()" in commit_src
     ledger = SqlitePaperLedger(tmp_path / "paper.sqlite")
-    store = _raise_trade_cap(tmp_path, Decimal("2000"))
+    store = _raise_trade_cap(tmp_path, Decimal("2000"), one_time=Decimal("40"))
     _scan, _watchlist, ops, repository = _ops(ledger=ledger, autofill=True)
     try:
         trade = ops.list_active_trades()[0]

@@ -230,7 +230,9 @@ export function RunPaperScan() {
   const [minNetArbPercent, setMinNetArbPercent] = useState(DEFAULT_MIN_NET_ARB_PERCENT);
   const [outrightMinNetArbPercent, setOutrightMinNetArbPercent] = useState("");
   const [maxRisk, setMaxRisk] = useState(DEFAULT_MAX_RISK);
-  const [maxAllocatedPerTrade, setMaxAllocatedPerTrade] = useState(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
+  const [maxEventGbp, setMaxEventGbp] = useState(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
+  const [maxOpportunityGbp, setMaxOpportunityGbp] = useState(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
+  const [maxOneTimeGbp, setMaxOneTimeGbp] = useState(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
   const [loadingMode, setLoadingMode] = useState<ScanMode | null>(null);
   const [state, setState] = useState<ScanState>({ kind: "idle" });
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -322,11 +324,15 @@ export function RunPaperScan() {
           setOutrightMinNetArbPercent(minNetPercentFromRate(saved.outright_min_net_edge));
         }
         setMaxRisk(String(saved.max_execution_risk ?? DEFAULT_MAX_RISK));
-        if (saved.max_allocated_per_trade_gbp != null && saved.max_allocated_per_trade_gbp !== "") {
-          setMaxAllocatedPerTrade(String(saved.max_allocated_per_trade_gbp));
-        } else {
-          setMaxAllocatedPerTrade(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP);
-        }
+        const legacyCap =
+          saved.max_allocated_per_trade_gbp != null && saved.max_allocated_per_trade_gbp !== ""
+            ? String(saved.max_allocated_per_trade_gbp)
+            : DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP;
+        setMaxEventGbp(saved.max_event_gbp ? String(saved.max_event_gbp) : legacyCap);
+        setMaxOpportunityGbp(
+          saved.max_opportunity_gbp ? String(saved.max_opportunity_gbp) : legacyCap,
+        );
+        setMaxOneTimeGbp(saved.max_one_time_gbp ? String(saved.max_one_time_gbp) : legacyCap);
         if (options?.forceSettings) setSettingsDirty(false);
       }
       const completed =
@@ -448,9 +454,11 @@ export function RunPaperScan() {
       }
       const hotTarget = clampHotTargetRefreshSeconds(Number(hotTargetDraft));
       const universeRefresh = clampUniverseDiscoveryRefreshSeconds(Number(universeRefreshDraft));
-      const allocated = optionalPositive(maxAllocatedPerTrade, "Max allocated per trade");
-      if (!allocated) {
-        throw new Error("Max allocated per trade is required.");
+      const maxEvent = optionalPositive(maxEventGbp, "Max Event");
+      const maxOpportunity = optionalPositive(maxOpportunityGbp, "Max Opportunity");
+      const maxOneTime = optionalPositive(maxOneTimeGbp, "Max One-Time");
+      if (!maxEvent || !maxOpportunity || !maxOneTime) {
+        throw new Error("Max Event, Max Opportunity and Max One-Time are required.");
       }
       const status = await saveOperatorScannerSettings({
         min_net_edge: minNet,
@@ -458,7 +466,9 @@ export function RunPaperScan() {
         max_execution_risk: risk,
         hot_target_refresh_seconds: hotTarget,
         universe_discovery_refresh_seconds: universeRefresh,
-        max_allocated_per_trade_gbp: allocated,
+        max_event_gbp: maxEvent,
+        max_opportunity_gbp: maxOpportunity,
+        max_one_time_gbp: maxOneTime,
       });
       applyLiveRefresh(status, { forceSettings: true });
       setSettingsDirty(false);
@@ -765,6 +775,7 @@ export function RunPaperScan() {
                 setSettingsDirty(true);
               }}
               aria-label="Maximum execution risk score"
+              title="Recorded for Opportunity Monitor and diagnostics. It does not size or reject an otherwise qualifying paper placement."
             />
           </label>
           <label className="scan-field scan-field-compact">
@@ -802,17 +813,45 @@ export function RunPaperScan() {
             />
           </label>
           <label className="scan-field scan-field-compact">
-            <span>Max £ / trade</span>
+            <span>Max Event</span>
             <input
               inputMode="decimal"
-              value={maxAllocatedPerTrade}
+              value={maxEventGbp}
               onChange={(event) => {
-                setMaxAllocatedPerTrade(event.target.value);
+                setMaxEventGbp(event.target.value);
                 setSettingsDirty(true);
               }}
               placeholder="1000"
-              aria-label="Maximum allocated pounds per trade"
-              title="Cumulative capital cap for one paper trade including top-ups. Default £1,000."
+              aria-label="Max Event"
+              title="Maximum total capital deployed across all opportunities on one event."
+            />
+          </label>
+          <label className="scan-field scan-field-compact">
+            <span>Max Opportunity</span>
+            <input
+              inputMode="decimal"
+              value={maxOpportunityGbp}
+              onChange={(event) => {
+                setMaxOpportunityGbp(event.target.value);
+                setSettingsDirty(true);
+              }}
+              placeholder="1000"
+              aria-label="Max Opportunity"
+              title="Maximum cumulative capital deployed into one opportunity across all fills."
+            />
+          </label>
+          <label className="scan-field scan-field-compact">
+            <span>Max One-Time</span>
+            <input
+              inputMode="decimal"
+              value={maxOneTimeGbp}
+              onChange={(event) => {
+                setMaxOneTimeGbp(event.target.value);
+                setSettingsDirty(true);
+              }}
+              placeholder="1000"
+              aria-label="Max One-Time"
+              title="Maximum capital deployed by one execution attempt."
             />
           </label>
           <label className="scan-refresh">

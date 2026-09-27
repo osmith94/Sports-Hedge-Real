@@ -1553,6 +1553,9 @@ class LiveRefreshCoordinator:
         universe_cadence_seconds: int | None = None,
         universe_discovery_refresh_seconds: int | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
+        max_event_gbp: Decimal | None = None,
+        max_opportunity_gbp: Decimal | None = None,
+        max_one_time_gbp: Decimal | None = None,
         outright_min_net_edge: Any = _UNSET,
     ) -> OperatorScannerSettings:
         store = self._resolved_operator_store()
@@ -1569,6 +1572,9 @@ class LiveRefreshCoordinator:
             universe_cadence_seconds=universe_cadence_seconds,
             universe_discovery_refresh_seconds=universe_discovery_refresh_seconds,
             max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
+            max_event_gbp=max_event_gbp,
+            max_opportunity_gbp=max_opportunity_gbp,
+            max_one_time_gbp=max_one_time_gbp,
             outright_min_net_edge=outright_min_net_edge,
         )
         with self._state_lock:

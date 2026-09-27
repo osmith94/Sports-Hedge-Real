@@ -32,6 +32,21 @@ OPTIMISTIC_ELAPSED_BASES = frozenset(
         "kickoff_plus_first_half_plus_settlement_buffer",
     }
 )
+# Ordinary discretionary PAPER sizing. Anything else that can shrink
+# maximum_validated_capital is legacy hidden sizing and is not emitted.
+DISCRETIONARY_PAPER_CONSTRAINTS = frozenset(
+    {
+        AllocationConstraintKind.MISSING_BALANCE_DATA,
+        AllocationConstraintKind.MISSING_REPORTING_GBP,
+        AllocationConstraintKind.EXECUTABLE_DEPTH,
+        AllocationConstraintKind.NATIVE_VENUE_BALANCE,
+        AllocationConstraintKind.MAX_EVENT,
+        AllocationConstraintKind.MAX_OPPORTUNITY,
+        AllocationConstraintKind.MAX_ONE_TIME,
+        AllocationConstraintKind.SOLVER_CAPITAL,
+    }
+)
+
 ADVISORY_ESTIMATE_BASES = frozenset(
     {
         "kickoff_plus_elapsed_regulation_halftime_stoppage_settlement_buffer",
@@ -68,6 +83,12 @@ def _advisory_time_to_release(request: AllocationRequest) -> EstimatedTimeToRele
 
 
 def allocate(request: AllocationRequest) -> AllocationResult:
+    """Scale a solver-valid stake vector to the hard placement constraints."""
+
+    return _with_placement_evidence(_allocate_solver_scale(request), request)
+
+
+def _allocate_solver_scale(request: AllocationRequest) -> AllocationResult:
     """Scale a solver-valid stake vector. Never changes ratios to fit a bankroll."""
 
     if not request.is_arbitrage:
@@ -121,14 +142,18 @@ def allocate(request: AllocationRequest) -> AllocationResult:
         )
 
     reductions = _recommendation_reductions(request, scale_max)
-    quality = Decimal("1")
-    for factor in reductions:
-        quality *= Decimal("1") - factor.amount
-        if quality <= 0:
-            quality = Decimal("0")
-            break
-    scale_recommended = scale_max * quality
-    scale_recommended = min(scale_recommended, scale_max)
+    if request.discretionary_placement:
+        # Haircuts stay on the result as telemetry. They do not size the fill.
+        scale_recommended = scale_max
+    else:
+        quality = Decimal("1")
+        for factor in reductions:
+            quality *= Decimal("1") - factor.amount
+            if quality <= 0:
+                quality = Decimal("0")
+                break
+        scale_recommended = scale_max * quality
+        scale_recommended = min(scale_recommended, scale_max)
     if scale_recommended <= 0:
         scale_recommended = scale_max * (Decimal("1") - request.policy.safety_haircut)
         if scale_recommended <= 0:
@@ -199,11 +224,19 @@ def allocate(request: AllocationRequest) -> AllocationResult:
 
 
 def allocate_requested_size(request: AllocationRequest, requested_reporting: Decimal) -> AllocationResult:
+    return _with_placement_evidence(
+        _allocate_requested_size(request, requested_reporting),
+        request,
+    )
+
+
+def _allocate_requested_size(request: AllocationRequest, requested_reporting: Decimal) -> AllocationResult:
     """Scale the solver vector to an operator-chosen reporting size.
 
     Ratios never change. Requested size is a hard cap against the allocator
-    maximum; it does not bypass native-pool, depth, or reserve constraints.
-    This does not lock treasury or open a trade.
+    maximum. Discretionary PAPER placement does not apply reserve, pool,
+    concentration, or recommendation haircuts. This does not lock treasury
+    or open a trade.
     """
 
     if requested_reporting <= 0:
@@ -212,7 +245,7 @@ def allocate_requested_size(request: AllocationRequest, requested_reporting: Dec
             AllocationConstraintKind.CANNOT_RESIZE,
             "requested_size_must_be_positive",
         )
-    baseline = allocate(request)
+    baseline = _allocate_solver_scale(request)
     if not baseline.accepted:
         return baseline
     solver_capital = request.committed_capital_at_solver_size
@@ -285,9 +318,13 @@ def allocate_requested_size(request: AllocationRequest, requested_reporting: Dec
 def _constraint_priority(kind: AllocationConstraintKind) -> int:
     order = [
         AllocationConstraintKind.MISSING_BALANCE_DATA,
+        AllocationConstraintKind.MISSING_REPORTING_GBP,
         AllocationConstraintKind.EXECUTABLE_DEPTH,
         AllocationConstraintKind.NATIVE_VENUE_BALANCE,
         AllocationConstraintKind.MIN_FREE_RESERVE,
+        AllocationConstraintKind.MAX_ONE_TIME,
+        AllocationConstraintKind.MAX_OPPORTUNITY,
+        AllocationConstraintKind.MAX_EVENT,
         AllocationConstraintKind.MAX_POOL_FRACTION,
         AllocationConstraintKind.VENUE_LIMIT,
         AllocationConstraintKind.PER_OPPORTUNITY_LIMIT,
@@ -472,7 +509,153 @@ def _hard_constraints(request: AllocationRequest) -> list[ConstraintBinding]:
                     currency=currency,
                 )
             )
+    _append_placement_thresholds(bindings, request)
+    if request.discretionary_placement:
+        bindings = [item for item in bindings if item.kind in DISCRETIONARY_PAPER_CONSTRAINTS]
     return bindings
+
+
+def _non_negative(value: Decimal) -> Decimal:
+    if value < 0:
+        return Decimal("0")
+    return value
+
+
+def _sum_open_reporting(
+    request: AllocationRequest,
+    *,
+    event_id: str | None = None,
+    market_id: str | None = None,
+    opportunity_id: str | None = None,
+) -> Decimal:
+    total = Decimal("0")
+    for position in request.open_positions:
+        if event_id is not None and position.canonical_event_id != event_id:
+            continue
+        if market_id is not None and position.canonical_market_id != market_id:
+            continue
+        if opportunity_id is not None and position.opportunity_id != opportunity_id:
+            continue
+        locked = position.capital_reporting
+        if locked is None or locked <= 0:
+            continue
+        total += locked
+    return total
+
+
+def _event_deployed(request: AllocationRequest) -> Decimal | None:
+    if request.event_deployed_reporting is not None:
+        return request.event_deployed_reporting
+    if not request.canonical_event_id:
+        return None
+    return _sum_open_reporting(request, event_id=request.canonical_event_id)
+
+
+def _opportunity_deployed(request: AllocationRequest) -> Decimal | None:
+    if request.opportunity_deployed_reporting is not None:
+        return request.opportunity_deployed_reporting
+    if request.opportunity_id:
+        return _sum_open_reporting(request, opportunity_id=request.opportunity_id)
+    if request.canonical_market_id and request.canonical_event_id:
+        return _sum_open_reporting(
+            request,
+            event_id=request.canonical_event_id,
+            market_id=request.canonical_market_id,
+        )
+    return Decimal("0")
+
+
+def _append_reporting_cap(
+    bindings: list[ConstraintBinding],
+    *,
+    kind: AllocationConstraintKind,
+    limit: Decimal | None,
+    deployed: Decimal | None,
+    solver_capital: Decimal,
+    name: str,
+) -> None:
+    if limit is None:
+        return
+    if deployed is None:
+        bindings.append(
+            ConstraintBinding(
+                kind=AllocationConstraintKind.MISSING_REPORTING_GBP,
+                scale=Decimal("0"),
+                detail=f"missing_gbp_valuation:{name}",
+            )
+        )
+        return
+    room = _non_negative(limit - deployed)
+    bindings.append(
+        ConstraintBinding(
+            kind=kind,
+            scale=_scale_for_budget(solver_capital, room),
+            detail=f"{name} limit={limit} deployed={deployed} room={room}",
+        )
+    )
+
+
+def _append_placement_thresholds(
+    bindings: list[ConstraintBinding], request: AllocationRequest
+) -> None:
+    policy = request.policy
+    solver_capital = request.committed_capital_at_solver_size
+    _append_reporting_cap(
+        bindings,
+        kind=AllocationConstraintKind.MAX_EVENT,
+        limit=policy.max_event_reporting,
+        deployed=_event_deployed(request),
+        solver_capital=solver_capital,
+        name="max_event",
+    )
+    _append_reporting_cap(
+        bindings,
+        kind=AllocationConstraintKind.MAX_OPPORTUNITY,
+        limit=policy.max_opportunity_reporting,
+        deployed=_opportunity_deployed(request),
+        solver_capital=solver_capital,
+        name="max_opportunity",
+    )
+    _append_reporting_cap(
+        bindings,
+        kind=AllocationConstraintKind.MAX_ONE_TIME,
+        limit=policy.max_one_time_reporting,
+        deployed=Decimal("0") if policy.max_one_time_reporting is not None else None,
+        solver_capital=solver_capital,
+        name="max_one_time",
+    )
+
+
+def _placement_fields(request: AllocationRequest) -> dict[str, Decimal | None]:
+    policy = request.policy
+    event_limit = policy.max_event_reporting
+    opportunity_limit = policy.max_opportunity_reporting
+    one_time = policy.max_one_time_reporting
+    event_deployed = _event_deployed(request) if event_limit is not None else None
+    opportunity_deployed = (
+        _opportunity_deployed(request) if opportunity_limit is not None else None
+    )
+    return {
+        "max_event_gbp": event_limit,
+        "event_deployed_gbp": event_deployed,
+        "event_room_gbp": (
+            None
+            if event_limit is None or event_deployed is None
+            else _non_negative(event_limit - event_deployed)
+        ),
+        "max_opportunity_gbp": opportunity_limit,
+        "opportunity_deployed_gbp": opportunity_deployed,
+        "opportunity_room_gbp": (
+            None
+            if opportunity_limit is None or opportunity_deployed is None
+            else _non_negative(opportunity_limit - opportunity_deployed)
+        ),
+        "max_one_time_gbp": one_time,
+    }
+
+
+def _with_placement_evidence(result: AllocationResult, request: AllocationRequest) -> AllocationResult:
+    return result.model_copy(update=_placement_fields(request))
 
 
 def _depth_scale(legs: list[AllocationLeg]) -> Decimal:

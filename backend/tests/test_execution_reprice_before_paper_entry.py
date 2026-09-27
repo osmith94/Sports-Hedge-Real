@@ -323,6 +323,7 @@ async def _run(
     kalshi_books: list[dict | None],
     treasury: Decimal = Decimal(5000),
     max_allocated_per_trade_gbp: float | None = None,
+    max_one_time_gbp: float | None = None,
     ready: dict | None = None,
     matchbook_hook=None,
 ):
@@ -330,6 +331,8 @@ async def _run(
     if max_allocated_per_trade_gbp is not None:
         settings_kwargs["max_allocated_per_trade_gbp"] = max_allocated_per_trade_gbp
         settings_kwargs["allocation_per_opportunity_limit_gbp"] = max_allocated_per_trade_gbp
+    if max_one_time_gbp is not None:
+        settings_kwargs["max_one_time_gbp"] = max_one_time_gbp
     settings = Settings(**settings_kwargs)
     repository = SqliteMarketIntelligenceRepository()
     scan = _RecordingScan(

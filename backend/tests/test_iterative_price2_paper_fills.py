@@ -84,6 +84,7 @@ async def test_persistent_book_fills_again_from_the_new_depth(tmp_path, monkeypa
             _book("0.20", "0.70", "450.00"),
             _book("0.40", "0.49", "450.00"),
         ],
+        max_one_time_gbp=80,
     )
     try:
         assert len(bundle.operations.list_active_trades()) == 1
@@ -202,7 +203,7 @@ async def test_allocation_ceiling_stops_without_another_tranche(tmp_path, monkey
         assert audits[-1]["cycle_outcome"] == CYCLE_ALLOCATION_CEILING
         assert audits[-1]["tranche_id"] is None
         assert all(row["cycle_outcome"] == "filled" for row in audits[:-1])
-        assert len(bundle.matchbook.get_market_calls) == 4
+        assert len(bundle.matchbook.get_market_calls) == 3
         assert len(bundle.ledger.trades.list_all()) == 1
     finally:
         _close(bundle)
@@ -581,6 +582,7 @@ async def test_top_up_snapshot_identity_survives_restart(tmp_path, monkeypatch) 
             _book("0.20", "0.70", "450.00"),
             _book("0.40", "0.49", "450.00"),
         ],
+        max_one_time_gbp=80,
     )
     try:
         trade = _open_trade(bundle)

@@ -266,6 +266,7 @@ def exposures_from_trades(trades: list[PaperTrade]) -> list[OpenPositionExposure
                     VenueNativeAmount(venue=venue, currency=currency, amount=amount)
                     for (venue, currency), amount in native.items()
                 ],
+                canonical_market_id=trade.canonical_market_id,
                 capital_reporting=trade.capital_locked_gbp,
             )
         )
@@ -363,6 +364,9 @@ def request_from_paper_decision(
     expected_lock_duration_hours: Decimal | None = None,
     expected_lock_basis: str | None = None,
     recent_volatility_bps: Decimal | None = None,
+    event_deployed_reporting: Decimal | None = None,
+    opportunity_deployed_reporting: Decimal | None = None,
+    opportunity_id: str | None = None,
 ) -> AllocationRequest | None:
     fx = {item.currency.upper(): item.gbp_per_unit for item in decision.fx_snapshots}
     fx.setdefault("GBP", Decimal("1"))
@@ -393,7 +397,7 @@ def request_from_paper_decision(
                     execution_mode=mode,
                 )
             )
-        return request_from_complete_set(
+        built = request_from_complete_set(
             legs,
             decision.depth_scan.solution,
             policy=policy,
@@ -405,6 +409,13 @@ def request_from_paper_decision(
             expected_lock_basis=expected_lock_basis,
             quote_age_ms=decision.quote_age_ms,
             recent_volatility_bps=recent_volatility_bps,
+        )
+        return _stamp_placement_identity(
+            built,
+            decision,
+            event_deployed_reporting=event_deployed_reporting,
+            opportunity_deployed_reporting=opportunity_deployed_reporting,
+            opportunity_id=opportunity_id,
         )
     if decision.payoff_scan is not None and decision.payoff_scan.solution.is_arbitrage:
         solution = decision.payoff_scan.solution
@@ -434,7 +445,7 @@ def request_from_paper_decision(
         modes = {
             venue: LegExecutionMode(mode) for venue, mode in decision.execution_modes.items()
         }
-        return request_from_payoff(
+        built = request_from_payoff(
             solution,
             max_stake_by_leg=max_stake,
             native_currency_by_leg=currency,
@@ -451,4 +462,32 @@ def request_from_paper_decision(
             expected_lock_basis=expected_lock_basis,
             recent_volatility_bps=recent_volatility_bps,
         )
+        return _stamp_placement_identity(
+            built,
+            decision,
+            event_deployed_reporting=event_deployed_reporting,
+            opportunity_deployed_reporting=opportunity_deployed_reporting,
+            opportunity_id=opportunity_id,
+        )
     return None
+
+
+def _stamp_placement_identity(
+    request: AllocationRequest,
+    decision: PaperScanDecision,
+    *,
+    event_deployed_reporting: Decimal | None,
+    opportunity_deployed_reporting: Decimal | None,
+    opportunity_id: str | None,
+) -> AllocationRequest:
+    update: dict[str, object] = {
+        "canonical_market_id": decision.canonical_market_id,
+        "discretionary_placement": True,
+    }
+    if event_deployed_reporting is not None:
+        update["event_deployed_reporting"] = event_deployed_reporting
+    if opportunity_deployed_reporting is not None:
+        update["opportunity_deployed_reporting"] = opportunity_deployed_reporting
+    if opportunity_id:
+        update["opportunity_id"] = opportunity_id
+    return request.model_copy(update=update)

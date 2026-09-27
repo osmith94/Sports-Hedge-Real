@@ -63,7 +63,7 @@ from sports_hedge.arbitrage.allocation.adapters import (
     exposures_from_trades,
     request_from_paper_decision,
 )
-from sports_hedge.arbitrage.allocation.engine import allocate
+from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
 from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
@@ -514,8 +514,6 @@ class PaperScanService:
                 rejections.append("missing_risk_evidence")
             else:
                 risk = self.risk_scorer.score(risk_inputs)
-                if risk.score > maximum_execution_risk:
-                    rejections.append("execution_risk_above_threshold")
 
         execution_modes = {
             left.venue: _default_execution_mode(left.venue),
@@ -638,6 +636,10 @@ class PaperScanService:
         if request is None:
             return None, ["allocation_failed:unsupported_solver_vector"]
         result = allocate(request)
+        if result.accepted and result.maximum_validated_capital > 0:
+            sized = allocate_requested_size(request, result.maximum_validated_capital)
+            if sized.accepted:
+                result = sized
         if not result.accepted:
             reason = result.rejection_reason or (
                 result.limiting_constraint.value if result.limiting_constraint else "allocation_failed"

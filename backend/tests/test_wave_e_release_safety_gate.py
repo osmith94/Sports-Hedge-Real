@@ -397,14 +397,15 @@ def test_wave_e_insufficient_capital_does_not_auto_open(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_wave_e_excessive_execution_risk_does_not_auto_open(tmp_path: Path) -> None:
+def test_wave_e_execution_risk_alone_does_not_block_paper(tmp_path: Path) -> None:
     scan, watchlist, ops, repository, ledger = _ops(tmp_path)
     try:
         decision = _scan(scan, maximum_execution_risk=0)
-        assert decision.eligible_for_paper_simulation is False
-        assert "execution_risk_above_threshold" in decision.rejection_reasons
+        assert decision.eligible_for_paper_simulation is True
+        assert "execution_risk_above_threshold" not in decision.rejection_reasons
+        assert decision.execution_risk is not None
         _observe_persist(scan, watchlist, ops, decision)
-        _assert_zero_capture(ops, ledger)
+        assert ops.list_active_trades()
     finally:
         repository.close()
         ledger.close()

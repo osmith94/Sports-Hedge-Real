@@ -108,6 +108,13 @@ class ExecutionCapitalEvidence:
     solver_model: str | None
     hard_constraints: tuple[str, ...] = ()
     paper_only: bool = True
+    max_event_gbp: str | None = None
+    event_deployed_gbp: str | None = None
+    event_room_gbp: str | None = None
+    max_opportunity_gbp: str | None = None
+    opportunity_deployed_gbp: str | None = None
+    opportunity_room_gbp: str | None = None
+    max_one_time_gbp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -487,6 +494,13 @@ def _capital_evidence(allocation: Any) -> ExecutionCapitalEvidence | None:
         solver_model=_text(getattr(allocation, "solver_model", None)),
         hard_constraints=constraints,
         paper_only=bool(getattr(allocation, "paper_only", True)),
+        max_event_gbp=_text(getattr(allocation, "max_event_gbp", None)),
+        event_deployed_gbp=_text(getattr(allocation, "event_deployed_gbp", None)),
+        event_room_gbp=_text(getattr(allocation, "event_room_gbp", None)),
+        max_opportunity_gbp=_text(getattr(allocation, "max_opportunity_gbp", None)),
+        opportunity_deployed_gbp=_text(getattr(allocation, "opportunity_deployed_gbp", None)),
+        opportunity_room_gbp=_text(getattr(allocation, "opportunity_room_gbp", None)),
+        max_one_time_gbp=_text(getattr(allocation, "max_one_time_gbp", None)),
     )
 
 
@@ -545,6 +559,13 @@ def _capital_json(item: ExecutionCapitalEvidence | None) -> dict[str, Any] | Non
         "solver_model": item.solver_model,
         "hard_constraints": list(item.hard_constraints),
         "paper_only": item.paper_only,
+        "max_event_gbp": item.max_event_gbp,
+        "event_deployed_gbp": item.event_deployed_gbp,
+        "event_room_gbp": item.event_room_gbp,
+        "max_opportunity_gbp": item.max_opportunity_gbp,
+        "opportunity_deployed_gbp": item.opportunity_deployed_gbp,
+        "opportunity_room_gbp": item.opportunity_room_gbp,
+        "max_one_time_gbp": item.max_one_time_gbp,
     }
 
 

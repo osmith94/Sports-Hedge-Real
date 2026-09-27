@@ -29,7 +29,12 @@ from sports_hedge.application.active_trade_recovery import (
 from sports_hedge.application.active_trade_lane import (
     active_trade_cadence_seconds,
     get_active_trade_registry,
-    remaining_trade_room_gbp,
+)
+from sports_hedge.paper.placement_room import (
+    PlacementValuationError,
+    current_event_deployment_gbp,
+    recovery_capital_room_gbp,
+    remaining_room_gbp,
 )
 from sports_hedge.application.executable_liquidity import decision_net_edge
 from sports_hedge.application.ftts_alert_bridge import attach_ftts_ordinary_depth
@@ -1649,7 +1654,6 @@ class PaperOperationsService:
         else:
             plan = plan or self._plans.get(trade.opportunity_id)
         operator = effective_operator_scanner_settings(self.settings)
-        cap = operator.max_allocated_per_trade_gbp
         trigger = plan.decision.minimum_net_edge if plan is not None else None
         if plan is None:
             return None
@@ -1672,10 +1676,6 @@ class PaperOperationsService:
             return self._retry_entry_recovery(trade, plan, when, config)
         if not self._discretionary_snapshot_authorised(trade, plan):
             return self._result_from_existing_trade(trade, when)
-        clamped = self._clamp_plan_to_residual_depth(trade, plan)
-        if clamped is None:
-            return self._result_from_existing_trade(trade, when)
-        plan = clamped
         current_net = plan.net_edge if plan.net_edge is not None else decision_net_edge(plan.decision)
         if current_net is None or not qualifies_min_net_arb(current_net, trigger):
             trade.active_trade_phase = PaperActiveTradePhase.EXIT_MANAGEMENT
@@ -1702,14 +1702,40 @@ class PaperOperationsService:
                 },
             )
             return self._result_from_existing_trade(trade, when)
-        room = remaining_trade_room_gbp(trade, cap)
-        if room <= 0:
+        clamped = self._clamp_plan_to_residual_depth(trade, plan)
+        if clamped is None:
+            return self._result_from_existing_trade(trade, when)
+        plan = clamped
+        try:
+            event_deployed = current_event_deployment_gbp(
+                self.list_active_trades(), trade.canonical_event_id or ""
+            )
+        except PlacementValuationError as exc:
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.NO_ACTION,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_NO_ROOM,
+                operator_copy="Placement GBP evidence missing; no new risk added",
+                occurred_at=when,
+                dedupe_key=f"missing-gbp:{trade.trade_id}:{when.isoformat()}",
+                payload={"reason": exc.reason},
+            )
+            return self._result_from_existing_trade(trade, when)
+        opportunity_locked = trade.capital_locked_gbp or Decimal("0")
+        event_room = remaining_room_gbp(operator.max_event_gbp, event_deployed)
+        opportunity_room = remaining_room_gbp(operator.max_opportunity_gbp, opportunity_locked)
+        if event_room <= 0 or opportunity_room <= 0:
+            limiting = "max_opportunity" if opportunity_room <= 0 else "max_event"
             trade.active_trade_phase = PaperActiveTradePhase.MONITORING_CAP_REACHED
             self._append_trade_event_once(
                 trade,
                 event_type=PaperTradeAuditEventType.TOP_UP_CAP_REACHED,
                 occurred_at=when,
-                detail=f"locked={trade.capital_locked_gbp} cap={cap}; monitoring continues",
+                detail=(
+                    f"locked={opportunity_locked} "
+                    f"opportunity_room={opportunity_room} event_room={event_room} "
+                    f"limiting={limiting}; monitoring continues"
+                ),
             )
             if self.trades is not None:
                 trade = self.trades.save(trade)
@@ -1717,13 +1743,28 @@ class PaperOperationsService:
                 trade,
                 event_type=ActiveTradeEventType.CAP_REACHED,
                 reason_code=ActiveTradeReasonCode.NO_ACTION_CAP_REACHED,
-                operator_copy="Cumulative max/trade reached; 5s monitoring continues",
+                operator_copy="Event or opportunity placement room is exhausted; monitoring continues",
                 occurred_at=when,
                 dedupe_key=f"cap-reached:{trade.trade_id}",
-                payload={"locked_gbp": trade.capital_locked_gbp, "cap": cap},
+                payload={
+                    "locked_gbp": opportunity_locked,
+                    "event_deployed_gbp": event_deployed,
+                    "max_event_gbp": operator.max_event_gbp,
+                    "event_room_gbp": event_room,
+                    "max_opportunity_gbp": operator.max_opportunity_gbp,
+                    "opportunity_room_gbp": opportunity_room,
+                    "max_one_time_gbp": operator.max_one_time_gbp,
+                    "limiting_constraint": limiting,
+                },
             )
             return self._result_from_existing_trade(trade, when)
-        incremental = self._size_incremental_tranche(trade, plan, remaining_gbp=room)
+        incremental = self._size_incremental_tranche(
+            trade,
+            plan,
+            event_deployed_gbp=event_deployed,
+            event_room_gbp=event_room,
+            opportunity_room_gbp=opportunity_room,
+        )
         if incremental is None:
             self.record_active_lifecycle_event(
                 trade,
@@ -1804,7 +1845,6 @@ class PaperOperationsService:
                 tranche_id=tranche_id,
             )
             return self._result_from_existing_trade(trade, when)
-        existing_gbp = trade.capital_locked_gbp or Decimal("0")
         filled_gbp = _filled_gbp(fills, mapped_legs, plan)
         if not complete and actual_fills:
             return self._commit_partial_buy_and_recover(
@@ -1820,8 +1860,6 @@ class PaperOperationsService:
                 config=fill_config,
                 kind="topup",
             )
-        if existing_gbp + incremental_gbp > cap:
-            return self._result_from_existing_trade(trade, when)
         commit = lambda: self._commit_top_up_tranche(
             trade,
             plan=plan,
@@ -1851,31 +1889,29 @@ class PaperOperationsService:
         trade: PaperTrade,
         plan: PaperFillPlan,
         *,
-        remaining_gbp: Decimal,
+        event_deployed_gbp: Decimal,
+        event_room_gbp: Decimal,
+        opportunity_room_gbp: Decimal,
     ) -> tuple[list[PaperOpportunityLeg], Any, Decimal] | None:
-        policy = policy_from_settings(self.settings).model_copy(
-            update={"per_opportunity_limit_reporting": remaining_gbp}
-        )
+        operator = effective_operator_scanner_settings(self.settings)
+        cycle_cap = min(event_room_gbp, opportunity_room_gbp, operator.max_one_time_gbp)
+        if cycle_cap <= 0:
+            return None
+        policy = policy_from_settings(self.settings)
         balances = []
         if self.ledger is not None:
             balances = balances_from_treasury(self.ledger.treasury.snapshot())
         siblings = [
             item for item in self.list_active_trades() if item.trade_id != trade.trade_id
         ]
-        existing = trade.capital_locked_gbp or Decimal("0")
-        if policy.portfolio_cap_reporting is not None:
-            policy = policy.model_copy(
-                update={
-                    "portfolio_cap_reporting": max(
-                        Decimal("0"), policy.portfolio_cap_reporting - existing
-                    )
-                }
-            )
         request = request_from_paper_decision(
             plan.decision,
             policy=policy,
             balances=balances,
             open_positions=exposures_from_trades(siblings),
+            event_deployed_reporting=event_deployed_gbp,
+            opportunity_deployed_reporting=trade.capital_locked_gbp or Decimal("0"),
+            opportunity_id=trade.opportunity_id,
         )
         if request is None:
             return None
@@ -1912,17 +1948,21 @@ class PaperOperationsService:
         fx.setdefault("GBP", Decimal("1"))
         incremental_gbp = Decimal("0")
         for leg in mapped:
-            rate = Decimal("1") if leg.currency.upper() == "GBP" else fx.get(leg.currency.upper(), Decimal("1"))
+            rate = fx.get(leg.currency.upper())
+            if leg.currency.upper() == "GBP":
+                rate = Decimal("1")
+            if rate is None or rate <= 0:
+                return None
             incremental_gbp += leg.requested_stake * rate
         if incremental_gbp <= 0:
             return None
-        if incremental_gbp > remaining_gbp:
-            scale = remaining_gbp / incremental_gbp
+        if incremental_gbp > cycle_cap:
+            scale = cycle_cap / incremental_gbp
             mapped = [
                 leg.model_copy(update={"requested_stake": (leg.requested_stake * scale)})
                 for leg in mapped
             ]
-            incremental_gbp = remaining_gbp
+            incremental_gbp = cycle_cap
         try:
             self._assert_spendable_treasury(mapped)
         except PaperOperationsError:
@@ -2184,7 +2224,9 @@ class PaperOperationsService:
     ) -> PaperTrade:
         residual = residual_exposure_gbp(trade)
         operator = effective_operator_scanner_settings(self.settings)
-        room = remaining_trade_room_gbp(trade, operator.max_allocated_per_trade_gbp)
+        room = recovery_capital_room_gbp(
+            operator.max_opportunity_gbp, trade.capital_locked_gbp
+        )
         recovery_id = f"recovery:{origin_tranche_id}"
         if any(item.tranche_id == recovery_id for item in trade.tranches):
             sequence = 1 + max((item.sequence for item in trade.tranches), default=0)

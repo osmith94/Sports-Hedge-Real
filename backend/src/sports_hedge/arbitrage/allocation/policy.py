@@ -11,20 +11,19 @@ def default_bankroll_policy() -> BankrollAllocationPolicy:
     return BankrollAllocationPolicy()
 
 
-def _per_opportunity_limit(settings: Settings) -> Decimal:
-    """Operator max-allocated-per-trade is the allocator per-opportunity cap."""
+def _operator_placement(settings: Settings):
+    """Three reporting-GBP caps. The legacy per-trade field is not authority."""
 
-    try:
-        from sports_hedge.persistence.operator_scanner_settings import (
-            effective_operator_scanner_settings,
-        )
+    from sports_hedge.persistence.operator_scanner_settings import (
+        effective_operator_scanner_settings,
+    )
 
-        return effective_operator_scanner_settings(settings).max_allocated_per_trade_gbp
-    except Exception:
-        configured = settings.allocation_per_opportunity_limit_gbp
-        if configured is None:
-            configured = settings.max_allocated_per_trade_gbp
-        return Decimal(str(configured))
+    operator = effective_operator_scanner_settings(settings)
+    return (
+        operator.max_event_gbp,
+        operator.max_opportunity_gbp,
+        operator.max_one_time_gbp,
+    )
 
 
 def policy_from_settings(settings: Settings) -> BankrollAllocationPolicy:
@@ -33,6 +32,7 @@ def policy_from_settings(settings: Settings) -> BankrollAllocationPolicy:
         venue_limits[VenueName.MATCHBOOK] = Decimal(str(settings.allocation_matchbook_limit_gbp))
     if settings.allocation_polymarket_limit_usd is not None:
         venue_limits[VenueName.POLYMARKET] = Decimal(str(settings.allocation_polymarket_limit_usd))
+    max_event, max_opportunity, max_one_time = _operator_placement(settings)
     return BankrollAllocationPolicy(
         min_reserve_amount=(
             Decimal(str(settings.allocation_min_reserve_amount))
@@ -47,7 +47,10 @@ def policy_from_settings(settings: Settings) -> BankrollAllocationPolicy:
         max_same_fixture_capital_fraction=Decimal(
             str(settings.allocation_max_same_fixture_fraction)
         ),
-        per_opportunity_limit_reporting=_per_opportunity_limit(settings),
+        per_opportunity_limit_reporting=None,
+        max_event_reporting=max_event,
+        max_opportunity_reporting=max_opportunity,
+        max_one_time_reporting=max_one_time,
         venue_limits_native=venue_limits,
         portfolio_cap_reporting=(
             Decimal(str(settings.max_total_exposure_gbp))

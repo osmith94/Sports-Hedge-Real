@@ -496,7 +496,10 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /useState\(DEFAULT_MIN_NET_ARB_PERCENT\)/);
     assert.match(scan, /useState\(DEFAULT_MAX_RISK\)/);
     assert.match(scan, /useState\(DEFAULT_MAX_ALLOCATED_PER_TRADE_GBP\)/);
-    assert.match(scan, /max_allocated_per_trade_gbp: allocated/);
+    assert.match(scan, /max_event_gbp: maxEvent/);
+    assert.match(scan, /max_opportunity_gbp: maxOpportunity/);
+    assert.match(scan, /max_one_time_gbp: maxOneTime/);
+    assert.doesNotMatch(scan, /Max £ \/ trade/);
     assert.match(scan, /ACTIVE TRADE \/ HOT pricing \/ BACKGROUND pricing \/ UNIVERSE discovery paused/);
     const pulse = readFileSync(join(frontendRoot, "components/live-scan-pulse.tsx"), "utf8");
     assert.match(

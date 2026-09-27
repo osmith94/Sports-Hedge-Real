@@ -355,7 +355,7 @@ async def test_qualifying_background_row_without_treasury_creates_no_paper_trade
 
 
 @pytest.mark.asyncio
-async def test_qualifying_background_row_over_risk_cap_creates_no_paper_trade(
+async def test_qualifying_background_row_is_not_rejected_for_risk_score(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -367,11 +367,11 @@ async def test_qualifying_background_row_over_risk_cap_creates_no_paper_trade(
         treasury_seed=Decimal(5000),
         max_execution_risk=0,
     )
-    assert scan.scan_calls == DULL_COUNT + 1
-    assert all(not item.eligible_for_paper_simulation for item in result.decisions)
-    assert any(
-        "execution_risk_above_threshold" in item.rejection_reasons for item in result.decisions
-    )
+    assert scan.scan_calls >= DULL_COUNT + 1
+    rich = [item for item in result.decisions if item.eligible_for_paper_simulation]
+    assert rich
+    assert all("execution_risk_above_threshold" not in item.rejection_reasons for item in rich)
+    assert any(item.execution_risk is not None for item in rich)
     assert len(captured) == DULL_COUNT + 1
-    assert _open_trades(operations) == []
-    _assert_no_rediscovery(matchbook, kalshi, DULL_COUNT + 1)
+    assert _open_trades(operations)
+    _assert_no_rediscovery(matchbook, kalshi, DULL_COUNT + 1, extra_exact_reads=2)

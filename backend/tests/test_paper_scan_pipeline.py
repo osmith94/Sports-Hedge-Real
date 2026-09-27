@@ -446,7 +446,8 @@ def test_complete_below_threshold_candidate_scores_risk_from_stakes() -> None:
         assert decision.execution_risk is not None
         assert decision.eligible_for_paper_simulation is False
         assert "net_edge_below_threshold" in decision.rejection_reasons
-        assert "execution_risk_above_threshold" in decision.rejection_reasons
+        assert decision.execution_risk.score > 0
+        assert "execution_risk_above_threshold" not in decision.rejection_reasons
         assert "missing_risk_evidence" not in decision.rejection_reasons
     finally:
         repository.close()

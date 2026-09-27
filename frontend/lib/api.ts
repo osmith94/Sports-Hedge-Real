@@ -760,6 +760,9 @@ export type OperatorScannerSettings = {
   background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
+  max_event_gbp?: string;
+  max_opportunity_gbp?: string;
+  max_one_time_gbp?: string;
   scanner_stopped: boolean;
   universe_scans_paused?: boolean;
   background_pricing_paused?: boolean;
@@ -782,6 +785,9 @@ export type OperatorScannerSettingsUpdate = {
   background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
   max_allocated_per_trade_gbp?: string;
+  max_event_gbp?: string;
+  max_opportunity_gbp?: string;
+  max_one_time_gbp?: string;
 };
 
 export type OperatorCompetitionOption = {
