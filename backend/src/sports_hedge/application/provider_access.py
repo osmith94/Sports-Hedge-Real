@@ -17,6 +17,13 @@ Already-running lower-priority HTTP calls are not cancelled when demand
 changes. Anti-starvation may still grant a lower-priority waiter into a
 non-protected slot; it must not spend the protected headroom.
 
+EXECUTION CANDIDATE is Price-2 work before any position exists. It ranks
+below ACTIVE TRADE and above ordinary HOT, BACKGROUND, and UNIVERSE. It may
+use an otherwise-idle slot reserved for ACTIVE TRADE. It is not labeled
+active_trade. If ACTIVE TRADE is waiting, that work wins the next free slot.
+Candidate grants do not spend the anti-starvation budget that would promote
+lower lanes ahead of an open position.
+
 During the startup UNIVERSE barrier, HOT and BACKGROUND are already gated.
 The reservation is one slot so ACTIVE cannot be locked out, and UNIVERSE may
 use the other three. That is the whole startup exception. Once pricing opens,
@@ -65,6 +72,7 @@ HEALTH_CAPACITY_SATURATED = "provider_capacity_saturated"
 DEFAULT_STARVATION_HOT_GRANTS = 8
 PRICE_ENGINE_BACKGROUND_LANE = "background"
 PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
+PRICE_ENGINE_EXECUTION_CANDIDATE_LANE = "execution_candidate"
 PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
 # Ungranted BACKGROUND waiters refused because the operator paused the lane.
 BACKGROUND_ADMISSION_PAUSED = "background_admission_paused"
@@ -78,16 +86,19 @@ STARTUP_ACTIVE_RESERVED_SLOTS = 1
 
 class ProviderPriority(IntEnum):
     ACTIVE_TRADE = 0
-    HOT = 1
-    UNIVERSE = 2
-    MANUAL = 2
-    BACKGROUND = 3
+    EXECUTION_CANDIDATE = 1
+    HOT = 2
+    UNIVERSE = 3
+    MANUAL = 3
+    BACKGROUND = 4
 
 
 def priority_for_lane(lane: ScanLane | str | None) -> ProviderPriority:
     text = str(lane or "").strip().casefold()
     if text in {PRICE_ENGINE_ACTIVE_TRADE_LANE, "active-trade"}:
         return ProviderPriority.ACTIVE_TRADE
+    if text in {PRICE_ENGINE_EXECUTION_CANDIDATE_LANE, "execution-candidate"}:
+        return ProviderPriority.EXECUTION_CANDIDATE
     if text == ScanLane.HOT.value:
         return ProviderPriority.HOT
     if text in {PRICE_ENGINE_BACKGROUND_LANE, PRICE_ENGINE_SETTLEMENT_LANE}:
@@ -416,7 +427,11 @@ class ProviderAccessLayer:
 
     @staticmethod
     def _is_lower_priority(priority: ProviderPriority) -> bool:
-        return priority not in {ProviderPriority.ACTIVE_TRADE, ProviderPriority.HOT}
+        return priority not in {
+            ProviderPriority.ACTIVE_TRADE,
+            ProviderPriority.EXECUTION_CANDIDATE,
+            ProviderPriority.HOT,
+        }
 
     def _lower_grant_allowed(self, venue: VenueName, waiter: _Waiter) -> bool:
         if not self._is_lower_priority(waiter.priority):
@@ -429,6 +444,7 @@ class ProviderAccessLayer:
     def snapshot(self) -> ProviderAccessSnapshot:
         waiting_by_lane = {
             "active_trade": {venue.value: 0 for venue in self._limits},
+            "execution_candidate": {venue.value: 0 for venue in self._limits},
             "hot": {venue.value: 0 for venue in self._limits},
             "universe": {venue.value: 0 for venue in self._limits},
             "background": {venue.value: 0 for venue in self._limits},
@@ -440,6 +456,8 @@ class ProviderAccessLayer:
             for waiter in pending:
                 if waiter.priority is ProviderPriority.ACTIVE_TRADE:
                     lane = "active_trade"
+                elif waiter.priority is ProviderPriority.EXECUTION_CANDIDATE:
+                    lane = "execution_candidate"
                 elif waiter.priority is ProviderPriority.HOT:
                     lane = "hot"
                 elif waiter.priority is ProviderPriority.BACKGROUND:
@@ -582,12 +600,19 @@ class ProviderAccessLayer:
         requested_lane = str(lane or "").strip().casefold()
         reason = HEALTH_WAITING
         if (
-            priority not in {ProviderPriority.HOT, ProviderPriority.ACTIVE_TRADE}
+            priority
+            not in {
+                ProviderPriority.HOT,
+                ProviderPriority.ACTIVE_TRADE,
+                ProviderPriority.EXECUTION_CANDIDATE,
+            }
             and self._hot_ahead(venue)
         ):
             reason = HEALTH_DEFERRED
         if priority is ProviderPriority.ACTIVE_TRADE:
             waiter_lane = PRICE_ENGINE_ACTIVE_TRADE_LANE
+        elif priority is ProviderPriority.EXECUTION_CANDIDATE:
+            waiter_lane = PRICE_ENGINE_EXECUTION_CANDIDATE_LANE
         elif priority is ProviderPriority.HOT:
             waiter_lane = ScanLane.HOT.value
         elif priority is ProviderPriority.BACKGROUND:
@@ -721,7 +746,12 @@ class ProviderAccessLayer:
 
     def _hot_ahead(self, venue: VenueName) -> bool:
         return any(
-            item.priority in {ProviderPriority.HOT, ProviderPriority.ACTIVE_TRADE}
+            item.priority
+            in {
+                ProviderPriority.HOT,
+                ProviderPriority.ACTIVE_TRADE,
+                ProviderPriority.EXECUTION_CANDIDATE,
+            }
             and not item.granted
             and not item.cancelled
             for item in self._waiters[venue]
@@ -740,6 +770,10 @@ class ProviderAccessLayer:
         elif priority is ProviderPriority.ACTIVE_TRADE:
             self._hot_grants_since_universe[venue] += 1
             self._active_grants_since_hot[venue] += 1
+        elif priority is ProviderPriority.EXECUTION_CANDIDATE:
+            # Do not promote UNIVERSE/BACKGROUND over an open position, and do
+            # not treat pre-entry work as ACTIVE grant pressure on HOT.
+            return
         else:
             self._hot_grants_since_universe[venue] = 0
             self._active_grants_since_hot[venue] = 0

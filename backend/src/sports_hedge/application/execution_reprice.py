@@ -12,6 +12,7 @@ fixtures, markets, or matches.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -115,6 +116,59 @@ def log_execution_phase(phase: str, **fields: object) -> None:
             continue
         parts.append(f"{key}={value}")
     LOGGER.info(" ".join(parts))
+
+
+def execution_diagnostics_json(diagnostics: ExecutionRepriceDiagnostics | None) -> str | None:
+    """Structured timings for the durable audit row. Not a provider payload."""
+
+    if diagnostics is None:
+        return None
+    payload = {
+        "started_at": diagnostics.started_at.isoformat(),
+        "assembly_ms": diagnostics.assembly_ms,
+        "reason": diagnostics.reason,
+        "quote_age_ms": diagnostics.quote_age_ms,
+        "calls": [
+            {
+                "venue": call.venue,
+                "stage": call.stage,
+                "source_id": call.source_id,
+                "outcome": call.outcome,
+                "slot_wait_ms": call.slot_wait_ms,
+                "io_ms": call.io_ms,
+            }
+            for call in diagnostics.calls
+        ],
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def record_execution_snapshot_attempt(
+    watchlist: Any,
+    snapshot: ExecutionSnapshot | None,
+    diagnostics: ExecutionRepriceDiagnostics | None,
+    *,
+    opportunity_id: str | None,
+    occurred_at: datetime,
+) -> None:
+    """Persist one finished Price-2 attempt. No-op when the attempt never read."""
+
+    if snapshot is None:
+        return
+    recorder = getattr(watchlist, "record_execution_snapshot_audit", None)
+    if not callable(recorder):
+        return
+    recorder(
+        snapshot_id=snapshot.snapshot_id,
+        opportunity_id=opportunity_id,
+        catalogue_row_id=snapshot.catalogue_row_id,
+        canonical_market_id=snapshot.canonical_market_id,
+        occurred_at=occurred_at,
+        accepted=snapshot.accepted,
+        rejection_reason=snapshot.rejection_reason,
+        snapshot_json=snapshot.to_json(),
+        diagnostics_json=execution_diagnostics_json(diagnostics),
+    )
 
 
 def execution_reprice_audit_detail(
@@ -323,6 +377,13 @@ async def capture_with_execution_reprice(
         )
     if refreshed.decision is None:
         reason = refreshed.reason or EXECUTION_REPRICE_FAILED
+        record_execution_snapshot_attempt(
+            watchlist,
+            refreshed.snapshot,
+            refreshed.diagnostics,
+            opportunity_id=opportunity_id,
+            occurred_at=datetime.now(UTC),
+        )
         watchlist.note_execution_reprice_miss(
             decision,
             occurred_at=datetime.now(UTC),
@@ -348,6 +409,13 @@ async def capture_with_execution_reprice(
 
     block = execution_entry_block(refreshed.decision)
     if block is not None:
+        record_execution_snapshot_attempt(
+            watchlist,
+            refreshed.snapshot,
+            refreshed.diagnostics,
+            opportunity_id=opportunity_id,
+            occurred_at=datetime.now(UTC),
+        )
         entry_history = _observe(
             watchlist,
             service,
@@ -383,6 +451,13 @@ async def capture_with_execution_reprice(
         canonical_market_id=refreshed.decision.canonical_market_id,
         net_edge=decision_net_edge(refreshed.decision),
         snapshot=None if refreshed.snapshot is None else refreshed.snapshot.snapshot_id,
+    )
+    record_execution_snapshot_attempt(
+        watchlist,
+        refreshed.snapshot,
+        refreshed.diagnostics,
+        opportunity_id=opportunity_id,
+        occurred_at=datetime.now(UTC),
     )
     snapshot_json = None if refreshed.snapshot is None else refreshed.snapshot.to_json()
     entry_history = persist_price_engine_item_capture(

@@ -6,7 +6,6 @@ Fixture/demo providers only. Caps stay in force. No live orders.
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import timedelta
 from decimal import Decimal
 
@@ -76,10 +75,19 @@ class OverlappingClock:
             await release.wait()
 
 
-def _overlaps(spans: list[tuple[str, str, float]]) -> bool:
-    starts = [stamp for _name, phase, stamp in spans if phase == "start"]
-    ends = [stamp for _name, phase, stamp in spans if phase == "end"]
-    return bool(starts and ends) and max(starts) < min(ends)
+class InflightProbe:
+    """Counts tasks inside the critical section. Peak is the overlap proof."""
+
+    def __init__(self) -> None:
+        self.current = 0
+        self.peak = 0
+
+    def enter(self) -> None:
+        self.current += 1
+        self.peak = max(self.peak, self.current)
+
+    def leave(self) -> None:
+        self.current -= 1
 
 
 async def _gate(name: str, started: list[str], release: asyncio.Event, expected: int) -> None:
@@ -106,8 +114,9 @@ def test_execution_work_outranks_ordinary_hot_and_background_but_not_active_trad
     background = SchedulerWork(lane="background", now_mono=execution.now_mono)
     active = SchedulerWork(lane="active_trade", now_mono=execution.now_mono)
     execution_rank = rank_scheduler_work(execution)
+    assert execution.lane == "execution_candidate"
     assert execution.qualifying is True
-    assert execution_rank.value_class.value == "hot_viable_near"
+    assert execution_rank.value_class.value == "execution_candidate"
     assert execution_rank.band < rank_scheduler_work(ordinary).band
     assert execution_rank.band < rank_scheduler_work(background).band
     assert execution_rank.band > rank_scheduler_work(active).band
@@ -192,7 +201,7 @@ async def test_concurrent_price2_stays_fresh_where_serial_assembly_would_be_stal
 ) -> None:
     clock = OverlappingClock()
     delay_ms = 1200
-    spans: list[tuple[str, str, float]] = []
+    probe = InflightProbe()
     release = asyncio.Event()
     started: list[str] = []
     payload = _market()
@@ -202,22 +211,26 @@ async def test_concurrent_price2_stays_fresh_where_serial_assembly_would_be_stal
         async def get_market(self, event_id, market_id, **filters):
             del filters
             self.get_market_calls.append((str(event_id), str(market_id)))
-            spans.append(("matchbook", "start", time.monotonic()))
-            stamped = _stamp(payload, clock.now())
-            await _gate("matchbook", started, release, 2)
-            await clock.io(delay_ms)
-            spans.append(("matchbook", "end", time.monotonic()))
-            return stamped
+            probe.enter()
+            try:
+                stamped = _stamp(payload, clock.now())
+                await _gate("matchbook", started, release, 2)
+                await clock.io(delay_ms)
+                return stamped
+            finally:
+                probe.leave()
 
     class _Kalshi(FakeKalshi):
         async def get_order_book(self, event_id, market_id, outcome_id=None, **filters):
             del event_id, outcome_id, filters
             self.book_calls.append(str(market_id))
-            spans.append((str(market_id), "start", time.monotonic()))
-            await _gate(str(market_id), started, release, 2)
-            await clock.io(delay_ms)
-            spans.append((str(market_id), "end", time.monotonic()))
-            return book
+            probe.enter()
+            try:
+                await _gate(str(market_id), started, release, 2)
+                await clock.io(delay_ms)
+                return book
+            finally:
+                probe.leave()
 
     settings = Settings(paper_autofill_enabled=True)
     scan = PaperScanService(
@@ -252,7 +265,8 @@ async def test_concurrent_price2_stays_fresh_where_serial_assembly_would_be_stal
         runtime,
         venues=(VenueName.MATCHBOOK, VenueName.KALSHI),
     )
-    assert _overlaps(spans)
+    assert probe.peak == 2
+    assert probe.current == 0
     assert clock.current - NOW == timedelta(milliseconds=delay_ms)
     assert delay_ms * 2 > 2000
     assert result.decision is not None
@@ -276,7 +290,7 @@ async def test_concurrent_price2_stays_fresh_where_serial_assembly_would_be_stal
 
 @pytest.mark.asyncio
 async def test_kalshi_complete_set_tickers_overlap() -> None:
-    spans: list[tuple[str, str, float]] = []
+    probe = InflightProbe()
     release = asyncio.Event()
     started: list[str] = []
     row = _hda_row("hda1")
@@ -286,10 +300,12 @@ async def test_kalshi_complete_set_tickers_overlap() -> None:
             del event_id, outcome_id, filters
             ticker = str(market_id)
             self.book_calls.append(ticker)
-            spans.append((ticker, "start", time.monotonic()))
-            await _gate(ticker, started, release, 3)
-            spans.append((ticker, "end", time.monotonic()))
-            return _book("0.20", "0.70")
+            probe.enter()
+            try:
+                await _gate(ticker, started, release, 3)
+                return _book("0.20", "0.70")
+            finally:
+                probe.leave()
 
     engine, _mb, kalshi, _layer = _engine([row], kalshi=_Kalshi())
     runtime = engine.item(row.catalogue_row_id)
@@ -307,12 +323,13 @@ async def test_kalshi_complete_set_tickers_overlap() -> None:
     assert books is not None
     assert set(books) == set(kalshi.book_calls)
     assert len(kalshi.book_calls) == 3
-    assert _overlaps(spans)
+    assert probe.peak == 3
+    assert probe.current == 0
 
 
 @pytest.mark.asyncio
 async def test_polymarket_token_books_overlap() -> None:
-    spans: list[tuple[str, str, float]] = []
+    probe = InflightProbe()
     release = asyncio.Event()
     started: list[str] = []
     tokens = [
@@ -336,10 +353,12 @@ async def test_polymarket_token_books_overlap() -> None:
             del event_id, market_id, filters
             token = str(token_id)
             self.calls.append(token)
-            spans.append((token, "start", time.monotonic()))
-            await _gate(token, started, release, 3)
-            spans.append((token, "end", time.monotonic()))
-            return {"bids": [], "asks": []}
+            probe.enter()
+            try:
+                await _gate(token, started, release, 3)
+                return {"bids": [], "asks": []}
+            finally:
+                probe.leave()
 
     client = _Polymarket()
     engine, _mb, _ks, _layer = _engine([row])
@@ -358,7 +377,8 @@ async def test_polymarket_token_books_overlap() -> None:
     )
     assert books is not None
     assert client.calls == [item.native_id for item in tokens]
-    assert _overlaps(spans)
+    assert probe.peak == 3
+    assert probe.current == 0
 
 
 @pytest.mark.asyncio
@@ -513,3 +533,224 @@ async def test_fresh_price2_still_opens_exactly_one_paper_trade(tmp_path, monkey
     finally:
         bundle.repository.close()
         bundle.ledger.close()
+
+
+def _candidate_work(access: ProviderAccessLayer, *, seq: int = 0) -> SchedulerWork:
+    now_mono = access._clock()
+    return SchedulerWork(
+        lane="execution_candidate",
+        qualifying=True,
+        near_threshold=True,
+        viable_venue_count=2,
+        viability_assessed=True,
+        required_venues=(VenueName.MATCHBOOK,),
+        due_mono=now_mono,
+        deadline_mono=now_mono + 2,
+        now_mono=now_mono,
+        seq=seq,
+    )
+
+
+@pytest.mark.asyncio
+async def test_execution_candidate_uses_idle_reserved_active_capacity() -> None:
+    layer = ProviderAccessLayer(
+        {VenueName.MATCHBOOK: 4, VenueName.KALSHI: 4, VenueName.POLYMARKET: 8}
+    )
+    assert layer.lower_priority_occupancy_ceiling(VenueName.MATCHBOOK) == 3
+    release = asyncio.Event()
+
+    async def _hold() -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="background"):
+            await release.wait()
+
+    holders = [asyncio.create_task(_hold()) for _ in range(3)]
+    for _ in range(30):
+        if layer._in_use[VenueName.MATCHBOOK] == 3:
+            break
+        await asyncio.sleep(0)
+    assert layer._in_use[VenueName.MATCHBOOK] == 3
+    background_granted = asyncio.Event()
+
+    async def _extra_background() -> None:
+        async with layer.acquire_wait(
+            VenueName.MATCHBOOK, lane="background", timeout=1
+        ) as lease:
+            if lease is not None:
+                background_granted.set()
+                await release.wait()
+
+    background = asyncio.create_task(_extra_background())
+    await asyncio.sleep(0)
+    assert layer._in_use[VenueName.MATCHBOOK] == 3
+    assert background_granted.is_set() is False
+    candidate_in = asyncio.Event()
+
+    async def _candidate() -> None:
+        async with layer.acquire_wait(
+            VenueName.MATCHBOOK,
+            lane="execution_candidate",
+            timeout=1,
+            work=_candidate_work(layer),
+        ) as lease:
+            assert lease is not None
+            candidate_in.set()
+            await release.wait()
+
+    candidate = asyncio.create_task(_candidate())
+    await asyncio.wait_for(candidate_in.wait(), timeout=1)
+    assert layer._in_use[VenueName.MATCHBOOK] == 4
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 4
+    assert background_granted.is_set() is False
+    assert layer.snapshot().waiting_by_lane["execution_candidate"][VenueName.MATCHBOOK.value] == 0
+    release.set()
+    await asyncio.gather(*holders, candidate, background)
+
+
+@pytest.mark.asyncio
+async def test_execution_candidate_outranks_ordinary_hot_for_the_next_slot() -> None:
+    layer = ProviderAccessLayer(
+        {VenueName.MATCHBOOK: 1, VenueName.KALSHI: 1, VenueName.POLYMARKET: 1}
+    )
+    release_holder = asyncio.Event()
+    holder_in = asyncio.Event()
+
+    async def _hold() -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="background"):
+            holder_in.set()
+            await release_holder.wait()
+
+    holder = asyncio.create_task(_hold())
+    await holder_in.wait()
+    order: list[str] = []
+
+    async def _hot() -> None:
+        async with layer.acquire_wait(VenueName.MATCHBOOK, lane="hot", timeout=1) as lease:
+            assert lease is not None
+            order.append("hot")
+
+    async def _candidate() -> None:
+        async with layer.acquire_wait(
+            VenueName.MATCHBOOK,
+            lane="execution_candidate",
+            timeout=1,
+            work=_candidate_work(layer, seq=5),
+        ) as lease:
+            assert lease is not None
+            order.append("execution_candidate")
+
+    hot = asyncio.create_task(_hot())
+    await asyncio.sleep(0)
+    candidate = asyncio.create_task(_candidate())
+    await asyncio.sleep(0)
+    release_holder.set()
+    await asyncio.wait_for(candidate, timeout=1)
+    assert order[0] == "execution_candidate"
+    await hot
+    await holder
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 1
+
+
+@pytest.mark.asyncio
+async def test_active_trade_wins_the_next_slot_over_a_queued_execution_candidate() -> None:
+    layer = ProviderAccessLayer(
+        {VenueName.MATCHBOOK: 1, VenueName.KALSHI: 1, VenueName.POLYMARKET: 1}
+    )
+    release_holder = asyncio.Event()
+    holder_in = asyncio.Event()
+
+    async def _hold() -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="hot"):
+            holder_in.set()
+            await release_holder.wait()
+
+    holder = asyncio.create_task(_hold())
+    await holder_in.wait()
+    order: list[str] = []
+
+    async def _candidate() -> None:
+        async with layer.acquire_wait(
+            VenueName.MATCHBOOK,
+            lane="execution_candidate",
+            timeout=1,
+            work=_candidate_work(layer, seq=0),
+        ) as lease:
+            assert lease is not None
+            order.append("execution_candidate")
+
+    async def _active() -> None:
+        async with layer.acquire_wait(
+            VenueName.MATCHBOOK, lane="active_trade", timeout=1
+        ) as lease:
+            assert lease is not None
+            order.append("active_trade")
+
+    candidate = asyncio.create_task(_candidate())
+    await asyncio.sleep(0)
+    active = asyncio.create_task(_active())
+    await asyncio.sleep(0)
+    release_holder.set()
+    await asyncio.wait_for(active, timeout=1)
+    assert order[0] == "active_trade"
+    assert layer.snapshot().waiting_by_lane["active_trade"][VenueName.MATCHBOOK.value] == 0
+    await candidate
+    await holder
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 1
+
+
+@pytest.mark.asyncio
+async def test_execution_candidate_burst_cannot_starve_an_active_position() -> None:
+    layer = ProviderAccessLayer(
+        {VenueName.MATCHBOOK: 1, VenueName.KALSHI: 1, VenueName.POLYMARKET: 1},
+        starvation_hot_grants=1,
+    )
+    release_holder = asyncio.Event()
+    release_rest = asyncio.Event()
+    holder_in = asyncio.Event()
+
+    async def _hold() -> None:
+        async with layer.acquire_wait(
+            VenueName.MATCHBOOK,
+            lane="execution_candidate",
+            timeout=1,
+            work=_candidate_work(layer),
+        ) as lease:
+            assert lease is not None
+            holder_in.set()
+            await release_holder.wait()
+
+    holder = asyncio.create_task(_hold())
+    await holder_in.wait()
+    assert layer._in_use[VenueName.MATCHBOOK] == 1
+    entered: list[str] = []
+
+    async def _waiter(name: str, lane: str, seq: int) -> None:
+        work = _candidate_work(layer, seq=seq) if lane == "execution_candidate" else None
+        async with layer.acquire_wait(
+            VenueName.MATCHBOOK, lane=lane, timeout=1, work=work
+        ) as lease:
+            assert lease is not None
+            entered.append(name)
+            await release_rest.wait()
+
+    queued = [
+        asyncio.create_task(_waiter(f"candidate-{index}", "execution_candidate", index + 1))
+        for index in range(4)
+    ]
+    await asyncio.sleep(0)
+    active = asyncio.create_task(_waiter("active", "active_trade", 0))
+    await asyncio.sleep(0)
+    assert layer.snapshot().waiting_by_lane["execution_candidate"][VenueName.MATCHBOOK.value] == 4
+    assert layer.snapshot().waiting_by_lane["active_trade"][VenueName.MATCHBOOK.value] == 1
+    release_holder.set()
+    for _ in range(30):
+        if entered:
+            break
+        await asyncio.sleep(0)
+    assert entered == ["active"]
+    assert layer._in_use[VenueName.MATCHBOOK] == 1
+    assert layer.snapshot().waiting_by_lane["execution_candidate"][VenueName.MATCHBOOK.value] == 4
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 1
+    release_rest.set()
+    await asyncio.gather(holder, *queued, active)
+    assert layer._peak_inflight[VenueName.MATCHBOOK] <= 1
+    assert layer.limits[VenueName.MATCHBOOK] == 1

@@ -94,6 +94,7 @@ from sports_hedge.application.opportunity_viability import (
     reset_opportunity_viability_cache,
 )
 from sports_hedge.application.adaptive_scheduler import (
+    LANE_EXECUTION_CANDIDATE,
     SchedulerWork,
     order_scheduler_work,
 )
@@ -226,6 +227,16 @@ class RetrievedVenuePayload:
 
     payload: dict[str, Any]
     retrieved_at: datetime
+
+
+@dataclass
+class _ExecutionBookSet:
+    """Books gathered for one Price-2 attempt, including a partial failure."""
+
+    matchbook: RetrievedVenuePayload | None = None
+    kalshi_books: dict[str, RetrievedVenuePayload] = field(default_factory=dict)
+    polymarket_books: dict[str, RetrievedVenuePayload] = field(default_factory=dict)
+    complete: bool = False
 
 
 @dataclass(slots=True)
@@ -2134,11 +2145,6 @@ class CataloguePriceEngine:
         venues: tuple[VenueName, ...],
     ) -> Any:
         from sports_hedge.application.execution_reprice import (
-            EXECUTION_REPRICE_FAILED,
-            ExecutionRepriceResult,
-        )
-
-        from sports_hedge.application.execution_reprice import (
             PHASE_REPRICE_STARTED,
             log_execution_phase,
         )
@@ -2149,168 +2155,143 @@ class CataloguePriceEngine:
             catalogue_row_id=identity.catalogue_row_id,
             venues=",".join(venue.value for venue in venues),
         )
-        # Qualifying HOT rank only. This does not enqueue a HOT scan or change cadence.
+        # Execution-candidate rank only. This does not enqueue a HOT scan or change cadence.
         started_at = self.now()
         started_mono = monotonic()
         assembly_ms = 0
         calls: list[dict[str, Any]] = []
         timing_token = _EXECUTION_REPRICE_CALLS.set(calls)
         work = self._execution_scheduler_work(runtime, venues)
-        matchbook = None
-        kalshi_books = None
-        polymarket_books = None
+        bookset = _ExecutionBookSet()
         try:
-            fetched = await self._execution_fetch_venues(
+            bookset = await self._execution_fetch_venues(
                 identity,
                 venues,
                 runtime=runtime,
                 scheduler_work=work,
             )
             assembly_ms = max(0, int((monotonic() - started_mono) * 1000))
-            if fetched is None:
-                failed = self._execution_diagnostics(
-                    started_at,
-                    assembly_ms,
-                    calls,
-                    {},
-                    EXECUTION_REPRICE_FAILED,
-                )
-                self._log_execution_reprice(identity.catalogue_row_id, failed)
-                return ExecutionRepriceResult(
-                    reason=EXECUTION_REPRICE_FAILED,
-                    diagnostics=failed,
-                )
-            matchbook = fetched.get(VenueName.MATCHBOOK)
-            kalshi_books = fetched.get(VenueName.KALSHI)
-            polymarket_books = fetched.get(VenueName.POLYMARKET)
         finally:
             _EXECUTION_REPRICE_CALLS.reset(timing_token)
-        # Age the books at evaluation time, after the complete set is in hand.
-        # A clock that moves during the fetch must not look future-dated.
-        evaluated_at = self.now()
-        observations: dict[VenueName, VenueMarketObservation] = {}
-        try:
-            if matchbook is not None:
-                observations[VenueName.MATCHBOOK] = self._build_matchbook_obs(
-                    identity, matchbook, evaluated_at
-                )
-            if kalshi_books is not None:
-                observations[VenueName.KALSHI] = self._build_kalshi_obs(
-                    identity, kalshi_books, evaluated_at
-                )
-            if polymarket_books is not None:
-                observations[VenueName.POLYMARKET] = self._build_polymarket_obs(
-                    identity, polymarket_books, evaluated_at
-                )
-        except Exception:
-            failed = self._execution_diagnostics(
-                started_at,
-                assembly_ms,
-                calls,
-                {},
-                EXECUTION_REPRICE_FAILED,
-            )
-            self._log_execution_reprice(identity.catalogue_row_id, failed)
-            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED, diagnostics=failed)
-        quote_ages = {
-            venue.value: observation.quote_age_ms for venue, observation in observations.items()
-        }
-        ordered = [
-            venue
-            for venue in (VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET)
-            if venue in observations
-        ]
-        if len(ordered) != 2 or self.paper_scan is None:
-            failed = self._execution_diagnostics(
-                started_at,
-                assembly_ms,
-                calls,
-                quote_ages,
-                EXECUTION_REPRICE_FAILED,
-            )
-            self._log_execution_reprice(identity.catalogue_row_id, failed)
-            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED, diagnostics=failed)
-        try:
-            decision = self.paper_scan.scan_pair(
-                observations[ordered[0]],
-                observations[ordered[1]],
-                **self._scan_kwargs(identity),
-            )
-        except Exception:
-            failed = self._execution_diagnostics(
-                started_at,
-                assembly_ms,
-                calls,
-                quote_ages,
-                EXECUTION_REPRICE_FAILED,
-            )
-            self._log_execution_reprice(identity.catalogue_row_id, failed)
-            return ExecutionRepriceResult(reason=EXECUTION_REPRICE_FAILED, diagnostics=failed)
-        # Provider age is already measured against the evaluation clock. The
-        # paper-entry gate adds capture→decision elapsed, so both instants have
-        # to be this entry. Leaving a fake engine clock on the legs would count
-        # that gap as quote age and reject a book the provider age already scored.
-        entry_at = datetime.now(UTC)
-        decision = decision.model_copy(
-            update={
-                "scanned_at": entry_at,
-                "fill_legs": [
-                    leg.model_copy(update={"quote_captured_at": entry_at})
-                    for leg in decision.fill_legs
-                ],
-            }
+        return self._finish_execution_reprice(
+            identity,
+            venues,
+            bookset=bookset,
+            started_at=started_at,
+            assembly_ms=assembly_ms,
+            calls=calls,
         )
+
+    def _finish_execution_reprice(
+        self,
+        identity: DerivedPriceEngineItem,
+        venues: tuple[VenueName, ...],
+        *,
+        bookset: _ExecutionBookSet,
+        started_at: datetime,
+        assembly_ms: int,
+        calls: list[dict[str, Any]],
+    ) -> Any:
+        """Scan only a complete set. Always return a structured snapshot."""
+
+        from sports_hedge.application.execution_reprice import (
+            EXECUTION_REPRICE_FAILED,
+            EXECUTION_REPRICE_SKEW,
+            PHASE_SNAPSHOT_COMPLETE,
+            ExecutionRepriceResult,
+            execution_entry_block,
+            log_execution_phase,
+        )
+
+        evaluated_at = self.now()
+        decision: PaperScanDecision | None = None
+        ordered: list[VenueName] = []
+        quote_ages: dict[str, int | None] = {}
+        reason: str | None = None if bookset.complete else EXECUTION_REPRICE_FAILED
+        if bookset.complete and self.paper_scan is not None:
+            observations: dict[VenueName, VenueMarketObservation] = {}
+            try:
+                if bookset.matchbook is not None:
+                    observations[VenueName.MATCHBOOK] = self._build_matchbook_obs(
+                        identity, bookset.matchbook, evaluated_at
+                    )
+                if bookset.kalshi_books:
+                    observations[VenueName.KALSHI] = self._build_kalshi_obs(
+                        identity, bookset.kalshi_books, evaluated_at
+                    )
+                if bookset.polymarket_books:
+                    observations[VenueName.POLYMARKET] = self._build_polymarket_obs(
+                        identity, bookset.polymarket_books, evaluated_at
+                    )
+                ordered = [
+                    venue
+                    for venue in (VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET)
+                    if venue in observations
+                ]
+                if len(ordered) != 2:
+                    reason = EXECUTION_REPRICE_FAILED
+                else:
+                    decision = self.paper_scan.scan_pair(
+                        observations[ordered[0]],
+                        observations[ordered[1]],
+                        **self._scan_kwargs(identity),
+                    )
+            except Exception:
+                decision = None
+                reason = EXECUTION_REPRICE_FAILED
+        elif reason is None:
+            reason = EXECUTION_REPRICE_FAILED
+        if decision is not None:
+            quote_ages = {
+                venue.value: observations[venue].quote_age_ms for venue in ordered
+            }
+            entry_at = datetime.now(UTC)
+            decision = decision.model_copy(
+                update={
+                    "scanned_at": entry_at,
+                    "fill_legs": [
+                        leg.model_copy(update={"quote_captured_at": entry_at})
+                        for leg in decision.fill_legs
+                    ],
+                }
+            )
         traced = self._execution_diagnostics(
             started_at,
             assembly_ms,
             calls,
             quote_ages,
-            None,
+            reason,
         )
         snapshot = self._execution_snapshot(
             identity,
             started_at=started_at,
             evaluated_at=evaluated_at,
-            matchbook=matchbook,
-            kalshi_books=kalshi_books,
-            polymarket_books=polymarket_books,
+            matchbook=bookset.matchbook,
+            kalshi_books=bookset.kalshi_books,
+            polymarket_books=bookset.polymarket_books,
             decision=decision,
             oldest_quote_age_ms=traced.oldest_quote_age_ms(),
+            diagnostics=traced,
         )
-        from sports_hedge.application.execution_reprice import (
-            EXECUTION_REPRICE_SKEW,
-            PHASE_SNAPSHOT_COMPLETE,
-            execution_entry_block,
-            log_execution_phase,
-        )
-
+        returned: PaperScanDecision | None = None
+        if reason is None and snapshot.skew_exceeded():
+            reason = EXECUTION_REPRICE_SKEW
+        elif reason is None and decision is not None:
+            block = execution_entry_block(decision)
+            if block is not None:
+                reason = block
+                returned = decision
+            else:
+                snapshot.accepted = True
+                returned = decision
+        snapshot.rejection_reason = reason
+        traced.reason = reason
         log_execution_phase(PHASE_SNAPSHOT_COMPLETE, detail=snapshot.audit_line())
-        if snapshot.skew_exceeded():
-            snapshot.rejection_reason = EXECUTION_REPRICE_SKEW
-            traced.reason = EXECUTION_REPRICE_SKEW
-            self._log_execution_reprice(identity.catalogue_row_id, traced)
-            return ExecutionRepriceResult(
-                reason=EXECUTION_REPRICE_SKEW,
-                refreshed_venues=tuple(ordered),
-                diagnostics=traced,
-                snapshot=snapshot,
-            )
-        block = execution_entry_block(decision)
-        if block is not None:
-            snapshot.rejection_reason = block
-            traced.reason = block
-            self._log_execution_reprice(identity.catalogue_row_id, traced)
-            return ExecutionRepriceResult(
-                decision=decision,
-                reason=block,
-                refreshed_venues=tuple(ordered),
-                diagnostics=traced,
-                snapshot=snapshot,
-            )
-        snapshot.accepted = True
         self._log_execution_reprice(identity.catalogue_row_id, traced)
+        del venues
         return ExecutionRepriceResult(
-            decision=decision,
+            decision=returned,
+            reason=reason,
             refreshed_venues=tuple(ordered),
             diagnostics=traced,
             snapshot=snapshot,
@@ -2325,8 +2306,9 @@ class CataloguePriceEngine:
         matchbook: RetrievedVenuePayload | None,
         kalshi_books: Mapping[str, RetrievedVenuePayload] | None,
         polymarket_books: Mapping[str, RetrievedVenuePayload] | None,
-        decision: PaperScanDecision,
+        decision: PaperScanDecision | None,
         oldest_quote_age_ms: int | None,
+        diagnostics: Any = None,
     ) -> Any:
         from sports_hedge.application.execution_reprice import (
             PHASE_BOOK_RETRIEVED,
@@ -2335,8 +2317,12 @@ class CataloguePriceEngine:
         from sports_hedge.application.execution_snapshot import (
             ExecutionRetrieval,
             ExecutionSnapshot,
+            ExecutionTiming,
+            ExecutionTimingCall,
+            _settings_int,
             execution_max_snapshot_skew_ms,
             leg_quotes_from_decision,
+            provenance_from_decision,
             snapshot_economics,
         )
 
@@ -2375,28 +2361,45 @@ class CataloguePriceEngine:
                 native_id=item.native_id,
                 retrieved_at=item.retrieved_at.isoformat(),
             )
-        retrieved_at_by_venue: dict[str, datetime] = {}
-        for item in retrievals:
-            current = retrieved_at_by_venue.get(item.venue)
-            if current is None or item.retrieved_at < current:
-                retrieved_at_by_venue[item.venue] = item.retrieved_at
         settings = getattr(self.paper_scan, "settings", None)
-        max_age = 2000
-        if settings is not None:
-            max_age = int(getattr(settings, "paper_entry_max_quote_age_ms", 2000) or 2000)
-        edge, profit = snapshot_economics(decision)
+        max_age = _settings_int(settings, "paper_entry_max_quote_age_ms", 2000)
+        edge, profit = (None, None) if decision is None else snapshot_economics(decision)
+        provenance = {} if decision is None else provenance_from_decision(decision)
+        timing = None
+        if diagnostics is not None:
+            timing = ExecutionTiming(
+                assembly_ms=int(diagnostics.assembly_ms),
+                calls=tuple(
+                    ExecutionTimingCall(
+                        venue=call.venue,
+                        stage=call.stage,
+                        source_id=call.source_id,
+                        outcome=call.outcome,
+                        slot_wait_ms=int(call.slot_wait_ms),
+                        io_ms=int(call.io_ms),
+                    )
+                    for call in diagnostics.calls
+                ),
+                quote_age_ms=tuple(sorted(diagnostics.quote_age_ms.items())),
+            )
         return ExecutionSnapshot(
             catalogue_row_id=identity.catalogue_row_id,
-            canonical_market_id=decision.canonical_market_id,
+            canonical_market_id=None if decision is None else decision.canonical_market_id,
             started_at=started_at,
             evaluated_at=evaluated_at,
             retrievals=tuple(retrievals),
-            legs=leg_quotes_from_decision(decision, retrieved_at_by_venue=retrieved_at_by_venue),
+            legs=(
+                ()
+                if decision is None
+                else leg_quotes_from_decision(decision, retrievals=retrievals)
+            ),
             oldest_quote_age_ms=oldest_quote_age_ms,
             max_quote_age_ms=max_age,
             max_skew_ms=execution_max_snapshot_skew_ms(settings),
             net_edge=edge,
             guaranteed_profit=profit,
+            timing=timing,
+            **provenance,
         )
 
     def _execution_scheduler_work(
@@ -2404,13 +2407,12 @@ class CataloguePriceEngine:
         runtime: PriceEngineRuntimeItem,
         venues: tuple[VenueName, ...],
     ) -> SchedulerWork:
-        """Rank Price 2 as qualifying HOT work with the paper-entry deadline.
+        """Rank Price 2 as an EXECUTION CANDIDATE with the paper-entry deadline.
 
-        ``runtime=None`` previously built ordinary HOT work with no deadline, so
-        a qualifying reread waited behind routine HOT and BACKGROUND traffic and
-        inherited no freshness urgency. The deadline is the existing paper-entry
-        quote-age window measured on the provider-access clock. It does not
-        change cadence and does not use the active-trade lane.
+        This is below genuine ACTIVE TRADE work and above ordinary HOT,
+        BACKGROUND, and UNIVERSE. It is not the active_trade lane: that label
+        is reserved for an existing position. The deadline is the paper-entry
+        quote-age window on the provider-access clock. Cadence is unchanged.
         """
 
         access = self.provider_access
@@ -2422,7 +2424,7 @@ class CataloguePriceEngine:
         freshness_s = max(0.25, freshness_ms / 1000.0)
         kickoff = runtime.identity.kickoff_utc
         return SchedulerWork(
-            lane=ScanLane.HOT.value,
+            lane=LANE_EXECUTION_CANDIDATE,
             work_id=f"execution:{runtime.identity.catalogue_row_id}",
             viable_venue_count=max(2, len(venues)),
             viability_assessed=True,
@@ -2444,10 +2446,10 @@ class CataloguePriceEngine:
         *,
         runtime: PriceEngineRuntimeItem,
         scheduler_work: SchedulerWork,
-    ) -> dict[VenueName, Any] | None:
-        """Fetch every required venue at once. One failure fails the whole set."""
+    ) -> _ExecutionBookSet:
+        """Fetch every required venue at once. Partial books stay for the audit."""
 
-        lane = ScanLane.HOT.value
+        lane = scheduler_work.normalized_lane or LANE_EXECUTION_CANDIDATE
         jobs: list[tuple[VenueName, Any]] = []
         if VenueName.MATCHBOOK in venues:
             jobs.append(
@@ -2486,12 +2488,31 @@ class CataloguePriceEngine:
                 )
             )
         results = await asyncio.gather(*(job for _venue, job in jobs), return_exceptions=True)
-        fetched: dict[VenueName, Any] = {}
+        bookset = _ExecutionBookSet(complete=True)
         for (venue, _job), result in zip(jobs, results, strict=True):
-            if isinstance(result, Exception) or result is None:
-                return None
-            fetched[venue] = result
-        return fetched
+            if isinstance(result, Exception):
+                bookset.complete = False
+                continue
+            if venue is VenueName.MATCHBOOK:
+                if isinstance(result, RetrievedVenuePayload):
+                    bookset.matchbook = result
+                else:
+                    bookset.complete = False
+            elif venue is VenueName.KALSHI:
+                books = result if isinstance(result, dict) else {}
+                bookset.kalshi_books = books
+                if set(books) != set(_required_tickers(identity)):
+                    bookset.complete = False
+            elif venue is VenueName.POLYMARKET:
+                books = result if isinstance(result, dict) else {}
+                bookset.polymarket_books = books
+                if not _polymarket_books_complete(identity, books):
+                    bookset.complete = False
+            else:
+                bookset.complete = False
+        if len(venues) != 2:
+            bookset.complete = False
+        return bookset
 
     async def _execution_provider_call(
         self,
@@ -2508,12 +2529,15 @@ class CataloguePriceEngine:
 
         Slot admission uses the provider timeout. A discovery slice that is
         already out of wall time must not turn Price 2 into an immediate
-        not-started. The call still takes a normal provider slot.
+        not-started. The call still takes a normal provider slot. The
+        scheduler work's lane is the admission class, so Price 2 stays an
+        execution candidate rather than ordinary HOT.
         """
 
+        admit_lane = scheduler_work.normalized_lane or lane
         return await self._provider_call_execute(
             venue,
-            lane=lane,
+            lane=admit_lane,
             stage=stage,
             source_id=source_id,
             coro=coro,
@@ -2587,11 +2611,9 @@ class CataloguePriceEngine:
         books: dict[str, RetrievedVenuePayload] = {}
         for item in pairs:
             if not isinstance(item, tuple):
-                return None
+                continue
             ticker, book = item
             books[ticker] = book
-        if len(books) != len(tickers):
-            return None
         return books
 
     async def _execution_fetch_polymarket(
@@ -2643,11 +2665,9 @@ class CataloguePriceEngine:
         books: dict[str, RetrievedVenuePayload] = {}
         for item in pairs:
             if not isinstance(item, tuple):
-                return None
+                continue
             token, book = item
             books[token] = book
-        if len(books) != len(native_ids):
-            return None
         return books
 
     def _execution_diagnostics(
@@ -3882,6 +3902,22 @@ def _expected_provider_calls(
         + len(kalshi_tickers)
         + len(polymarket_tokens)
     )
+
+
+def _polymarket_books_complete(
+    identity: DerivedPriceEngineItem,
+    books: Mapping[str, RetrievedVenuePayload],
+) -> bool:
+    tokens = executable_polymarket_token_ids(
+        list(identity.polymarket_token_ids),
+        event_id=identity.polymarket_event_id,
+        market_id=identity.polymarket_market_id,
+        condition_id=identity.polymarket_condition_id,
+        required_outcomes=list(identity.required_outcomes)
+        or required_outcomes_for_key(identity.register_canonical_key),
+    )
+    native_ids = [str(getattr(item, "native_id", item) or "").strip() for item in tokens]
+    return bool(native_ids) and set(books) == set(native_ids)
 
 
 def _required_tickers(identity: DerivedPriceEngineItem) -> list[str]:

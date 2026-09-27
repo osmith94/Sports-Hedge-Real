@@ -176,6 +176,20 @@ class SqliteWatchlistRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_paper_fill_attempts_opportunity
                 ON paper_fill_attempts(opportunity_id, started_at DESC, attempt_id DESC);
+
+            CREATE TABLE IF NOT EXISTS execution_snapshot_audits (
+                snapshot_id TEXT PRIMARY KEY,
+                opportunity_id TEXT,
+                catalogue_row_id TEXT NOT NULL,
+                canonical_market_id TEXT,
+                occurred_at TEXT NOT NULL,
+                accepted INTEGER NOT NULL,
+                rejection_reason TEXT,
+                snapshot_json TEXT NOT NULL,
+                diagnostics_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_snapshot_audits_opportunity
+                ON execution_snapshot_audits(opportunity_id, occurred_at);
             """
         )
         columns = {
@@ -458,6 +472,65 @@ class SqliteWatchlistRepository:
                 ),
             )
             self._commit()
+
+    def append_execution_snapshot_audit(
+        self,
+        *,
+        snapshot_id: str,
+        opportunity_id: str | None,
+        catalogue_row_id: str,
+        canonical_market_id: str | None,
+        occurred_at: datetime,
+        accepted: bool,
+        rejection_reason: str | None,
+        snapshot_json: str,
+        diagnostics_json: str | None,
+    ) -> None:
+        """Durable Price-2 snapshot. Separate from lifecycle detail text."""
+
+        with self.exclusive():
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO execution_snapshot_audits (
+                    snapshot_id, opportunity_id, catalogue_row_id, canonical_market_id,
+                    occurred_at, accepted, rejection_reason, snapshot_json, diagnostics_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    opportunity_id,
+                    catalogue_row_id,
+                    canonical_market_id,
+                    occurred_at.isoformat(),
+                    int(accepted),
+                    rejection_reason,
+                    snapshot_json,
+                    diagnostics_json,
+                ),
+            )
+            self._commit()
+
+    def list_execution_snapshot_audits(
+        self, opportunity_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        with self.exclusive():
+            if opportunity_id is None:
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM execution_snapshot_audits
+                    ORDER BY occurred_at, snapshot_id
+                    """
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM execution_snapshot_audits
+                    WHERE opportunity_id = ?
+                    ORDER BY occurred_at, snapshot_id
+                    """,
+                    (opportunity_id,),
+                ).fetchall()
+        return [dict(row) for row in rows]
 
     def append_observation(self, point: OpportunityObservationPoint) -> None:
         with self.exclusive():

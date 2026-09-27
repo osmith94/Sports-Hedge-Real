@@ -658,6 +658,36 @@ class WatchlistService:
         self.repository.append_event(event)
         return event
 
+    def record_execution_snapshot_audit(
+        self,
+        *,
+        snapshot_id: str,
+        opportunity_id: str | None,
+        catalogue_row_id: str,
+        canonical_market_id: str | None,
+        occurred_at: datetime,
+        accepted: bool,
+        rejection_reason: str | None,
+        snapshot_json: str,
+        diagnostics_json: str | None = None,
+    ) -> None:
+        """Store one Price-2 attempt outside the scanner lifecycle detail."""
+
+        recorder = getattr(self.repository, "append_execution_snapshot_audit", None)
+        if not callable(recorder):
+            return
+        recorder(
+            snapshot_id=snapshot_id,
+            opportunity_id=opportunity_id,
+            catalogue_row_id=catalogue_row_id,
+            canonical_market_id=canonical_market_id,
+            occurred_at=occurred_at,
+            accepted=accepted,
+            rejection_reason=rejection_reason,
+            snapshot_json=snapshot_json,
+            diagnostics_json=diagnostics_json,
+        )
+
     def close(
         self, opportunity_id: str, *, occurred_at, detail: str | None = None
     ) -> NearOpportunity:

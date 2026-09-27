@@ -814,9 +814,15 @@ def test_existing_dual_cadence_and_hot_refresh_tests_were_not_deleted() -> None:
     assert hasattr(promo, "test_distant_universe_qualifying_arb_enters_next_hot_identity_scope")
     assert hasattr(phase2, "test_catalogue_and_fee_schema_forbid_policy_and_quote_columns")
     assert ProviderPriority.ACTIVE_TRADE == 0
-    assert ProviderPriority.HOT == 1
-    assert ProviderPriority.UNIVERSE == 2
-    assert ProviderPriority.BACKGROUND == 3
+    assert ProviderPriority.EXECUTION_CANDIDATE == 1
+    assert ProviderPriority.HOT == 2
+    assert ProviderPriority.UNIVERSE == 3
+    assert ProviderPriority.BACKGROUND == 4
+    assert (
+        ProviderPriority.ACTIVE_TRADE
+        < ProviderPriority.EXECUTION_CANDIDATE
+        < ProviderPriority.HOT
+    )
 
 
 def test_no_durable_queue_or_phase4_capture_in_price_engine_module() -> None:

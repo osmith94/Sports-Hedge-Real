@@ -20,13 +20,16 @@ from test_execution_reprice_before_paper_entry import (
     _market,
     _run,
     _stamp,
+    _stale,
 )
 from test_issue316_catalogue_registry import _costs, _fx
 from test_issue344_price_engine import NOW, FakeKalshi, FakeMatchbook, _engine, _row
 
 from sports_hedge.application.execution_reprice import (
     EXECUTION_REPRICE_DUPLICATE,
+    EXECUTION_REPRICE_FAILED,
     EXECUTION_REPRICE_SKEW,
+    EXECUTION_REPRICE_STALE,
     PHASE_BOOK_RETRIEVED,
     PHASE_DISCOVERY_PRICE,
     PHASE_FILL_ATTEMPTED,
@@ -37,7 +40,9 @@ from sports_hedge.application.execution_reprice import (
 )
 from sports_hedge.application.execution_snapshot import (
     DEFAULT_MAX_SNAPSHOT_SKEW_MS,
+    ExecutionRetrieval,
     execution_max_snapshot_skew_ms,
+    leg_quotes_from_decision,
 )
 from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.config import Settings
@@ -57,6 +62,20 @@ def test_default_snapshot_skew_is_tighter_than_quote_age_and_clamped() -> None:
     tighter = settings.model_copy(update={"paper_entry_max_quote_age_ms": 400})
     assert execution_max_snapshot_skew_ms(tighter) == 400
     assert settings.sports_hedge_execution_enabled is False
+
+
+def test_explicit_zero_snapshot_skew_stays_zero() -> None:
+    zero = Settings(paper_execution_max_snapshot_skew_ms=0)
+    assert zero.paper_execution_max_snapshot_skew_ms == 0
+    assert execution_max_snapshot_skew_ms(zero) == 0
+    strict = Settings(paper_execution_max_snapshot_skew_ms=100)
+    assert execution_max_snapshot_skew_ms(strict) == 100
+
+    class _StricterFreshness:
+        paper_execution_max_snapshot_skew_ms = 500
+        paper_entry_max_quote_age_ms = 0
+
+    assert execution_max_snapshot_skew_ms(_StricterFreshness()) == 0
 
 
 @pytest.mark.asyncio
@@ -134,6 +153,26 @@ async def test_snapshot_skew_fails_closed_when_quote_ages_still_pass(tmp_path) -
     assert snapshot.latest_retrieval_at - snapshot.earliest_retrieval_at == timedelta(
         milliseconds=600
     )
+    by_venue = {item.venue: item for item in snapshot.retrievals}
+    for leg in snapshot.legs:
+        matched = by_venue[leg.venue]
+        assert leg.retrieved_at == matched.retrieved_at
+        assert leg.retrieval_native_id == matched.native_id
+    assert {leg.retrieved_at for leg in snapshot.legs} == {
+        by_venue["matchbook"].retrieved_at,
+        by_venue["kalshi"].retrieved_at,
+    }
+    payload = json.loads(snapshot.to_json())
+    assert payload["venue_costs"]
+    assert any(item["source"] for item in payload["venue_costs"])
+    assert any(item["captured_at"] for item in payload["venue_costs"])
+    assert any(
+        item["currency"] == "USD" and item["source"] == "test_fx" for item in payload["fx_rates"]
+    )
+    assert payload["minimum_net_edge"] is not None
+    assert payload["timing"]["assembly_ms"] >= 0
+    assert payload["accepted"] is False
+    assert payload["rejection_reason"] == EXECUTION_REPRICE_SKEW
 
 
 @pytest.mark.asyncio
@@ -223,6 +262,24 @@ async def test_paper_fill_records_price2_prices_depth_and_audit_phases(
         assert payload["legs"]
         assert any(Decimal(leg["available_depth"]) > 0 for leg in payload["legs"])
         assert any(leg["displayed_odds"] for leg in payload["legs"])
+        assert payload["minimum_net_edge"] is not None
+        assert payload["capital_constraint"] is not None
+        assert payload["capital_constraint"]["paper_only"] is True
+        assert payload["venue_costs"]
+        assert any(
+            item["fee_basis"] and item["source"] and item["captured_at"]
+            for item in payload["venue_costs"]
+        )
+        assert any(
+            item["currency"] == "USD" and item["gbp_per_unit"] for item in payload["fx_rates"]
+        )
+        for leg in payload["legs"]:
+            assert leg["retrieval_native_id"]
+            assert leg["retrieved_at"]
+        audits = bundle.watchlist.repository.list_execution_snapshot_audits(trade.opportunity_id)
+        assert len(audits) == 1
+        assert audits[0]["accepted"] == 1
+        assert json.loads(audits[0]["snapshot_json"])["snapshot_id"] == payload["snapshot_id"]
         text = caplog.text
         for phase in (
             PHASE_DISCOVERY_PRICE,
@@ -239,3 +296,131 @@ async def test_paper_fill_records_price2_prices_depth_and_audit_phases(
     finally:
         bundle.repository.close()
         bundle.ledger.close()
+        bundle.watchlist.repository.close()
+
+
+class _Venue:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+class _Level:
+    def __init__(self, odds: str, stake: str) -> None:
+        self.decimal_odds = Decimal(odds)
+        self.available_stake = Decimal(stake)
+
+
+class _Leg:
+    def __init__(self, venue: str, outcome: str, market_id: str, runner_id: str) -> None:
+        self.venue = _Venue(venue)
+        self.outcome = outcome
+        self.source_market_id = market_id
+        self.source_runner_id = runner_id
+        self.displayed_odds = Decimal("2.5")
+        self.requested_stake = Decimal("10")
+        self.quote_age_ms = 20
+        self.levels = [_Level("2.5", "40")]
+
+
+def test_each_leg_keeps_its_own_native_book_timestamp() -> None:
+    home_at = NOW
+    draw_at = NOW + timedelta(milliseconds=40)
+    away_at = NOW + timedelta(milliseconds=80)
+    token_at = NOW + timedelta(milliseconds=15)
+    retrievals = (
+        ExecutionRetrieval("kalshi", "EVT-HOME", "EVT", home_at),
+        ExecutionRetrieval("kalshi", "EVT-DRAW", "EVT", draw_at),
+        ExecutionRetrieval("kalshi", "EVT-AWAY", "EVT", away_at),
+        ExecutionRetrieval("polymarket", "token-away", "pm", token_at),
+    )
+    decision = type(
+        "Decision",
+        (),
+        {
+            "fill_legs": [
+                _Leg("kalshi", "home", "EVT-HOME", "EVT-HOME:yes"),
+                _Leg("kalshi", "draw", "EVT", "EVT-DRAW:yes"),
+                _Leg("kalshi", "away", "EVT-AWAY", "EVT-AWAY:yes"),
+                _Leg("polymarket", "away", "4521504", "token-away"),
+            ]
+        },
+    )()
+    quotes = leg_quotes_from_decision(decision, retrievals=retrievals)
+    by_outcome = {(quote.venue, quote.outcome): quote for quote in quotes}
+    assert by_outcome[("kalshi", "home")].retrieved_at == home_at
+    assert by_outcome[("kalshi", "draw")].retrieved_at == draw_at
+    assert by_outcome[("kalshi", "away")].retrieved_at == away_at
+    assert by_outcome[("polymarket", "away")].retrieved_at == token_at
+    assert by_outcome[("kalshi", "draw")].retrieval_native_id == "EVT-DRAW"
+    assert len({quote.retrieved_at for quote in quotes if quote.venue == "kalshi"}) == 3
+
+
+@pytest.mark.asyncio
+async def test_rejected_price2_snapshot_is_durable_audit_evidence(tmp_path, monkeypatch) -> None:
+    rich = _market()
+    bundle = await _run(
+        tmp_path,
+        monkeypatch,
+        name="rejected-snapshot",
+        matchbook_payloads=[_stale(rich), _stale(rich)],
+        kalshi_books=[_book("0.20", "0.70"), _book("0.20", "0.70")],
+    )
+    try:
+        assert bundle.operations.list_active_trades() == []
+        rows = bundle.watchlist.repository.list_opportunities()
+        assert len(rows) == 1
+        audits = bundle.watchlist.repository.list_execution_snapshot_audits(rows[0].opportunity_id)
+        assert len(audits) == 1
+        record = audits[0]
+        assert record["accepted"] == 0
+        assert record["rejection_reason"] == EXECUTION_REPRICE_STALE
+        payload = json.loads(record["snapshot_json"])
+        assert payload["accepted"] is False
+        assert payload["rejection_reason"] == EXECUTION_REPRICE_STALE
+        assert payload["retrievals"]
+        assert {item["native_id"] for item in payload["retrievals"]} >= {MARKET, TICKER}
+        assert payload["legs"]
+        assert any(leg["displayed_odds"] for leg in payload["legs"])
+        assert payload["net_edge"] is not None
+        assert payload["timing"]["assembly_ms"] >= 0
+        assert payload["timing"]["calls"]
+        diagnostics = json.loads(record["diagnostics_json"])
+        assert diagnostics["assembly_ms"] >= 0
+        assert "quote_age_ms" in diagnostics
+        missed = [
+            event
+            for event in bundle.watchlist.activity(opportunity_id=rows[0].opportunity_id, limit=20)
+            if str(event.detail or "").startswith(EXECUTION_REPRICE_STALE)
+        ]
+        assert missed
+        assert "snapshot_json" not in (missed[0].detail or "")
+    finally:
+        bundle.repository.close()
+        bundle.ledger.close()
+        bundle.watchlist.repository.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_persists_partial_snapshot(tmp_path, monkeypatch) -> None:
+    bundle = await _run(
+        tmp_path,
+        monkeypatch,
+        name="partial-snapshot",
+        matchbook_payloads=[_stale(_market()), _fresh(_market())],
+        kalshi_books=[_book("0.20", "0.70"), None],
+    )
+    try:
+        assert bundle.operations.list_active_trades() == []
+        rows = bundle.watchlist.repository.list_opportunities()
+        audits = bundle.watchlist.repository.list_execution_snapshot_audits(rows[0].opportunity_id)
+        assert len(audits) == 1
+        payload = json.loads(audits[0]["snapshot_json"])
+        assert payload["accepted"] is False
+        assert payload["rejection_reason"] == EXECUTION_REPRICE_FAILED
+        venues = {item["venue"] for item in payload["retrievals"]}
+        assert "matchbook" in venues
+        assert audits[0]["diagnostics_json"]
+    finally:
+        bundle.repository.close()
+        bundle.ledger.close()
+        bundle.watchlist.repository.close()
