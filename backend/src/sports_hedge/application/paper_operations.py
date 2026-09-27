@@ -31,8 +31,11 @@ from sports_hedge.application.active_trade_lane import (
     get_active_trade_registry,
 )
 from sports_hedge.paper.placement_room import (
+    REPORTING_GBP_QUANTUM,
     PlacementValuationError,
     current_event_deployment_gbp,
+    discretionary_cycle_cap_gbp,
+    largest_scale_not_exceeding,
     recovery_capital_room_gbp,
     remaining_room_gbp,
 )
@@ -283,6 +286,12 @@ def _is_expected_autofill_gate(exc: BaseException) -> bool:
     if reason in _AUTOFILL_GATE_REASONS:
         return True
     return reason.startswith("allocation_failed:")
+
+
+# Sub-penny discretionary plans are not committed. Distinct from a sizing
+# failure (missing FX, empty depth, treasury) so the cycle can stop as an
+# allocation ceiling rather than as missing liquidity.
+_NO_MATERIAL_TRANCHE = object()
 
 
 def _iterative_fill_stop(trade: PaperTrade) -> str:
@@ -1765,6 +1774,36 @@ class PaperOperationsService:
             event_room_gbp=event_room,
             opportunity_room_gbp=opportunity_room,
         )
+        if incremental is _NO_MATERIAL_TRANCHE:
+            trade.active_trade_phase = PaperActiveTradePhase.MONITORING_CAP_REACHED
+            self._append_trade_event_once(
+                trade,
+                event_type=PaperTradeAuditEventType.TOP_UP_CAP_REACHED,
+                occurred_at=when,
+                detail=(
+                    f"locked={opportunity_locked} "
+                    f"opportunity_room={opportunity_room} event_room={event_room} "
+                    "sub_penny_tranche_not_committed; monitoring continues"
+                ),
+            )
+            if self.trades is not None:
+                trade = self.trades.save(trade)
+            self.record_active_lifecycle_event(
+                trade,
+                event_type=ActiveTradeEventType.CAP_REACHED,
+                reason_code=ActiveTradeReasonCode.NO_ACTION_CAP_REACHED,
+                operator_copy="Sub-penny discretionary room is not deployable; monitoring continues",
+                occurred_at=when,
+                dedupe_key=f"cap-reached:{trade.trade_id}",
+                payload={
+                    "locked_gbp": opportunity_locked,
+                    "event_deployed_gbp": event_deployed,
+                    "event_room_gbp": event_room,
+                    "opportunity_room_gbp": opportunity_room,
+                    "reporting_quantum_gbp": REPORTING_GBP_QUANTUM,
+                },
+            )
+            return self._result_from_existing_trade(trade, when)
         if incremental is None:
             self.record_active_lifecycle_event(
                 trade,
@@ -1892,11 +1931,15 @@ class PaperOperationsService:
         event_deployed_gbp: Decimal,
         event_room_gbp: Decimal,
         opportunity_room_gbp: Decimal,
-    ) -> tuple[list[PaperOpportunityLeg], Any, Decimal] | None:
+    ) -> tuple[list[PaperOpportunityLeg], Any, Decimal] | object | None:
         operator = effective_operator_scanner_settings(self.settings)
-        cycle_cap = min(event_room_gbp, opportunity_room_gbp, operator.max_one_time_gbp)
-        if cycle_cap <= 0:
-            return None
+        cycle_cap = discretionary_cycle_cap_gbp(
+            event_room_gbp=event_room_gbp,
+            opportunity_room_gbp=opportunity_room_gbp,
+            max_one_time_gbp=operator.max_one_time_gbp,
+        )
+        if cycle_cap < REPORTING_GBP_QUANTUM:
+            return _NO_MATERIAL_TRANCHE
         policy = policy_from_settings(self.settings)
         balances = []
         if self.ledger is not None:
@@ -1957,12 +2000,40 @@ class PaperOperationsService:
         if incremental_gbp <= 0:
             return None
         if incremental_gbp > cycle_cap:
-            scale = cycle_cap / incremental_gbp
+            unscaled = mapped
+
+            def _exceeds_cycle_cap(scale: Decimal) -> bool:
+                if scale <= 0:
+                    return False
+                total = Decimal("0")
+                for leg in unscaled:
+                    rate = fx.get(leg.currency.upper())
+                    if leg.currency.upper() == "GBP":
+                        rate = Decimal("1")
+                    if rate is None or rate <= 0:
+                        return True
+                    total += leg.requested_stake * scale * rate
+                return total > cycle_cap
+
+            scale = largest_scale_not_exceeding(Decimal("1"), _exceeds_cycle_cap)
+            if scale <= 0:
+                return _NO_MATERIAL_TRANCHE
             mapped = [
-                leg.model_copy(update={"requested_stake": (leg.requested_stake * scale)})
-                for leg in mapped
+                leg.model_copy(update={"requested_stake": leg.requested_stake * scale})
+                for leg in unscaled
             ]
-            incremental_gbp = cycle_cap
+            incremental_gbp = Decimal("0")
+            for leg in mapped:
+                rate = fx.get(leg.currency.upper())
+                if leg.currency.upper() == "GBP":
+                    rate = Decimal("1")
+                if rate is None or rate <= 0:
+                    return None
+                incremental_gbp += leg.requested_stake * rate
+        if incremental_gbp > cycle_cap:
+            return None
+        if incremental_gbp < REPORTING_GBP_QUANTUM:
+            return _NO_MATERIAL_TRANCHE
         try:
             self._assert_spendable_treasury(mapped)
         except PaperOperationsError:

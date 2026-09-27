@@ -1394,18 +1394,21 @@ def test_aggregated_unwind_releases_every_tranche_lock_once(tmp_path: Path) -> N
             assert Decimal(locked_native) == Decimal(released_native)
         allocated_qty = Decimal("0")
         allocated_pnl = Decimal("0")
-        allocated_fees = Decimal("0")
+        allocated_fee_parts: list[Decimal] = []
         for open_leg, close_leg in zip(position.legs, decision.close_plan.legs, strict=True):
             parts = allocated_close_shares(open_leg, close_leg)
             allocated_qty += sum((part[1] for part in parts), Decimal("0"))
-            allocated_fees += sum((part[3] for part in parts), Decimal("0"))
+            allocated_fee_parts.extend(part[3] for part in parts)
             allocated_pnl += sum((part[4] for part in parts), Decimal("0"))
         assert allocated_qty == sum(
             (leg.filled_close_quantity for leg in decision.close_plan.legs), Decimal("0")
         )
         filled_qty = sum((fill.filled_close_quantity for fill in closed.close_fills), Decimal("0"))
         assert abs(filled_qty - allocated_qty) <= Decimal("0.0000001")
-        assert sum((fill.closing_fee_native for fill in closed.close_fills), Decimal("0")) == allocated_fees
+        # Compare the fee parts themselves. Summing per leg and then across
+        # legs can differ by one Decimal ulp from summing every fill fee in
+        # one pass once a cap-safe scale moves a tranche by one ulp.
+        assert [fill.closing_fee_native for fill in closed.close_fills] == allocated_fee_parts
         unwind_ids = [
             entry.source_id
             for entry in ops.journal.list_entries(opportunity_id=loaded.opportunity_id)

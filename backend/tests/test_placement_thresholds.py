@@ -8,7 +8,11 @@ from inspect import getsource
 
 from sports_hedge.api.paper import put_operator_scanner_settings
 from sports_hedge.arbitrage.allocation.adapters import request_from_complete_set
-from sports_hedge.arbitrage.allocation.engine import DISCRETIONARY_PAPER_CONSTRAINTS, allocate
+from sports_hedge.arbitrage.allocation.engine import (
+    DISCRETIONARY_PAPER_CONSTRAINTS,
+    allocate,
+    allocate_requested_size,
+)
 from sports_hedge.arbitrage.allocation.models import (
     AllocationBalance,
     AllocationConstraintKind,
@@ -327,6 +331,109 @@ def test_settings_edit_source_does_not_call_venues() -> None:
 def test_recovery_room_is_opportunity_only() -> None:
     assert recovery_capital_room_gbp(Decimal("300"), Decimal("250")) == Decimal("50")
     assert recovery_capital_room_gbp(Decimal("100"), None) == Decimal("100")
+    dust = Decimal("199.9999999999999999999999999")
+    assert recovery_capital_room_gbp(Decimal("200"), dust) == Decimal("200") - dust
+
+
+DUST_DEPLOYED = Decimal("199.9999999999999999999999999")
+EVENT_DUST_DEPLOYED = Decimal("249.9999999999999999999999999")
+
+
+def _reporting_total(result) -> Decimal:
+    return sum((stake.capital_reporting for stake in result.recommended_stakes), Decimal("0"))
+
+
+def test_sub_penny_opportunity_room_is_not_deployable() -> None:
+    assert remaining_room_gbp(Decimal("200"), DUST_DEPLOYED) == Decimal("0")
+    result = allocate(
+        _request(
+            policy=_policy(
+                max_event_reporting=Decimal("1000"),
+                max_opportunity_reporting=Decimal("200"),
+                max_one_time_reporting=Decimal("1000"),
+            ),
+            event_deployed=DUST_DEPLOYED,
+            opportunity_deployed=DUST_DEPLOYED,
+        )
+    )
+    assert result.accepted is False
+    assert result.opportunity_room_gbp == Decimal("0")
+    assert result.limiting_constraint is AllocationConstraintKind.MAX_OPPORTUNITY
+
+
+def test_sub_penny_event_room_is_not_deployable() -> None:
+    assert remaining_room_gbp(Decimal("250"), EVENT_DUST_DEPLOYED) == Decimal("0")
+    result = allocate(
+        _request(
+            policy=_policy(
+                max_event_reporting=Decimal("250"),
+                max_opportunity_reporting=Decimal("1000"),
+                max_one_time_reporting=Decimal("1000"),
+            ),
+            event_deployed=EVENT_DUST_DEPLOYED,
+            opportunity_deployed=Decimal("0"),
+        )
+    )
+    assert result.accepted is False
+    assert result.event_room_gbp == Decimal("0")
+    assert result.limiting_constraint is AllocationConstraintKind.MAX_EVENT
+
+
+def test_exact_event_room_cannot_recompose_above_the_cap() -> None:
+    result = allocate(
+        _request(
+            policy=_policy(
+                max_event_reporting=Decimal("50"),
+                max_opportunity_reporting=Decimal("1000"),
+                max_one_time_reporting=Decimal("1000"),
+            ),
+            event_deployed=Decimal("0"),
+            opportunity_deployed=Decimal("0"),
+        )
+    )
+    assert result.accepted
+    assert result.maximum_validated_capital <= Decimal("50")
+    assert result.recommended_committed_capital <= Decimal("50")
+    assert _reporting_total(result) <= Decimal("50")
+    assert result.maximum_validated_capital != Decimal("50.00000000000000000000000001")
+
+
+def test_one_penny_of_opportunity_room_stays_deployable() -> None:
+    assert remaining_room_gbp(Decimal("100.01"), Decimal("100")) == Decimal("0.01")
+    assert remaining_room_gbp(Decimal("100"), Decimal("100") - Decimal("0.009")) == Decimal("0")
+    result = allocate(
+        _request(
+            policy=_policy(
+                max_event_reporting=Decimal("1000"),
+                max_opportunity_reporting=Decimal("100.01"),
+                max_one_time_reporting=Decimal("1000"),
+            ),
+            event_deployed=Decimal("0"),
+            opportunity_deployed=Decimal("100"),
+        )
+    )
+    assert result.accepted
+    assert result.opportunity_room_gbp == Decimal("0.01")
+    assert result.maximum_validated_capital > 0
+    assert result.maximum_validated_capital <= Decimal("0.01")
+    assert _reporting_total(result) <= Decimal("0.01")
+
+
+def test_requested_reporting_size_cannot_recompose_above_the_request() -> None:
+    request = _request(
+        policy=_policy(
+            max_event_reporting=Decimal("1000"),
+            max_opportunity_reporting=Decimal("1000"),
+            max_one_time_reporting=Decimal("1000"),
+        )
+    )
+    baseline = allocate(request)
+    assert baseline.accepted
+    assert baseline.maximum_validated_capital > Decimal("100")
+    sized = allocate_requested_size(request, Decimal("100"))
+    assert sized.accepted
+    assert sized.recommended_committed_capital <= Decimal("100")
+    assert _reporting_total(sized) <= Decimal("100")
 
 
 def test_live_execution_remains_disabled() -> None:

@@ -23,6 +23,12 @@ from sports_hedge.arbitrage.allocation.models import (
     VenueNativeAmount,
 )
 from sports_hedge.domain.models import VenueName
+from sports_hedge.paper.placement_room import (
+    cap_safe_scale,
+    deployable_reporting_room_gbp,
+    largest_scale_not_exceeding,
+    raw_remaining_room_gbp,
+)
 
 EXTERNAL_OPERATOR = "EXTERNAL_OPERATOR"
 KICKOFF_ONLY_BASES = frozenset({"time_to_kickoff", "kickoff", "time_until_kickoff"})
@@ -118,6 +124,7 @@ def _allocate_solver_scale(request: AllocationRequest) -> AllocationResult:
     scale_max = min((item.scale for item in bindings), default=Decimal("1"))
     if scale_max < 0:
         scale_max = Decimal("0")
+    scale_max = _fit_discretionary_reporting_scale(request, scale_max)
     binding = min(bindings, key=lambda item: (item.scale, _constraint_priority(item.kind)))
 
     if scale_max <= 0:
@@ -251,8 +258,7 @@ def _allocate_requested_size(request: AllocationRequest, requested_reporting: De
     solver_capital = request.committed_capital_at_solver_size
     if solver_capital <= 0:
         return _rejected(request, AllocationConstraintKind.SOLVER_CAPITAL, "non_positive_solver_capital")
-    requested_scale = requested_reporting / solver_capital
-    if requested_scale > baseline.scale_maximum:
+    if requested_reporting > baseline.maximum_validated_capital:
         rejected = _rejected(
             request,
             baseline.limiting_constraint or AllocationConstraintKind.NATIVE_VENUE_BALANCE,
@@ -267,6 +273,19 @@ def _allocate_requested_size(request: AllocationRequest, requested_reporting: De
                 "limiting_constraint": baseline.limiting_constraint,
                 "limiting_constraint_detail": baseline.limiting_constraint_detail,
             }
+        )
+    if requested_reporting == baseline.maximum_validated_capital:
+        # Replaying the validated maximum keeps the scale allocate() already
+        # fitted to the operator cap. A further step would move a fill by one
+        # unit in the last place when the stake sum and the scalar product
+        # differ, without crossing the cap.
+        requested_scale = baseline.scale_maximum
+    else:
+        requested_scale = requested_reporting / solver_capital
+        if requested_scale > baseline.scale_maximum:
+            requested_scale = baseline.scale_maximum
+        requested_scale = _scale_under_reporting_budget(
+            request, requested_scale, requested_reporting
         )
     try:
         plan = _plan_at_scale(request, requested_scale)
@@ -585,12 +604,16 @@ def _append_reporting_cap(
             )
         )
         return
-    room = _non_negative(limit - deployed)
+    raw_room = raw_remaining_room_gbp(limit, deployed)
+    room = deployable_reporting_room_gbp(limit, deployed)
     bindings.append(
         ConstraintBinding(
             kind=kind,
-            scale=_scale_for_budget(solver_capital, room),
-            detail=f"{name} limit={limit} deployed={deployed} room={room}",
+            scale=cap_safe_scale(solver_capital, room),
+            detail=(
+                f"{name} limit={limit} deployed={deployed} "
+                f"raw_room={raw_room} room={room}"
+            ),
         )
     )
 
@@ -641,14 +664,14 @@ def _placement_fields(request: AllocationRequest) -> dict[str, Decimal | None]:
         "event_room_gbp": (
             None
             if event_limit is None or event_deployed is None
-            else _non_negative(event_limit - event_deployed)
+            else deployable_reporting_room_gbp(event_limit, event_deployed)
         ),
         "max_opportunity_gbp": opportunity_limit,
         "opportunity_deployed_gbp": opportunity_deployed,
         "opportunity_room_gbp": (
             None
             if opportunity_limit is None or opportunity_deployed is None
-            else _non_negative(opportunity_limit - opportunity_deployed)
+            else deployable_reporting_room_gbp(opportunity_limit, opportunity_deployed)
         ),
         "max_one_time_gbp": one_time,
     }
@@ -664,6 +687,12 @@ def _depth_scale(legs: list[AllocationLeg]) -> Decimal:
 
 
 def _scale_for_budget(need: Decimal, budget: Decimal) -> Decimal:
+    """Proportional scale for a native or legacy budget.
+
+    Reporting-GBP operator caps do not use this. They use ``cap_safe_scale``
+    so a rounded product cannot sit above the hard reporting amount.
+    """
+
     if need <= 0:
         return Decimal("1")
     if budget <= 0:
@@ -672,6 +701,68 @@ def _scale_for_budget(need: Decimal, budget: Decimal) -> Decimal:
     if scale > 1:
         return Decimal("1")
     return scale
+
+
+def _plan_reporting_total(request: AllocationRequest, scale: Decimal) -> Decimal:
+    total = Decimal("0")
+    for leg in request.legs:
+        total += leg.solver_stake * scale * leg.capital_per_unit
+    return total
+
+
+def _reporting_cycle_budget(request: AllocationRequest) -> Decimal | None:
+    """Tightest deployable reporting-GBP placement cap for this request."""
+
+    if not request.discretionary_placement:
+        return None
+    rooms: list[Decimal] = []
+    event_limit = request.policy.max_event_reporting
+    opportunity_limit = request.policy.max_opportunity_reporting
+    one_time = request.policy.max_one_time_reporting
+    event_deployed = _event_deployed(request)
+    opportunity_deployed = _opportunity_deployed(request)
+    if event_limit is not None and event_deployed is not None:
+        rooms.append(deployable_reporting_room_gbp(event_limit, event_deployed))
+    if opportunity_limit is not None and opportunity_deployed is not None:
+        rooms.append(deployable_reporting_room_gbp(opportunity_limit, opportunity_deployed))
+    if one_time is not None:
+        rooms.append(deployable_reporting_room_gbp(one_time, Decimal("0")))
+    if not rooms:
+        return None
+    return min(rooms)
+
+
+def _fit_discretionary_reporting_scale(request: AllocationRequest, scale: Decimal) -> Decimal:
+    budget = _reporting_cycle_budget(request)
+    if budget is None:
+        return scale
+    return _scale_under_reporting_budget(request, scale, budget)
+
+
+def _scale_under_reporting_budget(
+    request: AllocationRequest,
+    scale: Decimal,
+    budget: Decimal,
+) -> Decimal:
+    """One scale whose recomposed reporting capital stays within ``budget``.
+
+    ``committed_capital * scale`` and the sum of leg reporting capital can
+    differ by one unit in the last place. Both must sit on the cap. The
+    shared scale is reduced, so hedge ratios do not change.
+    """
+
+    if budget <= 0 or scale <= 0:
+        return Decimal("0")
+    fitted = min(scale, cap_safe_scale(request.committed_capital_at_solver_size, budget))
+
+    def exceeds(candidate: Decimal) -> bool:
+        if candidate <= 0:
+            return False
+        committed = request.committed_capital_at_solver_size * candidate
+        planned = _plan_reporting_total(request, candidate)
+        return committed > budget or planned > budget
+
+    return largest_scale_not_exceeding(fitted, exceeds)
 
 
 def _reserve_required(policy: BankrollAllocationPolicy, balance: AllocationBalance) -> Decimal:

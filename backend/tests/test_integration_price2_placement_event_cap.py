@@ -33,6 +33,7 @@ from sports_hedge.arbitrage.allocation.engine import allocate
 from sports_hedge.arbitrage.allocation.models import AllocationConstraintKind
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.config import Settings
+from sports_hedge.paper.placement_room import REPORTING_GBP_QUANTUM
 from sports_hedge.paper.trades import PaperTradeTrancheKind
 from sports_hedge.risk.execution import ExecutionRiskResult, ExecutionRiskScorer
 
@@ -121,30 +122,43 @@ async def test_price2_cycles_respect_placement_room_and_consumed_depth(
         assert trade.places_orders is False
         assert trade.entry_risk is not None
         assert trade.entry_risk.score == 99
-        def _gbp(amount: Decimal) -> Decimal:
-            return amount.quantize(Decimal("0.01"))
-
         opening = next(item for item in trade.tranches if item.kind is PaperTradeTrancheKind.OPENING)
         top_ups = [item for item in trade.tranches if item.kind is PaperTradeTrancheKind.TOP_UP]
-        assert top_ups
-        material = [item for item in top_ups if _gbp(item.capital_locked_gbp) > Decimal("0.00")]
-        dust = [item for item in top_ups if item not in material]
-        assert len(material) == 1
-        assert _gbp(opening.capital_locked_gbp) == HUNDRED
-        assert _gbp(material[0].capital_locked_gbp) == HUNDRED
-        assert all(_gbp(item.capital_locked_gbp) == Decimal("0.00") for item in dust)
-        assert _gbp(trade.capital_locked_gbp or Decimal("0")) == TWO_HUNDRED
-        assert trade.capital_locked_gbp == TWO_HUNDRED
+        assert len(trade.tranches) == 2
+        assert len(top_ups) == 1
+        assert opening.capital_locked_gbp is not None
+        assert top_ups[0].capital_locked_gbp is not None
+        assert opening.capital_locked_gbp <= HUNDRED
+        assert top_ups[0].capital_locked_gbp <= HUNDRED
+        assert opening.capital_locked_gbp >= REPORTING_GBP_QUANTUM
+        assert top_ups[0].capital_locked_gbp >= REPORTING_GBP_QUANTUM
+        locked = trade.capital_locked_gbp or Decimal("0")
+        tranche_sum = opening.capital_locked_gbp + top_ups[0].capital_locked_gbp
+        # Trade lock and tranche figures keep raw ledger precision. They may
+        # differ by a unit in the last place, and neither may exceed the cap
+        # or leave a deployable penny of opportunity room.
+        assert locked <= TWO_HUNDRED
+        assert tranche_sum <= TWO_HUNDRED
+        assert TWO_HUNDRED - locked < REPORTING_GBP_QUANTUM
+        assert TWO_HUNDRED - tranche_sum < REPORTING_GBP_QUANTUM
+        assert abs(locked - tranche_sum) < REPORTING_GBP_QUANTUM
         assert opening.execution_snapshot_id
-        assert material[0].execution_snapshot_id
-        assert opening.execution_snapshot_id != material[0].execution_snapshot_id
-        assert material[0].idempotency_key == material[0].execution_snapshot_id
+        assert top_ups[0].execution_snapshot_id
+        assert opening.execution_snapshot_id != top_ups[0].execution_snapshot_id
+        assert top_ups[0].idempotency_key == top_ups[0].execution_snapshot_id
 
         audits = _audits(bundle, trade.opportunity_id)
-        assert audits[-1]["cycle_outcome"] == CYCLE_ALLOCATION_CEILING
+        assert [row["cycle_outcome"] for row in audits] == [
+            "filled",
+            "filled",
+            CYCLE_ALLOCATION_CEILING,
+        ]
         assert audits[-1]["tranche_id"] is None
         filled = [row for row in audits if row["cycle_outcome"] == "filled"]
-        assert len(filled) >= 2
+        assert len(filled) == 2
+        before_ceiling = Decimal(json.loads(filled[-1]["snapshot_json"])["cumulative_capital_gbp"])
+        after_ceiling = Decimal(json.loads(audits[-1]["snapshot_json"])["cumulative_capital_gbp"])
+        assert before_ceiling == after_ceiling == locked
         first = _liquidity(filled[0])
         second = _liquidity(filled[1])
         third = _liquidity(audits[-1])
@@ -184,13 +198,20 @@ async def test_price2_cycles_respect_placement_room_and_consumed_depth(
         assert request.execution_risk_score == 99
         sized = allocate(request)
         assert sized.accepted
-        assert sized.event_deployed_gbp == TWO_HUNDRED
+        assert sized.event_deployed_gbp == locked
         assert sized.event_room_gbp == FIFTY
         assert sized.opportunity_deployed_gbp == Decimal("0")
-        assert sized.maximum_validated_capital.quantize(Decimal("0.01")) == FIFTY
-        assert abs(sized.maximum_validated_capital - FIFTY) < Decimal("1e-20")
-        assert sized.recommended_committed_capital.quantize(Decimal("0.01")) == FIFTY
-        assert abs(sized.recommended_committed_capital - FIFTY) < Decimal("1e-20")
+        assert locked <= TWO_HUNDRED
+        assert TWO_HUNDRED - locked < REPORTING_GBP_QUANTUM
+        assert sized.maximum_validated_capital <= FIFTY
+        assert sized.recommended_committed_capital <= FIFTY
+        assert sized.maximum_validated_capital >= FIFTY - REPORTING_GBP_QUANTUM
+        stake_reporting = sum(
+            (stake.capital_reporting for stake in sized.recommended_stakes),
+            Decimal("0"),
+        )
+        assert stake_reporting <= FIFTY
+        assert len(bundle.operations.list_active_trades()) == 1
         assert sized.limiting_constraint is AllocationConstraintKind.MAX_EVENT
         assert HIDDEN.isdisjoint(item.kind for item in sized.hard_constraints)
         assert sized.execution_risk_score == 99
