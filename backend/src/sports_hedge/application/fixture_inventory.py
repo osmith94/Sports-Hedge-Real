@@ -786,12 +786,16 @@ def _classify_pair(
     reason: str | None = admission.assessment.reason if status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT else None
     if rejections:
         mapped = _status_from_rejections(rejections)
-        if mapped is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        mapped_reason = next(
+            (item for item in rejections if _rejection_maps_to(item) is mapped),
+            rejections[0],
+        )
+        if _is_economic_comparison_status(mapped):
+            # Pricing/economics must not revoke a proven catalogue relationship.
+            reason = mapped_reason
+        elif mapped is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
             status = mapped
-            reason = next(
-                (item for item in rejections if _rejection_maps_to(item) is mapped),
-                rejections[0],
-            )
+            reason = mapped_reason
         else:
             reason = rejections[0]
     return status, reason, rejections, entered
@@ -811,6 +815,20 @@ def _status_from_rejections(rejections: list[str]) -> InventoryComparisonStatus:
         if status in mapped:
             return status
     return InventoryComparisonStatus.MATCHED_EQUIVALENT
+
+
+def _is_economic_comparison_status(status: InventoryComparisonStatus) -> bool:
+    """FX, fees and quote age are pricing truth, not relationship identity."""
+
+    return status in {
+        InventoryComparisonStatus.MISSING_COSTS,
+        InventoryComparisonStatus.MISSING_FX,
+        InventoryComparisonStatus.STALE,
+    }
+
+
+def _is_economic_rejection(reason: str) -> bool:
+    return _is_economic_comparison_status(_rejection_maps_to(reason))
 
 
 def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
@@ -1850,9 +1868,17 @@ def _attach_kalshi(
             row.trigger_net_edge = best_decision.minimum_net_edge
             if row.current_net_edge is None:
                 row.current_net_edge = best.current_net_edge
-        if best.entered_solver or not best.rejection_reasons:
-            row.comparison_status = _comparable_status_from_catalogue(catalogue)
-            row.reason = _comparable_reason(row.comparison_status, row.reason)
+        for reason in best.rejection_reasons:
+            if reason not in row.rejection_reasons:
+                row.rejection_reasons.append(reason)
+        # Proven catalogue identity stays comparable even when the paper
+        # decision is fail-closed for FX, fees, or quote age.
+        row.comparison_status = _comparable_status_from_catalogue(catalogue)
+        economic_reason = next(
+            (item for item in best.rejection_reasons if _is_economic_rejection(item)),
+            None,
+        )
+        row.reason = economic_reason or _comparable_reason(row.comparison_status, row.reason)
         return
     row.comparison_status = _comparable_status_from_catalogue(catalogue)
     row.reason = _comparable_reason(row.comparison_status, row.reason)

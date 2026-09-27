@@ -3107,6 +3107,7 @@ class CataloguePriceEngine:
             else ScanLane.HOT,
             now=observed_at,
             reset_generation=event.reset_generation,
+            pricing_refresh=True,
         )
 
     async def _handoff_item_decision(

@@ -204,6 +204,7 @@ def merge_current_market_slots(
     paper_market_ids: tuple[str, ...],
     evaluated: bool,
     universe_generation_id: int | None = None,
+    pricing_refresh: bool = False,
 ) -> dict[str, CurrentMarketSlot]:
     """Upsert evaluated canonical markets. Partial/not_evaluated work is a no-op.
 
@@ -212,6 +213,11 @@ def merge_current_market_slots(
     merely because omission was represented as no row. Older snapshots cannot
     tombstone newer slots. A non-empty evaluated subset still upserts only the
     keys it carries and leaves other-lane families in place.
+
+    HOT/BACKGROUND pricing refreshes may update economics on a still-current
+    ApprovedEquivalent slot. They must not tombstone UNIVERSE-proven presence
+    via empty rows, and they must not revoke comparison identity merely because
+    FX, fees, or quote age failed closed.
     """
 
     if not evaluated:
@@ -219,6 +225,11 @@ def merge_current_market_slots(
     merged = dict(existing)
     scanned = require_aware_instant(scanned_at, "last_scanned_at")
     lane = ScanLane(scan_lane) if not isinstance(scan_lane, ScanLane) else scan_lane
+    discovery = _is_universe_discovery(
+        lane,
+        incoming_generation_id=universe_generation_id,
+        pricing_refresh=pricing_refresh,
+    )
     for row in incoming_rows:
         key = merge_slot_key(merged, row)
         previous = merged.get(key)
@@ -226,7 +237,7 @@ def merge_current_market_slots(
             continue
         merged[key] = CurrentMarketSlot(
             key=key,
-            row=row,
+            row=_row_preserving_relationship(previous, row, discovery=discovery),
             scan_lane=lane,
             last_scanned_at=scanned,
             paper_market_ids=paper_market_ids,
@@ -235,14 +246,16 @@ def merge_current_market_slots(
                 lane,
                 incoming_generation_id=universe_generation_id,
                 previous=previous,
+                pricing_refresh=pricing_refresh,
             ),
             universe_generation_closed_at=_slot_generation_closed_at(
                 lane,
                 incoming_generation_id=universe_generation_id,
                 previous=previous,
+                pricing_refresh=pricing_refresh,
             ),
         )
-    if not incoming_rows:
+    if not incoming_rows and not pricing_refresh:
         merged = mark_evaluated_absence(
             merged,
             scanned_at=scanned,
@@ -835,19 +848,60 @@ def row_quote_age_ms(row: FixtureMarketInventoryRow) -> int | None:
     return max(ages)
 
 
+def _is_universe_discovery(
+    scan_lane: ScanLane,
+    *,
+    incoming_generation_id: int | None,
+    pricing_refresh: bool,
+) -> bool:
+    """True only for a real UNIVERSE catalogue evaluation, not HOT/BACKGROUND pricing."""
+
+    del incoming_generation_id
+    return scan_lane is ScanLane.UNIVERSE and not pricing_refresh
+
+
+def _row_preserving_relationship(
+    previous: CurrentMarketSlot | None,
+    incoming: FixtureMarketInventoryRow,
+    *,
+    discovery: bool,
+) -> FixtureMarketInventoryRow:
+    """HOT/BACKGROUND may refresh economics; they may not revoke ApprovedEquivalent."""
+
+    if discovery or previous is None:
+        return incoming
+    if not inventory_is_comparable_opportunity(previous.row.comparison_status):
+        return incoming
+    if inventory_is_comparable_opportunity(incoming.comparison_status):
+        return incoming
+    if incoming.comparison_status in {
+        InventoryComparisonStatus.MISSING_COSTS,
+        InventoryComparisonStatus.MISSING_FX,
+        InventoryComparisonStatus.STALE,
+        InventoryComparisonStatus.VENUE_ONLY,
+    }:
+        return incoming.model_copy(update={"comparison_status": previous.row.comparison_status})
+    return incoming
+
+
 def _slot_generation_id(
     scan_lane: ScanLane,
     *,
     incoming_generation_id: int | None,
     previous: CurrentMarketSlot | None,
+    pricing_refresh: bool = False,
 ) -> int | None:
-    """UNIVERSE evaluations stamp the generation; HOT refreshes keep the last UNIVERSE id."""
+    """UNIVERSE evaluations stamp the generation; pricing refreshes keep the last UNIVERSE id."""
 
-    if scan_lane is ScanLane.UNIVERSE:
+    if (
+        scan_lane is ScanLane.UNIVERSE
+        and not pricing_refresh
+        and incoming_generation_id is not None
+    ):
         return incoming_generation_id
     if previous is not None:
         return previous.universe_generation_id
-    return None
+    return incoming_generation_id
 
 
 def _slot_generation_closed_at(
@@ -855,11 +909,15 @@ def _slot_generation_closed_at(
     *,
     incoming_generation_id: int | None,
     previous: CurrentMarketSlot | None,
+    pricing_refresh: bool = False,
 ) -> datetime | None:
-    """A UNIVERSE re-evaluation starts a new proving lifecycle; HOT keeps the old close."""
+    """A UNIVERSE re-evaluation starts a new proving lifecycle; pricing keeps the old close."""
 
-    del incoming_generation_id
-    if scan_lane is ScanLane.UNIVERSE:
+    if _is_universe_discovery(
+        scan_lane,
+        incoming_generation_id=incoming_generation_id,
+        pricing_refresh=pricing_refresh,
+    ):
         return None
     if previous is not None:
         return previous.universe_generation_closed_at
