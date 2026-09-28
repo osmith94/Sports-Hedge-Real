@@ -222,6 +222,71 @@ def _accumulation_eligible(trade: Any) -> bool:
     return trade.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}
 
 
+def _active_revalidation_reason(detail: str | None) -> str:
+    """Machine-readable predicate. No credentials and no book payloads."""
+
+    text = str(detail or "").strip()
+    marker = "revalidation_reason="
+    if marker in text:
+        token = text.split(marker, 1)[1].split()[0].strip().strip(",")
+        if token:
+            return token[:180]
+    if ":gone" in text:
+        return "market_gone"
+    if text.endswith(":kalshi_identity") or text.endswith(":identity"):
+        return "native_identity_mismatch"
+    if not text:
+        return "unspecified"
+    slug = "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in text)
+    return slug[:180] or "unspecified"
+
+
+def _active_revalidation_operator_copy(runtime: Any) -> str:
+    detail = None if runtime is None else getattr(runtime, "last_error_detail", None)
+    code = _active_revalidation_reason(None if detail is None else str(detail))
+    return f"ACTIVE refresh needs catalogue revalidation revalidation_reason={code}"
+
+
+def _active_refresh_venue(runtime: Any) -> str | None:
+    stage = "" if runtime is None else str(getattr(runtime, "last_error_stage", "") or "")
+    if stage == "get_market":
+        return "matchbook"
+    if stage == "order_book":
+        return "kalshi"
+    if stage == "catalogue_revalidation":
+        return "matchbook_kalshi"
+    return None
+
+
+def _active_refresh_result_payload(
+    trade: Any,
+    *,
+    status: Any,
+    runtime: Any,
+) -> dict[str, Any]:
+    from sports_hedge.paper.active_trade_journal import compact_native_ids
+
+    identity = None if runtime is None else getattr(runtime, "identity", None)
+    detail = None if runtime is None else getattr(runtime, "last_error_detail", None)
+    reason = None
+    if detail:
+        reason = _active_revalidation_reason(str(detail))
+    return {
+        "status": None if status is None else getattr(status, "value", str(status)),
+        "last_persist_error": getattr(runtime, "last_persist_error", None),
+        "trade_id": getattr(trade, "trade_id", None),
+        "canonical_market_id": getattr(trade, "canonical_market_id", None),
+        "canonical_event_id": getattr(trade, "canonical_event_id", None),
+        "register_canonical_key": None if identity is None else identity.register_canonical_key,
+        "catalogue_row_id": None if identity is None else identity.catalogue_row_id,
+        "venue": _active_refresh_venue(runtime),
+        "stage": None if runtime is None else getattr(runtime, "last_error_stage", None),
+        "failure_predicate": detail,
+        "revalidation_reason": reason if status is not None and getattr(status, "value", None) == "revalidation_needed" else None,
+        "native_ids": compact_native_ids(trade),
+    }
+
+
 class ScanCycleTimeout(TimeoutError):
     """Raised when a live-refresh cycle exceeds its bounded deadline."""
 
@@ -6289,6 +6354,24 @@ class LiveRefreshCoordinator:
             snapshot["operator_summary"] = summary
         return snapshot
 
+    def _active_trade_pricing_identity(self, trade: Any) -> Any:
+        """OPEN-trade exact IDs plus the unique persisted approved catalogue row.
+
+        Catalogue lookup is a local row read. It does not call providers and
+        does not rediscover events or markets.
+        """
+
+        from sports_hedge.paper.provider_identity import catalogue_rows_for_trade
+
+        store = None
+        engine = self._price_engine
+        if engine is not None:
+            store = getattr(engine, "catalogue_store", None)
+        if store is None:
+            store = self._catalogue_store
+        rows = catalogue_rows_for_trade(store, trade) if store is not None else []
+        return identity_from_open_trade(trade, catalogue_rows=rows)
+
     def _active_trade_fresh_fill_plan(
         self,
         operations: Any,
@@ -6349,7 +6432,7 @@ class LiveRefreshCoordinator:
         if status is PriceEngineItemStatus.REVALIDATION_NEEDED:
             return (
                 ActiveTradeReasonCode.REFRESH_REVALIDATION_NEEDED,
-                "ACTIVE refresh needs catalogue revalidation",
+                _active_revalidation_operator_copy(runtime),
             )
         if status is PriceEngineItemStatus.DEFERRED:
             return ActiveTradeReasonCode.REFRESH_DEFERRED, "ACTIVE refresh deferred on provider capacity"
@@ -6424,7 +6507,7 @@ class LiveRefreshCoordinator:
             PRICE_ENGINE_EXECUTION_CANDIDATE_LANE,
         )
 
-        identity = identity_from_open_trade(trade)
+        identity = self._active_trade_pricing_identity(trade)
         watchlist = getattr(operations, "watchlist", None)
         decision = getattr(fresh_plan, "decision", None)
         if identity is None or watchlist is None or decision is None:
@@ -6462,7 +6545,6 @@ class LiveRefreshCoordinator:
         from sports_hedge.paper.active_trade_journal import (
             ActiveTradeEventType,
             ActiveTradeReasonCode,
-            compact_native_ids,
         )
         from sports_hedge.application.provider_access import (
             PRICE_ENGINE_ACTIVE_TRADE_LANE,
@@ -6505,7 +6587,7 @@ class LiveRefreshCoordinator:
             PriceEngineSliceResult | None,
         ]:
             priced_at = self.now()
-            identity = identity_from_open_trade(trade)
+            identity = self._active_trade_pricing_identity(trade)
             if engine is None or identity is None:
                 return trade, priced_at, None, None, None
             slice_result = PriceEngineSliceResult()
@@ -6571,11 +6653,12 @@ class LiveRefreshCoordinator:
                 occurred_at=self.now(),
                 dedupe_key=f"refresh-result:{cycle_id}",
                 cycle_id=cycle_id,
-                payload={
-                    "status": None if status is None else getattr(status, "value", str(status)),
-                    "last_persist_error": getattr(runtime, "last_persist_error", None),
-                    "native_ids": compact_native_ids(trade),
-                },
+                venue=_active_refresh_venue(runtime),
+                payload=_active_refresh_result_payload(
+                    trade,
+                    status=status,
+                    runtime=runtime,
+                ),
             )
             journal_ok = bool(started_logged and result_logged)
             if not journal_ok:
