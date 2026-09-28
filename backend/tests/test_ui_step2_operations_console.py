@@ -26,7 +26,9 @@ from sports_hedge.application.price_engine import CataloguePriceEngine
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.domain.models import VenueName
 
-NOW = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+# Heartbeat uses LiveRefreshCoordinator.now() (wall clock). A frozen historical
+# NOW drops these synthetic rows once kickoff + radar ceiling have elapsed.
+NOW = datetime.now(UTC)
 
 
 def _fixture(
