@@ -2515,6 +2515,8 @@ class LiveRefreshCoordinator:
             engine.venue_costs = list(venue_costs)
         if fx_snapshots is not None:
             engine.fx_snapshots = list(fx_snapshots)
+            engine._fx_auto_resolved = False
+            engine._scanner_fx_bound = False
         engine.fixture_state = self._fixture_state
         selected = self.effective_universe_scope().selected_set()
         engine.set_operator_scope(selected, exempt_event_ids=self._open_paper_event_ids())
@@ -6483,13 +6485,15 @@ class LiveRefreshCoordinator:
             jobs.append(trade)
 
         engine = self._price_engine
-        if isinstance(engine, CataloguePriceEngine) and engine.paper_scan is None:
-            # ACTIVE can be the first lane after process restart. Ensure its
-            # exact-ID observations populate the same reverse-book catalogue
-            # used by position management; this does not add provider calls.
-            from sports_hedge.api.paper import scheduled_paper_scan_service
+        if isinstance(engine, CataloguePriceEngine):
+            if engine.paper_scan is None:
+                # ACTIVE can be the first lane after process restart. Ensure its
+                # exact-ID observations populate the same reverse-book catalogue
+                # used by position management; this does not add provider calls.
+                from sports_hedge.api.paper import scheduled_paper_scan_service
 
-            engine.paper_scan = scheduled_paper_scan_service()
+                engine.paper_scan = scheduled_paper_scan_service()
+            engine.begin_scanner_economic_fx(self.now())
 
         async def _price_one(
             trade: Any,

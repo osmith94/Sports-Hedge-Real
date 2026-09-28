@@ -225,9 +225,7 @@ export function classifyPairs(row: KalshiFixtureMarketInventoryRow): {
             comparable: true,
           },
         ],
-        discoveredNotes: assumed
-          ? ["1X2 paper-mode assumption; not independently settlement-proven; never live-execution eligible."]
-          : [],
+        discoveredNotes: assumed ? [paperAssumptionNote(row)] : [],
       };
     }
   }
@@ -272,6 +270,33 @@ export function classifyPairs(row: KalshiFixtureMarketInventoryRow): {
     badges,
     discoveredNotes,
   };
+}
+
+const NFL_PRIMARY_FAMILIES = new Set(["game_winner", "point_spread", "total_points"]);
+const MLB_PRIMARY_FAMILIES = new Set(["game_winner", "total_runs"]);
+
+export function isPrimaryApprovedFamily(
+  sport: string | null | undefined,
+  family: string | null | undefined,
+): boolean {
+  const code = (sport || "").toLowerCase().replaceAll(" ", "_");
+  const fam = (family || "").toLowerCase();
+  if (code === "american_football" || code === "nfl") return NFL_PRIMARY_FAMILIES.has(fam);
+  if (code === "baseball" || code === "mlb") return MLB_PRIMARY_FAMILIES.has(fam);
+  return true;
+}
+
+function paperAssumptionNote(row: KalshiFixtureMarketInventoryRow): string {
+  const family = (row.family || "").toLowerCase();
+  if (
+    family === "game_winner" ||
+    family === "point_spread" ||
+    family === "total_points" ||
+    family === "total_runs"
+  ) {
+    return "PAPER structural equivalence; not independently settlement-proven; never live-execution eligible.";
+  }
+  return "1X2 paper-mode assumption; not independently settlement-proven; never live-execution eligible.";
 }
 
 function marketTitle(row: KalshiFixtureMarketInventoryRow): string {

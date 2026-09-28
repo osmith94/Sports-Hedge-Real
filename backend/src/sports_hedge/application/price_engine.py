@@ -446,6 +446,9 @@ class CataloguePriceEngine:
         )
         self.venue_costs = list(venue_costs or [])
         self.fx_snapshots = list(fx_snapshots or [])
+        self._fx_auto_resolved = False
+        self._scanner_fx_bound = False
+        self._scanner_fx_reason: str | None = None
         self.on_item_decision = on_item_decision
         self.on_hot_promotion = on_hot_promotion
         self.observability = observability if observability is not None else ScannerObservabilitySink()
@@ -967,6 +970,45 @@ class CataloguePriceEngine:
             return cap
         return max(0.0, min(cap, remaining))
 
+    def begin_scanner_economic_fx(self, as_of: datetime | None = None) -> None:
+        """Resolve one USD→GBP context for this pricing cycle.
+
+        Caller-supplied snapshots stay in place. An automatically resolved
+        context is cleared and refreshed only when this method runs again.
+        A missing or stale service rate is one shared fail-closed reason.
+        """
+
+        from sports_hedge.fx.scanner_context import bind_lane_fx
+
+        if self._fx_auto_resolved:
+            self.fx_snapshots = []
+            self._fx_auto_resolved = False
+        evaluated = as_of or self.now()
+        explicit = list(self.fx_snapshots) if self.fx_snapshots else None
+        service = getattr(self.paper_scan, "fx_service", None) if self.paper_scan is not None else None
+        snapshots, reason = bind_lane_fx(
+            explicit=explicit,
+            fx_service=service,
+            as_of=evaluated,
+        )
+        self._scanner_fx_reason = reason
+        self._scanner_fx_bound = True
+        if snapshots:
+            self.fx_snapshots = list(snapshots)
+            self._fx_auto_resolved = explicit is None
+        else:
+            self.fx_snapshots = []
+            self._fx_auto_resolved = False
+
+    def _lane_fx_kwargs(self) -> dict[str, Any]:
+        if not self._scanner_fx_bound:
+            self.begin_scanner_economic_fx(self.now())
+        if self.fx_snapshots:
+            return {"fx_snapshots": list(self.fx_snapshots)}
+        if self._scanner_fx_reason:
+            return {"fx_unavailable_reason": self._scanner_fx_reason}
+        return {"fx_snapshots": None}
+
     async def run_slice(
         self,
         priority: PriceEnginePriority,
@@ -975,6 +1017,7 @@ class CataloguePriceEngine:
         now: datetime | None = None,
     ) -> PriceEngineSliceResult:
         evaluated = now or self.now()
+        self.begin_scanner_economic_fx(evaluated)
         self.reconstruct()
         if priority is PriceEnginePriority.HOT:
             self.note_hot_provider_demand(evaluated)
@@ -1857,8 +1900,8 @@ class CataloguePriceEngine:
         if self.paper_scan is not None:
             scan_kwargs: dict[str, Any] = {
                 "venue_costs": self.venue_costs or None,
-                "fx_snapshots": self.fx_snapshots or None,
                 "fixture_canonical_event_id": identity.canonical_event_id,
+                **self._lane_fx_kwargs(),
             }
             settings = getattr(self.paper_scan, "settings", None)
             if settings is not None:
@@ -1985,8 +2028,8 @@ class CataloguePriceEngine:
     def _scan_kwargs(self, identity: DerivedPriceEngineItem) -> dict[str, Any]:
         scan_kwargs: dict[str, Any] = {
             "venue_costs": self.venue_costs or None,
-            "fx_snapshots": self.fx_snapshots or None,
             "fixture_canonical_event_id": identity.canonical_event_id,
+            **self._lane_fx_kwargs(),
         }
         settings = getattr(self.paper_scan, "settings", None)
         if settings is not None:
@@ -3016,7 +3059,7 @@ class CataloguePriceEngine:
             ),
             decisions_by_pair={} if decision is None else {pair_key: decision},
             venue_costs=self.venue_costs or None,
-            fx_snapshots=self.fx_snapshots or None,
+            fx_snapshots=self._lane_fx_kwargs().get("fx_snapshots"),
             cost_resolver=None if self.paper_scan is None else getattr(self.paper_scan, "cost_resolver", None),
         )
         rows = _overlay_decision_inventory(
@@ -3025,6 +3068,18 @@ class CataloguePriceEngine:
             matchbook_obs=matchbook_obs,
             kalshi_obs=kalshi_obs,
             decision=decision,
+        )
+        from sports_hedge.catalogue.coverage_rows import fixture_catalogue_coverage
+
+        prior_markets: list[Any] = []
+        prior = self.fixture_state.detail(identity.canonical_event_id, now=observed_at)
+        if prior is not None:
+            prior_markets = list(prior.markets)
+        fixture.catalogue_coverage = fixture_catalogue_coverage(
+            [*prior_markets, *rows],
+            matchbook_matched=True,
+            kalshi_matched=True,
+            sport=fixture.sport,
         )
         if decision is not None:
             edge = decision_net_edge(decision)
@@ -3052,6 +3107,7 @@ class CataloguePriceEngine:
             else ScanLane.HOT,
             now=observed_at,
             reset_generation=event.reset_generation,
+            pricing_refresh=True,
         )
 
     async def _handoff_item_decision(
@@ -3938,16 +3994,66 @@ def _required_tickers(identity: DerivedPriceEngineItem) -> list[str]:
 
 
 def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, Any]:
+    """Rebuild the Matchbook event the normaliser needs to keep sport identity.
+
+    Catalogue rows do not store the raw event. NFL and MLB reconstruction must
+    still carry the sport id and competition tag those detectors require, and
+    the title order those parsers accept. Soccer keeps Home vs Away.
+    """
+
     kickoff = identity.kickoff_utc or datetime.now(UTC)
     key = str(identity.register_canonical_key or "")
     competition = str(identity.competition or "").upper()
+    home = identity.home_canonical or "Home"
+    away = identity.away_canonical or "Away"
     if key.startswith("MLB_") or competition == "MLB":
-        sport_name = "Baseball"
-        competition_name = identity.competition or "mlb"
-    elif key.startswith("NFL_") or competition == "NFL":
-        sport_name = "American Football"
-        competition_name = identity.competition or "NFL"
-    elif key.startswith("NBA_") or competition == "NBA":
+        from sports_hedge.mlb.constants import (
+            MATCHBOOK_BASEBALL_SPORT_ID,
+            MATCHBOOK_MLB_COMPETITION_TAG_ID,
+        )
+
+        return {
+            "id": identity.matchbook_event_id,
+            "name": f"{away} at {home}",
+            "start": kickoff.isoformat(),
+            "sport-id": MATCHBOOK_BASEBALL_SPORT_ID,
+            "sport-name": "Baseball",
+            "competition-name": identity.competition or "mlb",
+            "meta-tags": [
+                {
+                    "id": str(MATCHBOOK_BASEBALL_SPORT_ID),
+                    "name": "Baseball",
+                    "type": "SPORT",
+                },
+                {
+                    "id": MATCHBOOK_MLB_COMPETITION_TAG_ID,
+                    "name": "MLB",
+                    "type": "COMPETITION",
+                },
+            ],
+            "status": "open",
+        }
+    if key.startswith("NFL_") or competition == "NFL":
+        from sports_hedge.nfl.constants import MATCHBOOK_NFL_COMPETITION_TAG_ID
+
+        return {
+            "id": identity.matchbook_event_id,
+            "name": f"{away} at {home}",
+            "start": kickoff.isoformat(),
+            "sport-id": "1",
+            "sport-name": "American Football",
+            "competition-name": identity.competition or "NFL",
+            "meta-tags": [
+                {"id": "1", "name": "American Football", "type": "SPORT"},
+                {
+                    "id": MATCHBOOK_NFL_COMPETITION_TAG_ID,
+                    "name": "NFL",
+                    "type": "COMPETITION",
+                },
+            ],
+            "status": "open",
+        }
+    if key.startswith("NBA_") or competition == "NBA":
         sport_name = "Basketball"
         competition_name = identity.competition or "NBA"
     else:
@@ -3955,7 +4061,7 @@ def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, An
         competition_name = identity.competition or "Premier League"
     return {
         "id": identity.matchbook_event_id,
-        "name": f"{identity.home_canonical or 'Home'} vs {identity.away_canonical or 'Away'}",
+        "name": f"{home} vs {away}",
         "start": kickoff.isoformat(),
         "sport-name": sport_name,
         "competition-name": competition_name,
@@ -3988,6 +4094,7 @@ def _canonical_kalshi_market(identity: DerivedPriceEngineItem) -> CanonicalMarke
         kickoff_utc=identity.kickoff_utc,
         source_venue=VenueName.KALSHI,
         source_event_id=identity.kalshi_event_ticker,
+        scheduled_game_key=_scheduled_game_key_for_identity(identity),
     )
     return CanonicalMarket(
         event=event,
@@ -4041,6 +4148,7 @@ def _canonical_polymarket_market(identity: DerivedPriceEngineItem) -> CanonicalM
         kickoff_utc=identity.kickoff_utc,
         source_venue=VenueName.POLYMARKET,
         source_event_id=identity.polymarket_event_id,
+        scheduled_game_key=_scheduled_game_key_for_identity(identity),
     )
     return CanonicalMarket(
         event=event,
@@ -4068,6 +4176,24 @@ def _discovered_fixture_sport(identity: DerivedPriceEngineItem) -> str:
         competition=identity.competition,
         register_canonical_key=identity.register_canonical_key,
     )
+
+
+def _scheduled_game_key_for_identity(identity: DerivedPriceEngineItem) -> str | None:
+    """Restore the MLB minute key Matchbook reconstruction already derives.
+
+    Catalogue rows do not store ``scheduled_game_key``. Matchbook MLB events
+    rebuild it from the catalogue kickoff. Kalshi and Polymarket must use that
+    same minute or ``mlb_scheduled_games_compatible`` fail-closes on a missing
+    key. Do not invent a Game 1/Game 2 ordinal: the catalogue did not store one.
+    """
+
+    from sports_hedge.mlb.constants import MLB_SPORT
+
+    if _sport_for_identity(identity) != MLB_SPORT or identity.kickoff_utc is None:
+        return None
+    from sports_hedge.mlb.normalize import scheduled_game_key
+
+    return scheduled_game_key(identity.kickoff_utc)
 
 
 def _sport_for_identity(identity: DerivedPriceEngineItem) -> str:

@@ -13,6 +13,7 @@ def normalize_text(value: str) -> str:
 
     This deliberately avoids silently dropping football terms such as FC, United,
     City or Athletic. Venue-specific aliases belong in the explicit registry.
+    Underscores become spaces, so ``money_line`` is ``money line``.
     """
 
     decomposed = unicodedata.normalize("NFKD", value)
@@ -20,6 +21,19 @@ def normalize_text(value: str) -> str:
     lowered = ascii_text.casefold()
     normalized = _NON_ALNUM.sub(" ", lowered).strip()
     return " ".join(normalized.split())
+
+
+_MONEY_LINE_LABELS = frozenset({"money line", "moneyline"})
+
+
+def is_money_line_label(value: str | None) -> bool:
+    """True for Matchbook moneyline labels after ``normalize_text``.
+
+    ``market-type: money_line`` becomes ``money line``. Callers must not look
+    for the underscore form after normalisation.
+    """
+
+    return normalize_text(str(value or "")) in _MONEY_LINE_LABELS
 
 
 @dataclass(slots=True)

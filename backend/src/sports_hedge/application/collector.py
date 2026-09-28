@@ -1400,10 +1400,17 @@ class ReadOnlyCrossVenueCollector:
                 if resolved_lane != ScanLane.HOT.value:
                     skipped_by_resume = max(0, clusters_before_resume - len(clusters))
 
+            from sports_hedge.fx.scanner_context import bind_lane_fx
+
+            bound_fx, fx_unavailable_reason = bind_lane_fx(
+                explicit=fx_snapshots,
+                fx_service=getattr(self.paper_scan, "fx_service", None),
+                as_of=started_at,
+            )
             scan_kwargs = {
                 "fee_snapshots": fee_snapshots,
                 "venue_costs": venue_costs,
-                "fx_snapshots": fx_snapshots,
+                "fx_snapshots": bound_fx,
                 "capital_limit_gbp": capital_limit_gbp,
                 "minimum_net_edge": minimum_net_edge,
                 "maximum_execution_risk": maximum_execution_risk,
@@ -1411,6 +1418,8 @@ class ReadOnlyCrossVenueCollector:
                 "assumed_latency_ms": assumed_latency_ms,
                 "recent_volatility_bps": recent_volatility_bps,
             }
+            if fx_unavailable_reason:
+                scan_kwargs["fx_unavailable_reason"] = fx_unavailable_reason
             # Truncated clustering still scans whatever union-find completed.
             # Skipping scan here leftovered the whole discovered universe as
             # scan_budget_exhausted even when healthy venues had already returned.
@@ -4124,6 +4133,7 @@ class ReadOnlyCrossVenueCollector:
                 kalshi_matched=bool(leftover.kalshi_matched),
                 polymarket_matched=bool(leftover.polymarket_matched),
                 target_competition_code=leftover.target_competition_code,
+                sport=leftover.sport,
             )
             return leftover, decisions, inventory_rows, market_counts, order_books_fetched, 0
         if fetch_unavailable and not compared_enough_venues:
@@ -4151,6 +4161,7 @@ class ReadOnlyCrossVenueCollector:
             kalshi_matched=bool(fixture.kalshi_matched),
             polymarket_matched=bool(fixture.polymarket_matched),
             target_competition_code=fixture.target_competition_code,
+            sport=fixture.sport,
         )
         discovered_families = _normalized_market_families(venue_markets)
         market_evidence = build_market_relationship_evidence(
@@ -4429,6 +4440,7 @@ class ReadOnlyCrossVenueCollector:
             kalshi_matched=bool(fixture.kalshi_matched),
             polymarket_matched=bool(fixture.polymarket_matched),
             target_competition_code=fixture.target_competition_code,
+            sport=fixture.sport,
         )
         return (
             fixture,

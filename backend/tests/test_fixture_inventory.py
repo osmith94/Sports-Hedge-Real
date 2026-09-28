@@ -43,7 +43,7 @@ from sports_hedge.fees.cost import CostKnownStatus, FeeBasis, MarketAction, Venu
 from sports_hedge.fees.resolver import VenueCostResolver
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
-from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.matching.markets import MarketMatcher, MarketMatchResult
 from sports_hedge.normalization.identity import canonical_source_event_id
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
@@ -724,6 +724,57 @@ def test_inventory_explicit_unknown_fee_is_not_replaced_by_registry() -> None:
     assert rows[0].matchbook is not None
     assert rows[0].matchbook.fee_status == "unknown"
     assert rows[0].matchbook.fee_source == "test-unknown-fee"
+
+
+def _rejected_pair_decision(*reasons: str) -> PaperScanDecision:
+    return PaperScanDecision(
+        market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=["register_admitted"]),
+        eligible_for_paper_simulation=False,
+        rejection_reasons=list(reasons),
+    )
+
+
+def _assert_comparable_despite_economic_rejection(reason: str) -> None:
+    matchbook = _market(VenueName.MATCHBOOK, family=MarketFamily.MATCH_RESULT, source_id="mb-1x2")
+    kalshi = _market(VenueName.KALSHI, family=MarketFamily.MATCH_RESULT, source_id="k-1x2")
+    decision = _rejected_pair_decision(reason)
+    rows = assemble_fixture_inventory(
+        [_inventory(matchbook, name="Match Odds")],
+        [],
+        kalshi_markets=[_inventory(kalshi, name="GAME")],
+        decisions_by_pair={
+            (
+                VenueName.MATCHBOOK.value,
+                "mb-1x2",
+                VenueName.KALSHI.value,
+                "k-1x2",
+            ): decision
+        },
+    )
+    row = next(item for item in rows if item.matchbook is not None and item.kalshi is not None)
+    assert row.comparison_status in {
+        InventoryComparisonStatus.MATCHED_EQUIVALENT,
+        InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT,
+    }
+    assert reason in row.rejection_reasons
+    assert row.solver_is_arbitrage is False
+    assert row.entered_solver is False
+
+
+def test_pricing_rejection_missing_fx_does_not_revoke_equivalent() -> None:
+    _assert_comparable_despite_economic_rejection("missing_fx_rate:USD")
+
+
+def test_pricing_rejection_missing_venue_cost_does_not_revoke_equivalent() -> None:
+    _assert_comparable_despite_economic_rejection("missing_venue_cost:KALSHI")
+
+
+def test_pricing_rejection_stale_quote_does_not_revoke_equivalent() -> None:
+    _assert_comparable_despite_economic_rejection("stale_quote")
+
+
+def test_pricing_rejection_unknown_quote_age_does_not_revoke_equivalent() -> None:
+    _assert_comparable_despite_economic_rejection("unknown_quote_age")
 
 
 def test_inventory_quote_json_keeps_full_decimal_precision() -> None:

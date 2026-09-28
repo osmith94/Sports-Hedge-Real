@@ -35,7 +35,7 @@ from sports_hedge.nfl.teams import (
     require_resolved_nfl_team,
     resolve_nfl_team,
 )
-from sports_hedge.normalization.text import normalize_text
+from sports_hedge.normalization.text import is_money_line_label, normalize_text
 from sports_hedge.normalization.venues import (
     VenueNormalizationError,
     _first,
@@ -331,7 +331,7 @@ def matchbook_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Cano
     runners_payload = [item for item in (payload.get("runners") or []) if isinstance(item, dict)]
     if not runners_payload:
         raise VenueNormalizationError(f"Matchbook NFL market {source_market_id} has no runners")
-    if market_type in {"money_line", "moneyline"} or normalize_text(name) == "moneyline":
+    if is_money_line_label(market_type) or is_money_line_label(name):
         family = MarketFamily.GAME_WINNER
         line = None
         runners = [

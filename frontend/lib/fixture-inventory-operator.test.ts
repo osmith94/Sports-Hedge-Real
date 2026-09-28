@@ -10,6 +10,7 @@ import {
 import {
   decisionBadgeClass,
   inventoryCardViewModel,
+  isPrimaryApprovedFamily,
   operatorDecision,
   paperActionForRow,
   toneClass,
@@ -426,5 +427,41 @@ describe("paper action CTA visibility", () => {
     ]);
     expect(blocked.eligible).toBe(false);
     expect(blocked.href).toBeNull();
+  });
+});
+
+describe("sport-aware approved families", () => {
+  it("keeps football rows primary and limits NFL and MLB to Stage-1 families", () => {
+    expect(isPrimaryApprovedFamily("football", "match_result")).toBe(true);
+    expect(isPrimaryApprovedFamily("american_football", "game_winner")).toBe(true);
+    expect(isPrimaryApprovedFamily("american_football", "point_spread")).toBe(true);
+    expect(isPrimaryApprovedFamily("american_football", "total_points")).toBe(true);
+    expect(isPrimaryApprovedFamily("american_football", "match_result")).toBe(false);
+    expect(isPrimaryApprovedFamily("baseball", "game_winner")).toBe(true);
+    expect(isPrimaryApprovedFamily("baseball", "total_runs")).toBe(true);
+    expect(isPrimaryApprovedFamily("mlb", "first_team_to_score")).toBe(false);
+  });
+
+  it("uses 1X2 paper copy for football and structural copy for NFL families", () => {
+    const twoWay = [quote("home", 1.91, 200), quote("away", 2.05, 200)];
+    const football = inventoryCardViewModel(
+      row({
+        comparison_status: "paper_assumed_equivalent",
+        matchbook: facts("matchbook", homeDrawAway),
+        kalshi: facts("kalshi", homeDrawAway),
+      }),
+    );
+    expect(football.discoveredNotes.join(" ")).toContain("1X2 paper-mode assumption");
+    const nfl = inventoryCardViewModel(
+      row({
+        family: "game_winner",
+        display_name: "Game winner",
+        comparison_status: "paper_assumed_equivalent",
+        matchbook: facts("matchbook", twoWay, { family: "game_winner" }),
+        kalshi: facts("kalshi", twoWay, { family: "game_winner" }),
+      }),
+    );
+    expect(nfl.discoveredNotes.join(" ")).toContain("PAPER structural equivalence");
+    expect(nfl.title.toLowerCase()).toContain("game winner");
   });
 });

@@ -92,6 +92,7 @@ class LaneObservation:
     source_events: tuple[StoredSourceEvent, ...] = ()
     evaluated: bool = True
     universe_generation_id: int | None = None
+    pricing_refresh: bool = False
 
 
 @dataclass(frozen=True)
@@ -394,6 +395,7 @@ class FixtureCurrentStateStore:
         universe_generation_id: int | None = None,
         reset_generation: int | None = None,
         publish_universe_catalogue: bool = False,
+        pricing_refresh: bool = False,
     ) -> None:
         with self._lock:
             if (
@@ -407,6 +409,7 @@ class FixtureCurrentStateStore:
                 now=now,
                 universe_generation_id=universe_generation_id,
                 publish_universe_catalogue=publish_universe_catalogue,
+                pricing_refresh=pricing_refresh,
             )
 
     def upsert_evaluated_fixture(
@@ -452,13 +455,14 @@ class FixtureCurrentStateStore:
         now: datetime | None = None,
         universe_generation_id: int | None = None,
         publish_universe_catalogue: bool = False,
+        pricing_refresh: bool = False,
     ) -> None:
         lane = ScanLane(scan_lane) if not isinstance(scan_lane, ScanLane) else scan_lane
         if lane is ScanLane.DROP:
             lane = ScanLane.UNIVERSE
         scanned_at = require_aware_instant(now or report.completed_at, "last_scanned_at")
         stamped_generation_id = self._resolve_upsert_generation_id(
-            lane, universe_generation_id, report
+            lane, universe_generation_id, report, pricing_refresh=pricing_refresh
         )
         fixtures = {
             fixture.canonical_event_id: fixture for fixture in report.discovered_fixtures
@@ -526,9 +530,10 @@ class FixtureCurrentStateStore:
                 source_events=source_events.get(canonical_id) or source_events.get(target_id, ()),
                 evaluated=evaluated,
                 universe_generation_id=stamped_generation_id,
+                pricing_refresh=pricing_refresh,
             )
             self._upsert_observation(target_id, observation)
-            if publish_universe_catalogue and lane is ScanLane.UNIVERSE:
+            if publish_universe_catalogue and lane is ScanLane.UNIVERSE and not pricing_refresh:
                 if target_id != canonical_id:
                     self._universe_catalogue.remove(canonical_id, seen_at=scanned_at)
                 self._universe_catalogue.upsert(
@@ -641,8 +646,10 @@ class FixtureCurrentStateStore:
         lane: ScanLane,
         explicit: int | None,
         report: CollectionReport,
+        *,
+        pricing_refresh: bool = False,
     ) -> int | None:
-        if lane is not ScanLane.UNIVERSE:
+        if pricing_refresh or lane is not ScanLane.UNIVERSE:
             return None
         if explicit is not None:
             return int(explicit)
@@ -1618,6 +1625,12 @@ class FixtureCurrentStateStore:
             if record.set_lane(observation):
                 record.leftover_this_pass = True
             return
+        if observation.pricing_refresh and observation.scan_lane is not ScanLane.HOT:
+            # BACKGROUND pricing refreshes economics only. Do not replace the
+            # UNIVERSE discovery observation or its generation provenance.
+            record.merge_markets(observation)
+            record.leftover_this_pass = False
+            return
         if record.set_lane(observation):
             record.merge_markets(observation)
             record.leftover_this_pass = False
@@ -1881,6 +1894,7 @@ class _FixtureRecord:
             paper_market_ids=observation.paper_market_ids,
             evaluated=observation.evaluated,
             universe_generation_id=observation.universe_generation_id,
+            pricing_refresh=observation.pricing_refresh,
         )
 
     def prune_markets(self, now: datetime | None, **kwargs: Any) -> None:
@@ -1913,6 +1927,7 @@ class _FixtureRecord:
                 source_events=observation.source_events,
                 evaluated=observation.evaluated,
                 universe_generation_id=observation.universe_generation_id,
+                pricing_refresh=observation.pricing_refresh,
             )
             self.set_lane(rewritten)
         if other.markets:

@@ -26,10 +26,11 @@ from sports_hedge.catalogue.registry import (
 from sports_hedge.catalogue.states import CatalogueArchetype
 from sports_hedge.domain.football import MarketFamily, line_push_possible
 from sports_hedge.domain.models import VenueName
+from sports_hedge.normalization.text import normalize_text
 
 
 class FixtureArchetypeCoverage(BaseModel):
-    archetype: CatalogueArchetype
+    archetype: CatalogueArchetype | str
     display_label: str
     state: CatalogueCoverageState
     reason: str
@@ -91,18 +92,27 @@ def fixture_catalogue_coverage(
     kalshi_matched: bool = False,
     polymarket_matched: bool = False,
     target_competition_code: str | None = None,
+    sport: str | None = None,
 ) -> FixtureCatalogueCoverage:
-    """One diagnostic row per Tenet-20 target archetype for a fixture."""
+    """Diagnostic rows for the fixture's approved market families.
+
+    Football keeps the Tenet-20 archetype list. NFL and MLB use their Stage-1
+    families and only the exact lines that were discovered.
+    """
 
     pair = coverage_venue_pair(
         matchbook=matchbook_matched,
         kalshi=kalshi_matched,
         polymarket=polymarket_matched,
     ) or "matchbook_kalshi"
-    observed = _index_inventory(inventory_rows or [])
-    rows: list[FixtureArchetypeCoverage] = []
-    for archetype in target_archetypes():
-        rows.append(
+    lane = _sport_coverage_lane(sport)
+    if lane == "nfl":
+        rows = _sport_family_rows(inventory_rows or [], _NFL_COVERAGE_SPECS)
+    elif lane == "mlb":
+        rows = _sport_family_rows(inventory_rows or [], _MLB_COVERAGE_SPECS)
+    else:
+        observed = _index_inventory(inventory_rows or [])
+        rows = [
             _row_for_archetype(
                 archetype,
                 pair,
@@ -112,7 +122,8 @@ def fixture_catalogue_coverage(
                 polymarket_matched=polymarket_matched,
                 target_competition_code=target_competition_code,
             )
-        )
+            for archetype in target_archetypes()
+        ]
     return FixtureCatalogueCoverage(
         venue_pair=pair,
         rows=rows,
@@ -131,7 +142,9 @@ def aggregate_coverage_by_archetype(
     totals: dict[str, Counter[str]] = {item.value: Counter() for item in target_archetypes()}
     for coverage in fixtures:
         for row in coverage.rows:
-            totals[row.archetype.value][row.state.value] += 1
+            key = _archetype_key(row.archetype)
+            totals.setdefault(key, Counter())
+            totals[key][row.state.value] += 1
     return {archetype: dict(sorted(counts.items())) for archetype, counts in totals.items()}
 
 
@@ -346,6 +359,107 @@ def _human_review_reason(reason: str) -> str:
     if "incomplete_settlement" in folded or "catalogue_review_required" in folded:
         return "Kalshi settlement proof missing"
     return reason
+
+
+_NFL_COVERAGE_SPECS: tuple[tuple[str, str, MarketFamily, bool], ...] = (
+    ("nfl_game_winner", "Game Winner", MarketFamily.GAME_WINNER, False),
+    ("nfl_point_spread", "Point Spread", MarketFamily.POINT_SPREAD, True),
+    ("nfl_total_points", "Total Points", MarketFamily.TOTAL_POINTS, True),
+)
+_MLB_COVERAGE_SPECS: tuple[tuple[str, str, MarketFamily, bool], ...] = (
+    ("mlb_game_winner", "Game Winner", MarketFamily.GAME_WINNER, False),
+    ("mlb_total_runs", "Total Runs", MarketFamily.TOTAL_RUNS, True),
+)
+
+
+def _sport_coverage_lane(sport: str | None) -> str | None:
+    token = normalize_text(str(sport or "")).replace(" ", "_")
+    if token in {"american_football", "nfl"}:
+        return "nfl"
+    if token in {"baseball", "mlb"}:
+        return "mlb"
+    return None
+
+
+def _archetype_key(archetype: CatalogueArchetype | str) -> str:
+    if isinstance(archetype, CatalogueArchetype):
+        return archetype.value
+    return str(archetype)
+
+
+def _family_value(row: Any) -> str:
+    family = getattr(row, "family", None)
+    if family is None:
+        return ""
+    if isinstance(family, MarketFamily):
+        return family.value
+    return str(family)
+
+
+def _sport_family_rows(
+    inventory_rows: list[Any],
+    specs: tuple[tuple[str, str, MarketFamily, bool], ...],
+) -> list[FixtureArchetypeCoverage]:
+    grouped: dict[str, list[Any]] = {}
+    for row in inventory_rows:
+        grouped.setdefault(_family_value(row), []).append(row)
+    built: list[FixtureArchetypeCoverage] = []
+    for archetype, label, family, lined in specs:
+        hits = grouped.get(family.value, [])
+        if not lined:
+            built.append(_sport_coverage_row(archetype, label, hits, line=None))
+            continue
+        by_line = _group_hits_by_line(hits)
+        if not by_line:
+            built.append(_sport_coverage_row(archetype, label, [], line=None))
+            continue
+        for line, group in by_line:
+            built.append(
+                _sport_coverage_row(archetype, f"{label} {line}", group, line=line)
+            )
+    return built
+
+
+def _group_hits_by_line(hits: list[Any]) -> list[tuple[str, list[Any]]]:
+    grouped: dict[str, list[Any]] = {}
+    for row in hits:
+        token = _line_token(row)
+        if not token:
+            continue
+        grouped.setdefault(token, []).append(row)
+    return sorted(grouped.items(), key=lambda item: item[0])
+
+
+def _sport_coverage_row(
+    archetype: str,
+    label: str,
+    hits: list[Any],
+    *,
+    line: str | None,
+) -> FixtureArchetypeCoverage:
+    mb_present = any(getattr(row, "matchbook", None) is not None for row in hits)
+    kalshi_present = any(getattr(row, "kalshi", None) is not None for row in hits)
+    pm_present = any(getattr(row, "polymarket", None) is not None for row in hits)
+    if not hits:
+        return FixtureArchetypeCoverage(
+            archetype=archetype,
+            display_label=label,
+            state=CatalogueCoverageState.NOT_LISTED,
+            reason="venue_can_offer_archetype_but_this_fixture_has_no_listed_market",
+            line=line,
+        )
+    state, reason, operational = _state_from_hits(hits)
+    return FixtureArchetypeCoverage(
+        archetype=archetype,
+        display_label=label,
+        state=state,
+        reason=reason,
+        operational_approved=operational,
+        line=line,
+        matchbook_present=mb_present,
+        kalshi_present=kalshi_present,
+        polymarket_present=pm_present,
+    )
 
 
 def _line_label(hits: list[Any]) -> str | None:

@@ -31,7 +31,7 @@ from sports_hedge.nba.markets import (
 )
 from sports_hedge.nba.settlement import nba_paper_settlement
 from sports_hedge.nba.teams import require_resolved_nba_team, resolve_nba_team
-from sports_hedge.normalization.text import normalize_text
+from sports_hedge.normalization.text import is_money_line_label, normalize_text
 from sports_hedge.normalization.venues import (
     VenueNormalizationError,
     _first,
@@ -340,7 +340,7 @@ def matchbook_nba_market(event: CanonicalEvent, payload: dict[str, Any]) -> Cano
     runners_payload = [item for item in (payload.get("runners") or []) if isinstance(item, dict)]
     if not runners_payload:
         raise VenueNormalizationError(f"Matchbook NBA market {source_market_id} has no runners")
-    if market_type in {"money_line", "moneyline"} or normalize_text(name) == "moneyline":
+    if is_money_line_label(market_type) or is_money_line_label(name):
         family = MarketFamily.GAME_WINNER
         line = None
         runners = [

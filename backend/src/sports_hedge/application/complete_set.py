@@ -60,6 +60,7 @@ COMPLETE_OUTCOME_SPACE: dict[MarketFamily, frozenset[CanonicalOutcome]] = {
     MarketFamily.GAME_WINNER: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
     MarketFamily.POINT_SPREAD: frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY}),
     MarketFamily.TOTAL_POINTS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
+    MarketFamily.TOTAL_RUNS: frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER}),
 }
 
 LINE_FAMILIES: frozenset[MarketFamily] = frozenset(

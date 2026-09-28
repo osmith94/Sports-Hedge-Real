@@ -33,7 +33,7 @@ from sports_hedge.mlb.teams import (
     require_resolved_mlb_team,
     resolve_mlb_team,
 )
-from sports_hedge.normalization.text import normalize_text
+from sports_hedge.normalization.text import is_money_line_label, normalize_text
 from sports_hedge.normalization.venues import (
     VenueNormalizationError,
     _first,
@@ -449,7 +449,7 @@ def matchbook_mlb_market(event: CanonicalEvent, payload: dict[str, Any]) -> Cano
     market_type = normalize_text(str(payload.get("market-type") or payload.get("market_type") or ""))
     _reject_non_stage1(name, market_type)
     runners_raw = [item for item in payload.get("runners") or [] if isinstance(item, dict)]
-    if market_type == "money_line" or normalize_text(name) == "moneyline":
+    if is_money_line_label(market_type) or is_money_line_label(name):
         runners = []
         for runner in runners_raw:
             label = str(runner.get("name") or "")

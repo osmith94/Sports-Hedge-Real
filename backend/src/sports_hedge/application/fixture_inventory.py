@@ -225,10 +225,13 @@ def market_display_name(
     if family == "game_winner":
         return "Game winner"
     if family == "point_spread":
-        return "Point spread"
-    if family == "total_points":
-        return "Total points"
-    label = family.replace("_", " ").title()
+        label = "Point spread"
+    elif family == "total_points":
+        label = "Total points"
+    elif family == "total_runs":
+        label = "Total runs"
+    else:
+        label = family.replace("_", " ").title()
     if line is not None:
         line_text = format(line, "f").rstrip("0").rstrip(".") if "." in format(line, "f") else format(line, "f")
         label = f"{label} {line_text}"
@@ -783,12 +786,16 @@ def _classify_pair(
     reason: str | None = admission.assessment.reason if status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT else None
     if rejections:
         mapped = _status_from_rejections(rejections)
-        if mapped is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
+        mapped_reason = next(
+            (item for item in rejections if _rejection_maps_to(item) is mapped),
+            rejections[0],
+        )
+        if _is_economic_comparison_status(mapped):
+            # Pricing/economics must not revoke a proven catalogue relationship.
+            reason = mapped_reason
+        elif mapped is not InventoryComparisonStatus.MATCHED_EQUIVALENT:
             status = mapped
-            reason = next(
-                (item for item in rejections if _rejection_maps_to(item) is mapped),
-                rejections[0],
-            )
+            reason = mapped_reason
         else:
             reason = rejections[0]
     return status, reason, rejections, entered
@@ -808,6 +815,20 @@ def _status_from_rejections(rejections: list[str]) -> InventoryComparisonStatus:
         if status in mapped:
             return status
     return InventoryComparisonStatus.MATCHED_EQUIVALENT
+
+
+def _is_economic_comparison_status(status: InventoryComparisonStatus) -> bool:
+    """FX, fees and quote age are pricing truth, not relationship identity."""
+
+    return status in {
+        InventoryComparisonStatus.MISSING_COSTS,
+        InventoryComparisonStatus.MISSING_FX,
+        InventoryComparisonStatus.STALE,
+    }
+
+
+def _is_economic_rejection(reason: str) -> bool:
+    return _is_economic_comparison_status(_rejection_maps_to(reason))
 
 
 def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
@@ -956,7 +977,7 @@ def _facts_from_inventory(
     observation = item.observation
     fee = _inventory_fee_fields(item, venue_costs, cost_resolver=cost_resolver)
     currency = observation.native_currency if observation is not None else None
-    fx_truth = decision.fx_snapshots if decision is not None else fx_snapshots
+    fx_truth = _fx_context_for_currency(currency, decision, fx_snapshots)
     metadata = observation.metadata if observation is not None else {}
     raw_name = item.raw_name or _metadata_str(metadata, "raw_market_name")
     raw_type = item.raw_market_type or _metadata_str(metadata, "raw_market_type")
@@ -1153,6 +1174,36 @@ FX_STATUS_KNOWN = "known"
 FX_STATUS_MISSING = "missing"
 
 
+def _fx_context_for_currency(
+    currency: str | None,
+    decision: PaperScanDecision | None,
+    fx_snapshots: list[FxRateSnapshot] | None,
+) -> list[FxRateSnapshot] | None:
+    """Lane FX covers a venue-only USD row that has no pair decision.
+
+    A decision snapshot wins when it already contains the native currency.
+    Otherwise the scanner-economic lane context is used. Neither path invents
+    a rate.
+    """
+
+    decision_snaps = list(decision.fx_snapshots) if decision is not None else []
+    lane = list(fx_snapshots or [])
+
+    def covers(snaps: list[FxRateSnapshot]) -> bool:
+        if not currency:
+            return False
+        code = currency.upper()
+        return any(item.currency.upper() == code for item in snaps)
+
+    if covers(decision_snaps):
+        return decision_snaps
+    if covers(lane):
+        return lane
+    if decision_snaps:
+        return decision_snaps
+    return lane or None
+
+
 def _fx_status(currency: str | None, fx_snapshots: list[FxRateSnapshot] | None) -> str | None:
     """GBP is the functional currency: conversion is not required.
 
@@ -1311,12 +1362,11 @@ def _kalshi_related_to_row(row: FixtureMarketInventoryRow, item: InventoryMarket
     }
     kalshi_key = item.canonical.settlement.deterministic_key()
     if settlement_keys and kalshi_key not in settlement_keys:
-        if item.canonical.family in {
-            MarketFamily.MATCH_RESULT,
-            MarketFamily.TOTAL_GOALS,
-            MarketFamily.BOTH_TEAMS_TO_SCORE,
-            MarketFamily.FIRST_TEAM_TO_SCORE,
-        }:
+        # Family, period, and exact line already selected this bucket.
+        # Football paper 1X2 and NFL/MLB paper families keep incomplete
+        # fingerprints on purpose. The matcher and register still decide
+        # equivalence; a fingerprint difference must not hide the pair.
+        if item.canonical.family.value in _SETTLEMENT_EXEMPT_KALSHI_FAMILIES:
             return True
         return False
     return True
@@ -1351,6 +1401,10 @@ _SETTLEMENT_EXEMPT_KALSHI_FAMILIES = {
     MarketFamily.TOTAL_GOALS.value,
     MarketFamily.BOTH_TEAMS_TO_SCORE.value,
     MarketFamily.FIRST_TEAM_TO_SCORE.value,
+    MarketFamily.GAME_WINNER.value,
+    MarketFamily.POINT_SPREAD.value,
+    MarketFamily.TOTAL_POINTS.value,
+    MarketFamily.TOTAL_RUNS.value,
 }
 
 
@@ -1662,11 +1716,19 @@ def _clear_stale_venue_only(row: FixtureMarketInventoryRow) -> None:
         row.match_reasons = [item for item in row.match_reasons if item != "venue_only"]
 
 
-def _apply_decision_fx(row: FixtureMarketInventoryRow, decision: PaperScanDecision) -> None:
+def _apply_decision_fx(
+    row: FixtureMarketInventoryRow,
+    decision: PaperScanDecision,
+    *,
+    fx_snapshots: list[FxRateSnapshot] | None = None,
+) -> None:
     for facts in (row.matchbook, row.polymarket, row.kalshi):
         if facts is None:
             continue
-        facts.fx_status = _fx_status(facts.native_currency, decision.fx_snapshots)
+        facts.fx_status = _fx_status(
+            facts.native_currency,
+            _fx_context_for_currency(facts.native_currency, decision, fx_snapshots),
+        )
 
 
 def _attach_kalshi(
@@ -1733,7 +1795,7 @@ def _attach_kalshi(
     )
     row.pair_results = pair_summaries
     if best_decision is not None:
-        _apply_decision_fx(row, best_decision)
+        _apply_decision_fx(row, best_decision, fx_snapshots=fx_snapshots)
     if proven:
         for match in matches:
             if not match.matched:
@@ -1773,6 +1835,8 @@ def _attach_kalshi(
             matchbook_markets=matchbook_markets,
             polymarket_markets=polymarket_markets,
         )
+    if catalogue is None or catalogue.allowed:
+        _clear_pre_pair_settlement_block(row, best_decision)
     if catalogue is not None and not catalogue.allowed:
         catalogue_reason = catalogue.rejection_reason or "catalogue_review_required"
         reason = catalogue.assessment.reason or catalogue_reason
@@ -1804,12 +1868,40 @@ def _attach_kalshi(
             row.trigger_net_edge = best_decision.minimum_net_edge
             if row.current_net_edge is None:
                 row.current_net_edge = best.current_net_edge
-        if best.entered_solver or not best.rejection_reasons:
-            row.comparison_status = _comparable_status_from_catalogue(catalogue)
-            row.reason = _comparable_reason(row.comparison_status, row.reason)
+        for reason in best.rejection_reasons:
+            if reason not in row.rejection_reasons:
+                row.rejection_reasons.append(reason)
+        # Proven catalogue identity stays comparable even when the paper
+        # decision is fail-closed for FX, fees, or quote age.
+        row.comparison_status = _comparable_status_from_catalogue(catalogue)
+        economic_reason = next(
+            (item for item in best.rejection_reasons if _is_economic_rejection(item)),
+            None,
+        )
+        row.reason = economic_reason or _comparable_reason(row.comparison_status, row.reason)
         return
     row.comparison_status = _comparable_status_from_catalogue(catalogue)
     row.reason = _comparable_reason(row.comparison_status, row.reason)
+
+
+def _clear_pre_pair_settlement_block(
+    row: FixtureMarketInventoryRow,
+    decision: PaperScanDecision | None,
+) -> None:
+    """Drop the unpaired incomplete-fingerprint label once the register admits the pair.
+
+    A venue-only NFL/MLB row is labelled incomplete before Kalshi attaches.
+    That label is not a second settlement verdict after PAPER admission.
+    """
+
+    if decision is not None and "incomplete_settlement" in decision.rejection_reasons:
+        return
+    if row.reason == "incomplete_settlement":
+        row.reason = None
+    if "incomplete_settlement" in row.rejection_reasons:
+        row.rejection_reasons = [
+            item for item in row.rejection_reasons if item != "incomplete_settlement"
+        ]
 
 
 def _comparable_status_from_catalogue(catalogue: Any) -> InventoryComparisonStatus:
@@ -1828,7 +1920,7 @@ def _comparable_reason(
     current: str | None,
 ) -> str | None:
     if status is InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT:
-        if current in {None, "venue_only"}:
+        if current in {None, "venue_only", "incomplete_settlement"}:
             return "paper_assumed_equivalent"
         return current
     if current == "venue_only":

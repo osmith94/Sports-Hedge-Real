@@ -16,6 +16,7 @@ import {
   InventoryCardView,
   decisionBadgeClass,
   inventoryCardViewModel,
+  isPrimaryApprovedFamily,
   toneClass,
 } from "../lib/fixture-inventory-operator";
 import { PaperDeploymentPreview } from "./paper-deployment-preview";
@@ -83,7 +84,7 @@ export function FixtureInventoryWorkspace({
       {fixtureCoverageRows(fixture).length ? (
         <ul className="catalogue-coverage-list">
           {fixtureCoverageRows(fixture).map((row) => (
-            <li key={row.archetype}>{coverageRowLabel(row)}</li>
+            <li key={`${row.archetype}-${row.line ?? "none"}`}>{coverageRowLabel(row)}</li>
           ))}
         </ul>
       ) : null}
@@ -108,15 +109,7 @@ export function FixtureInventoryWorkspace({
           No discovered markets on the last collection for this fixture. Empty stays empty.
         </div>
       ) : (
-        <div className="inventory-stack">
-          {detail.markets.map((row) => (
-            <InventoryRowCard
-              key={`${row.display_name}-${row.comparison_status}-${row.matchbook?.source_market_id ?? ""}-${row.polymarket?.source_market_id ?? ""}-${row.kalshi?.source_market_id ?? ""}`}
-              row={row}
-              preparable={preparable}
-            />
-          ))}
-        </div>
+        <FixtureMarketStacks sport={fixture.sport} markets={detail.markets} preparable={preparable} />
       )}
 
       <details className="scan-advanced inventory-advanced">
@@ -125,6 +118,54 @@ export function FixtureInventoryWorkspace({
       </details>
     </>
   );
+}
+
+function FixtureMarketStacks({
+  sport,
+  markets,
+  preparable,
+}: {
+  sport?: string | null;
+  markets: KalshiFixtureMarketInventoryRow[];
+  preparable: PreparablePaperOpportunity[];
+}) {
+  const primary = markets.filter((row) => isPrimaryApprovedFamily(sport, row.family));
+  const advanced = markets.filter((row) => !isPrimaryApprovedFamily(sport, row.family));
+  return (
+    <>
+      <div className="inventory-stack">
+        {primary.map((row) => (
+          <InventoryRowCard
+            key={inventoryRowKey(row)}
+            row={row}
+            preparable={preparable}
+          />
+        ))}
+      </div>
+      {advanced.length ? (
+        <details className="scan-advanced inventory-advanced">
+          <summary>Advanced · unsupported discovered markets</summary>
+          <p className="inventory-advanced-copy">
+            These markets were discovered and stay visible for diagnostics. They are outside the
+            approved Stage-1 families for this sport.
+          </p>
+          <div className="inventory-stack">
+            {advanced.map((row) => (
+              <InventoryRowCard
+                key={inventoryRowKey(row)}
+                row={row}
+                preparable={preparable}
+              />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
+function inventoryRowKey(row: KalshiFixtureMarketInventoryRow): string {
+  return `${row.display_name}-${row.comparison_status}-${row.line ?? ""}-${row.matchbook?.source_market_id ?? ""}-${row.polymarket?.source_market_id ?? ""}-${row.kalshi?.source_market_id ?? ""}`;
 }
 
 function InventoryRowCard({
