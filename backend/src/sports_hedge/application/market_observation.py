@@ -180,6 +180,61 @@ class MatchbookObservationBuilder:
     ) -> VenueMarketObservation:
         event = self.normalizer.normalize_event(event_payload)
         market = self.normalizer.normalize_market(event, market_payload)
+        return self._observation_from_canonical(
+            market,
+            market_payload,
+            observed_at=observed_at,
+            native_currency=native_currency,
+            source_latency_ms=source_latency_ms,
+            quote_age_ms=quote_age_ms,
+            quote_age_basis=quote_age_basis,
+            quote_age_reason=quote_age_reason,
+        )
+
+    def build_from_canonical(
+        self,
+        market: CanonicalMarket,
+        market_payload: dict[str, Any],
+        *,
+        observed_at: datetime | None = None,
+        native_currency: str = "GBP",
+        source_latency_ms: int = 0,
+        quote_age_ms: int | None = None,
+        quote_age_basis: str | None = None,
+        quote_age_reason: str | None = None,
+        identity_source: str = "approved_catalogue",
+    ) -> VenueMarketObservation:
+        """Attach live Matchbook books to a UNIVERSE-proved canonical market.
+
+        Does not re-infer family from generic ``market-type`` / display text.
+        """
+
+        observation = self._observation_from_canonical(
+            market,
+            market_payload,
+            observed_at=observed_at,
+            native_currency=native_currency,
+            source_latency_ms=source_latency_ms,
+            quote_age_ms=quote_age_ms,
+            quote_age_basis=quote_age_basis,
+            quote_age_reason=quote_age_reason,
+        )
+        observation.metadata["nfl_pricing_identity_source"] = identity_source
+        observation.metadata["skipped_matchbook_normalize_market"] = True
+        return observation
+
+    def _observation_from_canonical(
+        self,
+        market: CanonicalMarket,
+        market_payload: dict[str, Any],
+        *,
+        observed_at: datetime | None,
+        native_currency: str,
+        source_latency_ms: int,
+        quote_age_ms: int | None,
+        quote_age_basis: str | None,
+        quote_age_reason: str | None,
+    ) -> VenueMarketObservation:
         raw_runners = {
             str(runner.get("id")): runner
             for runner in market_payload.get("runners", [])

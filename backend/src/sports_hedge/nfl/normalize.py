@@ -30,12 +30,17 @@ from sports_hedge.nfl.markets import (
     parse_wins_by_over_line,
 )
 from sports_hedge.nfl.settlement import nfl_paper_settlement
+from sports_hedge.nfl.venue_mapping import (
+    require_kalshi_nfl_mapping,
+    require_matchbook_nfl_mapping,
+    require_polymarket_nfl_mapping,
+)
 from sports_hedge.nfl.teams import (
     nfl_away_home_from_event_ticker,
     require_resolved_nfl_team,
     resolve_nfl_team,
 )
-from sports_hedge.normalization.text import is_money_line_label, normalize_text
+from sports_hedge.normalization.text import normalize_text
 from sports_hedge.normalization.venues import (
     VenueNormalizationError,
     _first,
@@ -134,8 +139,12 @@ def kalshi_nfl_markets(
         or (series or {}).get("ticker")
         or event.source_event_id
     )
+    mapping = require_kalshi_nfl_mapping(
+        event_payload or series or {},
+        series_ticker=series_ticker,
+    )
     family_head = approved_kalshi_nfl_series(series_ticker)
-    if family_head is None:
+    if family_head is None or mapping.family is None:
         raise VenueNormalizationError(f"unsupported NFL Kalshi series: {series_ticker}")
     if family_head == "KXNFLGAME":
         return [_assemble_kalshi_game_winner(event, payloads)]
@@ -250,15 +259,14 @@ def polymarket_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Can
     if not source_market_id:
         raise VenueNormalizationError("Polymarket NFL market has no id")
     question = str(_first(payload, "question", "title", "groupItemTitle") or "")
+    mapping = require_polymarket_nfl_mapping(payload)
     sports_type = normalize_text(str(_first(payload, "sportsMarketType", "sports_market_type") or ""))
-    if sports_type not in {"moneyline", "spreads", "spread", "totals", "total"}:
-        raise VenueNormalizationError(f"unsupported Polymarket NFL market type: {sports_type or question}")
     _reject_period_or_prop(f"{sports_type} {question} {payload.get('slug') or ''}")
     outcomes = [str(item) for item in _list_field(payload.get("outcomes"))]
     token_ids = exact_polymarket_clob_token_ids(
         payload, market_id=source_market_id, required=len(outcomes) if outcomes else 2
     )
-    if sports_type == "moneyline":
+    if mapping.family is MarketFamily.GAME_WINNER:
         family = MarketFamily.GAME_WINNER
         line = None
         runners = _team_runners(
@@ -268,14 +276,14 @@ def polymarket_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Can
             source_market_id,
             family=family,
         )
-    elif sports_type in {"spreads", "spread"}:
+    elif mapping.family is MarketFamily.POINT_SPREAD:
         family = MarketFamily.POINT_SPREAD
         named_line = _polymarket_named_spread_line(event, payload, question)
         line = named_line
         runners = _spread_runners_from_named_outcomes(
             event, outcomes, token_ids, source_market_id, home_line=line
         )
-    elif sports_type in {"totals", "total"}:
+    elif mapping.family is MarketFamily.TOTAL_POINTS:
         family = MarketFamily.TOTAL_POINTS
         raw_line = payload.get("line")
         try:
@@ -294,7 +302,9 @@ def polymarket_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Can
         family=family,
         period=FootballPeriod.FULL_TIME,
         line=line,
-        settlement=nfl_paper_settlement(family=family, line=line),
+        settlement=nfl_paper_settlement(
+            family=family, line=line, mapping_version=mapping.mapping_version
+        ),
         runners=runners,
         confidence=1.0,
     )
@@ -325,13 +335,13 @@ def matchbook_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Cano
     source_market_id = str(payload.get("id") or "").strip()
     if not source_market_id:
         raise VenueNormalizationError("Matchbook NFL market has no id")
+    mapping = require_matchbook_nfl_mapping(payload)
     name = str(payload.get("name") or "")
-    market_type = normalize_text(str(payload.get("market-type") or payload.get("market_type") or ""))
-    _reject_period_or_prop(f"{name} {market_type}")
+    _reject_period_or_prop(f"{name} {mapping.native_archetype}")
     runners_payload = [item for item in (payload.get("runners") or []) if isinstance(item, dict)]
     if not runners_payload:
         raise VenueNormalizationError(f"Matchbook NFL market {source_market_id} has no runners")
-    if is_money_line_label(market_type) or is_money_line_label(name):
+    if mapping.family is MarketFamily.GAME_WINNER:
         family = MarketFamily.GAME_WINNER
         line = None
         runners = [
@@ -342,10 +352,10 @@ def matchbook_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Cano
             )
             for item in runners_payload
         ]
-    elif market_type == "handicap" or normalize_text(name) == "handicap":
+    elif mapping.family is MarketFamily.POINT_SPREAD:
         family = MarketFamily.POINT_SPREAD
         line, runners = _matchbook_spread(event, runners_payload)
-    elif market_type == "total" or normalize_text(name) == "total":
+    elif mapping.family is MarketFamily.TOTAL_POINTS:
         family = MarketFamily.TOTAL_POINTS
         line, runners = _matchbook_total(runners_payload)
     else:
@@ -362,7 +372,9 @@ def matchbook_nfl_market(event: CanonicalEvent, payload: dict[str, Any]) -> Cano
         family=family,
         period=FootballPeriod.FULL_TIME,
         line=line,
-        settlement=nfl_paper_settlement(family=family, line=line),
+        settlement=nfl_paper_settlement(
+            family=family, line=line, mapping_version=mapping.mapping_version
+        ),
         runners=runners,
         confidence=1.0,
     )

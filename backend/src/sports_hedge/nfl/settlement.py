@@ -21,6 +21,7 @@ from sports_hedge.nfl.constants import (
     NFL_NOT_LIVE_EXECUTION_REASON,
     NFL_PAPER_NORMAL_COMPLETION_REASON,
 )
+from sports_hedge.nfl.venue_mapping import NFL_VENUE_MAPPING_VERSION
 from sports_hedge.nfl.detect import is_nfl_canonical_event, is_nfl_market_family
 
 NFL_PAPER_AUDIT_REASONS: tuple[str, ...] = (
@@ -109,6 +110,7 @@ def nfl_paper_settlement(
     *,
     family: MarketFamily,
     line=None,
+    mapping_version: str | None = None,
 ) -> SettlementFingerprint:
     """Fingerprint for owner-approved PAPER comparison of a completed NFL game.
 
@@ -116,8 +118,12 @@ def nfl_paper_settlement(
     fingerprint stays economically incomplete so this path cannot be mistaken
     for live-execution-grade APPROVED_EQUIVALENT. The register, not this
     fingerprint, admits PAPER comparison.
+
+    ``source_rule_version`` records the NFL venue truth-table version. It is
+    provenance only and is not part of economic settlement identity.
     """
 
+    del family
     push = False if line is None else line_push_possible(line)
     return SettlementFingerprint(
         scope=SettlementScope.UNKNOWN,
@@ -127,6 +133,7 @@ def nfl_paper_settlement(
         penalties_included=False,
         extra_time_included=None,
         unknown_reason=NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT,
+        source_rule_version=mapping_version or NFL_VENUE_MAPPING_VERSION,
     )
 
 
