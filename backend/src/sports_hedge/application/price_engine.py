@@ -1850,11 +1850,6 @@ class CataloguePriceEngine:
     ) -> PriceEngineItemStatus:
         identity = runtime.identity
         evaluated_at = self.now()
-        matchbook_age = matchbook_market_quote_age(
-            matchbook.payload,
-            retrieved_at=matchbook.retrieved_at,
-            evaluated_at=evaluated_at,
-        )
         required_tickers = _required_tickers(identity)
         kalshi_age = _oldest_retrieval_age(
             [
@@ -1866,14 +1861,7 @@ class CataloguePriceEngine:
             required=len(required_tickers),
         )
         try:
-            matchbook_obs = self.matchbook_builder.build(
-                _synthetic_matchbook_event(identity),
-                matchbook.payload,
-                observed_at=evaluated_at,
-                quote_age_ms=matchbook_age.quote_age_ms,
-                quote_age_basis=matchbook_age.basis or "retrieval",
-                quote_age_reason=matchbook_age.reason,
-            )
+            matchbook_obs = self._build_matchbook_obs(identity, matchbook, evaluated_at)
         except Exception as exc:
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:{exc}")
         kalshi_market = _canonical_kalshi_market(identity)
@@ -2050,6 +2038,25 @@ class CataloguePriceEngine:
             retrieved_at=matchbook.retrieved_at,
             evaluated_at=evaluated_at,
         )
+        if str(identity.register_canonical_key or "").startswith("NFL_"):
+            family = _family_from_key(identity)
+            if family is None:
+                raise ValueError("nfl_matchbook_family_unknown")
+            from sports_hedge.nfl.venue_mapping import matchbook_payload_matches_nfl_family
+
+            if not matchbook_payload_matches_nfl_family(matchbook.payload, family):
+                raise ValueError("nfl_matchbook_identity_changed")
+            market = _canonical_matchbook_market(identity)
+            if market is None:
+                raise ValueError("nfl_matchbook_identity")
+            return self.matchbook_builder.build_from_canonical(
+                market,
+                matchbook.payload,
+                observed_at=evaluated_at,
+                quote_age_ms=matchbook_age.quote_age_ms,
+                quote_age_basis=matchbook_age.basis or "retrieval",
+                quote_age_reason=matchbook_age.reason,
+            )
         return self.matchbook_builder.build(
             _synthetic_matchbook_event(identity),
             matchbook.payload,
@@ -4110,6 +4117,52 @@ def _canonical_kalshi_market(identity: DerivedPriceEngineItem) -> CanonicalMarke
             push_possible=False,
             penalties_included=False,
             extra_time_included=False,
+        ),
+        runners=runners,
+    )
+
+
+def _canonical_matchbook_market(identity: DerivedPriceEngineItem) -> CanonicalMarket | None:
+    if identity.kickoff_utc is None or not identity.matchbook_event_id or not identity.matchbook_market_id:
+        return None
+    family = _family_from_key(identity)
+    if family is None:
+        return None
+    runners = [
+        CanonicalRunner(
+            source_runner_id=item.native_id,
+            outcome=CanonicalOutcome(item.outcome),
+            label=item.outcome,
+        )
+        for item in identity.matchbook_runner_ids
+    ]
+    if not runners:
+        return None
+    line = None if not identity.line else Decimal(str(identity.line))
+    event = CanonicalEvent(
+        sport=_sport_for_identity(identity),
+        competition=identity.competition or "Premier League",
+        home_team=identity.home_canonical or "Home",
+        away_team=identity.away_canonical or "Away",
+        kickoff_utc=identity.kickoff_utc,
+        source_venue=VenueName.MATCHBOOK,
+        source_event_id=identity.matchbook_event_id,
+        scheduled_game_key=_scheduled_game_key_for_identity(identity),
+    )
+    return CanonicalMarket(
+        event=event,
+        source_venue=VenueName.MATCHBOOK,
+        source_market_id=identity.matchbook_market_id,
+        family=family,
+        period=FootballPeriod.FULL_TIME,
+        line=line,
+        settlement=SettlementFingerprint(
+            scope=SettlementScope.UNKNOWN,
+            period=FootballPeriod.FULL_TIME,
+            line=line,
+            push_possible=False,
+            penalties_included=False,
+            extra_time_included=None,
         ),
         runners=runners,
     )

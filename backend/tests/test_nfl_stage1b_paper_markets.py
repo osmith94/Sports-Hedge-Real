@@ -352,7 +352,7 @@ def test_integer_and_mismatched_half_lines_rejected() -> None:
 
 
 def test_period_overtime_team_total_and_prop_rejects() -> None:
-    with pytest.raises(VenueNormalizationError, match="period"):
+    with pytest.raises(VenueNormalizationError, match="truth table"):
         _normalize_mb_family(_mb_market(_mb_indkc(), name="1st Half Moneyline"))
     live = copy.deepcopy(_load("polymarket_event_cletb_live.json")["payload"])
     team_total = next(item for item in live["markets"] if item["sportsMarketType"] == "team_totals")
@@ -371,7 +371,7 @@ def test_period_overtime_team_total_and_prop_rejects() -> None:
                 }
             )
     event = MatchbookNormalizer().normalize_event(_mb_indkc())
-    with pytest.raises(VenueNormalizationError, match="props"):
+    with pytest.raises(VenueNormalizationError, match="truth table"):
         MatchbookNormalizer().normalize_market(
             event,
             {
