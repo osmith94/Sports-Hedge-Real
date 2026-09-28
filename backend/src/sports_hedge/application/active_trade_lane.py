@@ -8,19 +8,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from threading import RLock
+from typing import Any
 
 from sports_hedge.application.approved_market_catalogue import (
     DerivedPriceEngineItem,
     OutcomeNativeId,
+    required_outcomes_for_key,
 )
 from sports_hedge.config import Settings, get_settings
+from sports_hedge.domain.football import MarketFamily, format_stored_line
 from sports_hedge.domain.models import VenueName
 from sports_hedge.lifecycle.paper import decide_active_trade_membership
 from sports_hedge.paper.trades import (
     PaperActiveTradePhase,
     PaperTrade,
+    PaperTradeLeg,
 )
 
 ACTIVE_TRADE_LANE = "active_trade"
@@ -182,9 +186,27 @@ def active_trade_cadence_seconds(settings: Settings | None = None) -> int:
     return int(resolved.paper_active_trade_interval_seconds)
 
 
-def identity_from_open_trade(trade: PaperTrade) -> DerivedPriceEngineItem | None:
-    """Exact native IDs already on the OPEN trade. Never rediscovers markets."""
+def identity_from_open_trade(
+    trade: PaperTrade,
+    catalogue_rows: list[Any] | None = None,
+) -> DerivedPriceEngineItem | None:
+    """Exact native IDs already on the OPEN trade. Never rediscovers markets.
 
+    ``catalogue_row_id`` stays ``active-trade:<trade_id>`` and ``content_version``
+    stays 0. Those synthetic fields are not a catalogue-version gate. Kickoff,
+    register key, exact line, fee-snapshot id, and the full approved outcome
+    map are copied from the unique durable catalogue row whose native IDs are
+    the ones this trade already filled. That row is persisted approved
+    evidence. It is not a new equivalence proof and it is not a provider call.
+    """
+
+    identity = _identity_from_trade_legs(trade)
+    if identity is None:
+        return None
+    return _attach_persisted_approved_identity(identity, trade, list(catalogue_rows or []))
+
+
+def _identity_from_trade_legs(trade: PaperTrade) -> DerivedPriceEngineItem | None:
     if decide_active_trade_membership(trade.state).accepted is False:
         return None
     matchbook_event = None
@@ -203,11 +225,11 @@ def identity_from_open_trade(trade: PaperTrade) -> DerivedPriceEngineItem | None
                 )
         elif leg.venue is VenueName.KALSHI:
             kalshi_event = kalshi_event or leg.source_event_id
-            ticker = leg.source_contract_id or leg.source_market_id
+            ticker, native_id = _kalshi_leg_native_ids(leg)
             if ticker and ticker not in kalshi_tickers:
                 kalshi_tickers.append(ticker)
-            if ticker:
-                kalshi_outcomes.append(OutcomeNativeId(outcome=leg.outcome, native_id=ticker))
+            if ticker and native_id:
+                kalshi_outcomes.append(OutcomeNativeId(outcome=leg.outcome, native_id=native_id))
     if not matchbook_event or not matchbook_market or not kalshi_event or not kalshi_tickers:
         return None
     canonical = trade.canonical_event_id or trade.trade_id
@@ -217,6 +239,7 @@ def identity_from_open_trade(trade: PaperTrade) -> DerivedPriceEngineItem | None
         return None
     if str(kalshi_event) == str(canonical) and not str(kalshi_event).isdigit():
         return None
+    filled = sorted({leg.outcome for leg in trade.legs if leg.filled_stake > 0})
     return DerivedPriceEngineItem(
         catalogue_row_id=f"active-trade:{trade.trade_id}",
         content_version=0,
@@ -230,11 +253,219 @@ def identity_from_open_trade(trade: PaperTrade) -> DerivedPriceEngineItem | None
         kalshi_outcome_ids=kalshi_outcomes,
         family=None if trade.market_family is None else trade.market_family.value,
         period=None if trade.period is None else trade.period.value,
-        required_outcomes=sorted({leg.outcome for leg in trade.legs if leg.filled_stake > 0}),
+        line=format_stored_line(trade.line),
+        required_outcomes=filled,
         competition=trade.competition,
         home_canonical=trade.home_team,
         away_canonical=trade.away_team,
     )
+
+
+def _kalshi_leg_native_ids(leg: PaperTradeLeg) -> tuple[str | None, str | None]:
+    """Ticker plus the YES/NO runner id actually filled.
+
+    Paper legs store the contract ticker on ``source_market_id`` and the
+    sided runner (``TICKER:YES`` / ``TICKER:NO``) on ``source_runner_id``.
+    Pricing the runner as the bare ticker treats every side as YES.
+    """
+
+    runner = str(leg.source_runner_id or "").strip()
+    market = str(leg.source_contract_id or leg.source_market_id or "").strip()
+    if runner.endswith(":YES") or runner.endswith(":NO"):
+        ticker = runner.rsplit(":", 1)[0].strip() or market
+        if not ticker:
+            return None, None
+        return ticker, runner
+    ticker = market or runner
+    if not ticker:
+        return None, None
+    return ticker, runner or ticker
+
+
+def _attach_persisted_approved_identity(
+    identity: DerivedPriceEngineItem,
+    trade: PaperTrade,
+    catalogue_rows: list[Any],
+) -> DerivedPriceEngineItem:
+    """Copy durable approved fields. Never replace the filled native IDs."""
+
+    row = _unique_approved_row(trade, identity, catalogue_rows)
+    if row is None:
+        return identity
+    register_key = str(getattr(row, "register_canonical_key", "") or "").strip()
+    updates: dict[str, Any] = {}
+    kickoff = getattr(row, "kickoff_utc", None)
+    if kickoff is not None:
+        updates["kickoff_utc"] = kickoff
+    if register_key and not _looks_like_register_key(identity.register_canonical_key):
+        updates["register_canonical_key"] = register_key
+    row_line = format_stored_line(_decimal_or_none(getattr(row, "line", None)))
+    if not row_line and register_key:
+        _family, _period, key_line = _line_from_register_key(register_key)
+        row_line = format_stored_line(_decimal_or_none(key_line))
+    if identity.line is None and row_line:
+        updates["line"] = row_line
+    fee_id = str(getattr(row, "kalshi_fee_snapshot_id", "") or "").strip()
+    if fee_id:
+        updates["kalshi_fee_snapshot_id"] = fee_id
+    outcomes = list(getattr(row, "kalshi_outcome_ids", None) or [])
+    if outcomes and _outcomes_cover_trade_tickers(outcomes, identity.kalshi_market_tickers):
+        updates["kalshi_outcome_ids"] = outcomes
+    required = list(getattr(row, "required_outcomes", None) or [])
+    if not required and register_key:
+        required = required_outcomes_for_key(register_key)
+    if required:
+        updates["required_outcomes"] = list(required)
+    family = getattr(row, "family", None)
+    if family and not identity.family:
+        updates["family"] = family if isinstance(family, str) else getattr(family, "value", str(family))
+    period = getattr(row, "period", None)
+    if period and not identity.period:
+        updates["period"] = period if isinstance(period, str) else getattr(period, "value", str(period))
+    if not identity.competition and getattr(row, "competition", None):
+        updates["competition"] = row.competition
+    if not identity.home_canonical and getattr(row, "home_canonical", None):
+        updates["home_canonical"] = row.home_canonical
+    if not identity.away_canonical and getattr(row, "away_canonical", None):
+        updates["away_canonical"] = row.away_canonical
+    # Synthetic ACTIVE identity is intentional. A catalogue content version is
+    # not required, and this must not collide with the HOT working-set key.
+    updates["catalogue_row_id"] = identity.catalogue_row_id
+    updates["content_version"] = 0
+    return identity.model_copy(update=updates)
+
+
+def _unique_approved_row(
+    trade: PaperTrade,
+    identity: DerivedPriceEngineItem,
+    catalogue_rows: list[Any],
+) -> Any | None:
+    matches: list[Any] = []
+    seen: set[str] = set()
+    trade_event = str(trade.canonical_event_id or "").strip()
+    for row in catalogue_rows:
+        row_id = str(getattr(row, "catalogue_row_id", "") or "").strip()
+        if not row_id or row_id in seen:
+            continue
+        row_event = str(getattr(row, "canonical_event_id", "") or "").strip()
+        if trade_event and row_event and trade_event != row_event:
+            continue
+        if not _row_matches_filled_native_ids(row, identity):
+            continue
+        if not _row_line_agrees(trade, row):
+            continue
+        family = _family_value(getattr(row, "family", None))
+        trade_family = _family_value(trade.market_family)
+        if trade_family and family and trade_family != family:
+            continue
+        seen.add(row_id)
+        matches.append(row)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _row_matches_filled_native_ids(row: Any, identity: DerivedPriceEngineItem) -> bool:
+    row_market = str(getattr(row, "matchbook_market_id", "") or "").strip()
+    trade_market = str(identity.matchbook_market_id or "").strip()
+    if not row_market or not trade_market or row_market != trade_market:
+        return False
+    row_event = str(getattr(row, "matchbook_event_id", "") or "").strip()
+    trade_event = str(identity.matchbook_event_id or "").strip()
+    if row_event and trade_event and row_event != trade_event:
+        return False
+    row_kalshi_event = str(getattr(row, "kalshi_event_ticker", "") or "").strip()
+    trade_kalshi_event = str(identity.kalshi_event_ticker or "").strip()
+    if row_kalshi_event and trade_kalshi_event and row_kalshi_event != trade_kalshi_event:
+        return False
+    row_tickers = {
+        str(item).strip()
+        for item in list(getattr(row, "kalshi_market_tickers", None) or [])
+        if str(item).strip()
+    }
+    trade_tickers = {str(item).strip() for item in identity.kalshi_market_tickers if str(item).strip()}
+    return bool(trade_tickers) and trade_tickers <= row_tickers
+
+
+def _row_line_agrees(trade: PaperTrade, row: Any) -> bool:
+    if trade.line is None:
+        return True
+    row_line = _decimal_or_none(getattr(row, "line", None))
+    if row_line is None:
+        register_key = str(getattr(row, "register_canonical_key", "") or "")
+        _family, _period, key_line = _line_from_register_key(register_key)
+        row_line = _decimal_or_none(key_line)
+    if row_line is None:
+        return True
+    return row_line == trade.line
+
+
+def _outcomes_cover_trade_tickers(
+    outcomes: list[Any],
+    tickers: list[str],
+) -> bool:
+    covered: set[str] = set()
+    for item in outcomes:
+        native = str(getattr(item, "native_id", "") or "").strip()
+        if not native:
+            continue
+        ticker = native.rsplit(":", 1)[0].strip() if native.endswith((":YES", ":NO")) else native
+        if ticker:
+            covered.add(ticker)
+    needed = {str(item).strip() for item in tickers if str(item).strip()}
+    return bool(needed) and needed <= covered
+
+
+def _looks_like_register_key(value: str | None) -> bool:
+    key = str(value or "").strip()
+    if not key or key.startswith("mkt:") or key.startswith("evt:") or key.startswith("active-trade:"):
+        return False
+    if key in {"MATCH_RESULT_FT", "BTTS_FT", "FTTS_FT"}:
+        return True
+    return ":" in key and not key.startswith("mkt")
+
+
+def _line_from_register_key(key: str) -> tuple[str | None, str | None, str | None]:
+    if key.startswith("TOTAL_GOALS_FT:"):
+        return MarketFamily.TOTAL_GOALS.value, "full_time", key.split(":", 1)[1]
+    if key.startswith("MLB_TOTAL_RUNS_FT:"):
+        return MarketFamily.TOTAL_RUNS.value, "full_time", key.split(":", 1)[1]
+    if ":FT:" in key or (key.startswith(("NFL_", "NBA_", "NCAAB_")) and ":" in key):
+        family = None
+        if "TOTAL" in key:
+            family = MarketFamily.TOTAL_POINTS.value
+        elif "SPREAD" in key:
+            family = MarketFamily.POINT_SPREAD.value
+        return family, "full_time", key.split(":", 1)[1]
+    return None, None, None
+
+
+def _family_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, MarketFamily):
+        return value.value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return MarketFamily(text).value
+    except ValueError:
+        return text
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def remaining_trade_room_gbp(trade: PaperTrade, cap_gbp: Decimal) -> Decimal:

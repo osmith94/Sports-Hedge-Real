@@ -973,7 +973,7 @@ async def test_active_trade_tick_prices_due_trades_concurrently_under_provider_l
     )
     monkeypatch.setattr(
         "sports_hedge.application.live_refresh.identity_from_open_trade",
-        lambda trade: _dummy_identity(trade.trade_id),
+        lambda trade, catalogue_rows=None: _dummy_identity(trade.trade_id),
     )
 
     coordinator = LiveRefreshCoordinator(clock=clock, price_engine=_FakeEngine())
@@ -1122,7 +1122,7 @@ async def test_active_trade_tick_does_not_top_up_from_stale_plan_when_refresh_fa
 
         monkeypatch.setattr(
             "sports_hedge.application.live_refresh.identity_from_open_trade",
-            lambda _trade: None,
+            lambda _trade, catalogue_rows=None: None,
         )
         mode["status"] = "evaluated"
         await coordinator._run_active_trade_tick(tick_plan)

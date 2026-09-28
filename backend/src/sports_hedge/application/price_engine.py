@@ -1875,10 +1875,20 @@ class CataloguePriceEngine:
                 quote_age_reason=matchbook_age.reason,
             )
         except Exception as exc:
-            return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:{exc}")
+            detail = str(exc).splitlines()[0][:160]
+            return self._request_revalidation(
+                runtime,
+                "revalidation_reason=matchbook_normalisation_failed:"
+                f"{type(exc).__name__}:{detail}",
+            )
+        gap = kalshi_canonical_identity_gap(identity)
+        if gap is not None:
+            return self._request_revalidation(runtime, f"revalidation_reason={gap}")
         kalshi_market = _canonical_kalshi_market(identity)
         if kalshi_market is None:
-            return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:kalshi_identity")
+            return self._request_revalidation(
+                runtime, "revalidation_reason=missing_kalshi_identity"
+            )
         fee_snapshot = self._fee_snapshot_payload(identity)
         kalshi_payloads = {ticker: item.payload for ticker, item in kalshi_books.items()}
         try:
@@ -4067,6 +4077,44 @@ def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, An
         "competition-name": competition_name,
         "status": "open",
     }
+
+
+_LINE_REQUIRED_FAMILIES = frozenset(
+    {
+        MarketFamily.TOTAL_GOALS,
+        MarketFamily.TOTAL_POINTS,
+        MarketFamily.TOTAL_RUNS,
+        MarketFamily.POINT_SPREAD,
+        MarketFamily.ASIAN_HANDICAP,
+        MarketFamily.TEAM_TOTAL,
+    }
+)
+
+
+def kalshi_canonical_identity_gap(identity: DerivedPriceEngineItem) -> str | None:
+    """Why an exact-ID item cannot build a Kalshi canonical market.
+
+    Checked after the native book reads. A missing kickoff or line is an
+    identity-reconstruction gap, not proof the catalogue row must be
+    rediscovered. ``content_version`` is not a predicate.
+    """
+
+    if not str(identity.kalshi_event_ticker or "").strip():
+        return "missing_kalshi_identity"
+    if identity.kickoff_utc is None:
+        return "missing_kickoff_identity"
+    family = _family_from_key(identity)
+    if family is None:
+        return "missing_register_key"
+    if family in _LINE_REQUIRED_FAMILIES and not str(identity.line or "").strip():
+        return "missing_line_identity"
+    present = {str(item.outcome) for item in identity.kalshi_outcome_ids}
+    required = set(identity.required_outcomes) or set(
+        required_outcomes_for_key(identity.register_canonical_key)
+    )
+    if not identity.kalshi_outcome_ids or (required and not required <= present):
+        return "missing_kalshi_outcome_identity"
+    return None
 
 
 def _canonical_kalshi_market(identity: DerivedPriceEngineItem) -> CanonicalMarket | None:
