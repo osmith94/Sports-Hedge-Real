@@ -363,10 +363,12 @@ class PolymarketObservationBuilder:
 
 
 class KalshiObservationBuilder:
-    """Convert Kalshi YES/NO bid ladders into executable BUY economics.
+    """Convert Kalshi YES/NO bid ladders into BUY and SELL books.
 
-    A YES bid at X is not treated as Matchbook BACK. The documented binary
-    complement is: a NO bid at X is the executable YES ask at 1-X (and vice versa).
+    BUY YES is the NO-bid complement (``yes_ask = 1 - no_bid``). BUY NO is the
+    YES-bid complement. SELL/reverse depth uses the same contract's bid ladder:
+    SELL YES from YES bids, SELL NO from NO bids. Missing same-side bids are
+    not synthesized. Opening still consumes only the BUY/back book.
     """
 
     def __init__(self, normalizer: KalshiNormalizer | None = None) -> None:
@@ -427,12 +429,13 @@ class KalshiObservationBuilder:
             ticker, side = _kalshi_runner_ticker_side(runner.source_runner_id)
             raw_book = dict(books_by_ticker.get(ticker, {}))
             back_levels = _kalshi_buy_levels(raw_book, side=side)
+            lay_levels = _kalshi_sell_levels(raw_book, side=side)
             books.append(
                 OutcomeOrderBook(
                     outcome=runner.outcome,
                     source_runner_id=runner.source_runner_id,
                     back_levels=back_levels,
-                    lay_levels=[],
+                    lay_levels=lay_levels,
                     raw_book={
                         **raw_book,
                         "market_ticker": ticker,
@@ -441,6 +444,7 @@ class KalshiObservationBuilder:
                         "complement": (
                             "yes_ask = 1 - no_bid" if side == "YES" else "no_ask = 1 - yes_bid"
                         ),
+                        "sell_book": "yes_bid" if side == "YES" else "no_bid",
                     },
                 )
             )
@@ -449,6 +453,7 @@ class KalshiObservationBuilder:
             basis=quote_age_basis,
             reason=quote_age_reason,
         )
+        metadata["kalshi_sell_model"] = "same_side_bid"
         if fee_snapshot:
             metadata["kalshi_fee"] = fee_snapshot
         return VenueMarketObservation(
@@ -470,16 +475,25 @@ def _kalshi_runner_ticker_side(source_runner_id: str) -> tuple[str, str]:
     return source_runner_id, "YES"
 
 
-def _kalshi_buy_levels(raw_book: Mapping[str, Any], *, side: str) -> list[BookLevel]:
+def _kalshi_orderbook_levels(raw_book: Mapping[str, Any]) -> tuple[list[tuple[Decimal, Decimal]], list[tuple[Decimal, Decimal]]]:
     orderbook = raw_book.get("orderbook_fp")
     if not isinstance(orderbook, dict):
         orderbook = raw_book if "yes_dollars" in raw_book or "no_dollars" in raw_book else {}
-    yes_bids = _kalshi_price_levels(orderbook.get("yes_dollars"))
-    no_bids = _kalshi_price_levels(orderbook.get("no_dollars"))
-    if side == "YES":
-        opposite = no_bids
-    else:
-        opposite = yes_bids
+    return (
+        _kalshi_price_levels(orderbook.get("yes_dollars")),
+        _kalshi_price_levels(orderbook.get("no_dollars")),
+    )
+
+
+def _kalshi_buy_levels(raw_book: Mapping[str, Any], *, side: str) -> list[BookLevel]:
+    """Executable BUY from the opposite contract's bid complement.
+
+    BUY YES consumes NO bids as ``yes_ask = 1 - no_bid``.
+    BUY NO consumes YES bids as ``no_ask = 1 - yes_bid``.
+    """
+
+    yes_bids, no_bids = _kalshi_orderbook_levels(raw_book)
+    opposite = no_bids if side == "YES" else yes_bids
     result: list[BookLevel] = []
     for price, quantity in opposite:
         ask = Decimal("1") - price
@@ -492,6 +506,30 @@ def _kalshi_buy_levels(raw_book: Mapping[str, Any], *, side: str) -> list[BookLe
             )
         )
     return sorted(result, key=lambda item: item.decimal_odds, reverse=True)
+
+
+def _kalshi_sell_levels(raw_book: Mapping[str, Any], *, side: str) -> list[BookLevel]:
+    """Executable SELL/reverse depth from the same contract's bid ladder.
+
+    SELL YES consumes YES bids. SELL NO consumes NO bids. Encoding matches
+    ``walk_prediction_sell``: ``decimal_odds = 1 / bid_probability`` and
+    ``available_stake = bid_probability * shares``. Never remaps the other
+    outcome and never synthesizes missing same-side bids.
+    """
+
+    yes_bids, no_bids = _kalshi_orderbook_levels(raw_book)
+    own = yes_bids if side == "YES" else no_bids
+    result: list[BookLevel] = []
+    for price, quantity in own:
+        if price <= 0 or price >= 1 or quantity <= 0:
+            continue
+        result.append(
+            BookLevel(
+                decimal_odds=Decimal("1") / price,
+                available_stake=price * quantity,
+            )
+        )
+    return sorted(result, key=lambda item: item.decimal_odds)
 
 
 def _kalshi_price_levels(levels: Any) -> list[tuple[Decimal, Decimal]]:
