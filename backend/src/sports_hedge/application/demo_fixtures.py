@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Literal
 
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,

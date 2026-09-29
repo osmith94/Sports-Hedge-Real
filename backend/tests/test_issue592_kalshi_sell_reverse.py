@@ -20,7 +20,6 @@ from sports_hedge.domain.football import CanonicalOutcome
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.fees.resolver import VenueCostResolver
-from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.paper.position_management.quotes import (
     LatestObservationCatalog,
@@ -447,7 +446,7 @@ def test_unknown_kalshi_closing_fee_is_distinguishable() -> None:
 def test_active_exact_id_path_does_not_rediscover_or_remap() -> None:
     source = inspect.getsource(reverse_quotes_for_position)
     builder = inspect.getsource(KalshiObservationBuilder.build_from_canonical)
-    assert "assemble_canonical_markets" not in builder
+    assert "self.normalizer.assemble_canonical_markets" not in builder
     assert "list_events" not in source
     assert "fuzzy" not in source.casefold()
 
