@@ -22,7 +22,13 @@ def reverse_quotes_for_position(
     cost_resolver: VenueCostResolver | None = None,
     evaluated_at: datetime | None = None,
 ) -> list[ReverseQuote]:
-    """Build reverse quotes only from stored source IDs + settlement fingerprint."""
+    """Build reverse quotes only from stored source IDs + settlement fingerprint.
+
+    Empty same-side reverse books are still emitted so unwind diagnostics can
+    distinguish ``insufficient_reverse_depth`` from a missing observation.
+    Settlement fingerprint is taken from the observation; identity mismatch is
+    left for the unwind engine rather than collapsed into ``missing_reverse_quote``.
+    """
 
     when = evaluated_at or datetime.now(UTC)
     index = _index_observations(observations)
@@ -32,8 +38,6 @@ def reverse_quotes_for_position(
         if observation is None:
             continue
         fingerprint = observation.market.settlement.deterministic_key()
-        if fingerprint != position.settlement_fingerprint_key:
-            continue
         if str(observation.market.event.source_event_id) != leg.source_event_id:
             continue
         if observation.market.source_market_id != leg.source_market_id:
@@ -46,7 +50,7 @@ def reverse_quotes_for_position(
             ),
             None,
         )
-        if book is None or not book.lay_levels:
+        if book is None:
             continue
         try:
             close_action = close_action_for(leg.opening_action, mechanics_for_venue(leg.venue))

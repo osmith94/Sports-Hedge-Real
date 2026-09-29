@@ -218,8 +218,18 @@ def test_orderbook_yes_no_bids_convert_to_complement_buy_economics() -> None:
     assert yes_book.best_back.available_stake == Decimal("0.51") * Decimal("200.00")
     assert no_book.best_back is not None
     assert no_book.best_back.decimal_odds == Decimal("1") / Decimal("0.60")
+    assert no_book.best_back.available_stake == Decimal("0.60") * Decimal("100.00")
+    assert yes_book.best_lay is not None
+    assert yes_book.best_lay.decimal_odds == Decimal("1") / Decimal("0.40")
+    assert yes_book.best_lay.available_stake == Decimal("0.40") * Decimal("100.00")
+    assert no_book.best_lay is not None
+    assert no_book.best_lay.decimal_odds == Decimal("1") / Decimal("0.49")
+    assert no_book.best_lay.available_stake == Decimal("0.49") * Decimal("200.00")
     assert yes_book.raw_book["complement"] == "yes_ask = 1 - no_bid"
+    assert yes_book.raw_book["sell_book"] == "yes_bid"
     assert no_book.raw_book["contract_side"] == "NO"
+    assert no_book.raw_book["sell_book"] == "no_bid"
+    assert observation.metadata["kalshi_sell_model"] == "same_side_bid"
     assert observation.native_currency == "USD"
     assert observation.venue is VenueName.KALSHI
 

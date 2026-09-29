@@ -16,8 +16,8 @@ from sports_hedge.application.market_observation import (
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
     VenueMarketObservation,
-    _kalshi_price_levels,
     _kalshi_runner_ticker_side,
+    _kalshi_sell_levels,
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import (
@@ -328,7 +328,7 @@ def reverse_quotes_from_observations(
             levels = list(book.lay_levels)
             if observation.venue is VenueName.KALSHI and not levels:
                 _ticker, side = _kalshi_runner_ticker_side(book.source_runner_id)
-                levels = _kalshi_demo_sell_levels(book.raw_book, side=side)
+                levels = _kalshi_sell_levels(book.raw_book, side=side)
             if not levels:
                 continue
             quotes.append(
@@ -348,26 +348,6 @@ def reverse_quotes_from_observations(
                 )
             )
     return quotes
-
-
-def _kalshi_demo_sell_levels(raw_book: dict[str, Any], *, side: str) -> list[BookLevel]:
-    """DEMO-only Kalshi SELL book from yes/no dollar bids. Not a live scanner path."""
-
-    orderbook = raw_book.get("orderbook_fp")
-    if not isinstance(orderbook, dict):
-        orderbook = raw_book if "yes_dollars" in raw_book or "no_dollars" in raw_book else {}
-    own_bids = _kalshi_price_levels(
-        orderbook.get("yes_dollars") if side == "YES" else orderbook.get("no_dollars")
-    )
-    result: list[BookLevel] = []
-    for price, quantity in own_bids:
-        result.append(
-            BookLevel(
-                decimal_odds=Decimal("1") / price,
-                available_stake=price * quantity,
-            )
-        )
-    return sorted(result, key=lambda item: item.decimal_odds)
 
 
 def tighten_reverse_quotes(quotes: list[ReverseQuote]) -> list[ReverseQuote]:
