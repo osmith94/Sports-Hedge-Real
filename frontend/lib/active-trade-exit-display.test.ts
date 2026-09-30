@@ -76,7 +76,7 @@ describe("active trade exit read model display", () => {
     assert.match(book, /formatCurrentExit/);
     assert.match(book, /formatExitDelta/);
     assert.match(book, /managementBadgeClass/);
-    assert.match(book, /CLOSE AVAILABLE/);
+    assert.match(book, /CLOSE AT MARKET/);
     assert.match(book, /CLOSE BLOCKED/);
     assert.match(book, /ExitEvidence/);
     assert.doesNotMatch(display, /validated_exit_pnl/);

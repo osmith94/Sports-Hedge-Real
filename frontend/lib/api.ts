@@ -768,6 +768,7 @@ export type OperatorScannerSettings = {
   scanner_stopped: boolean;
   universe_scans_paused?: boolean;
   background_pricing_paused?: boolean;
+  settlement_scans_paused?: boolean;
   source?: "operator" | "env_default";
   updated_at?: string | null;
   restart_semantics?: string;
@@ -917,6 +918,8 @@ export type LiveRefreshStatus = {
   scanner_stopped?: boolean;
   universe_scans_paused?: boolean;
   background_pricing_paused?: boolean;
+  settlement_scans_paused?: boolean;
+  settlement_operator_summary?: string | null;
   operator_settings?: OperatorScannerSettings | null;
   universe_scope?: OperatorUniverseScope | null;
   startup_pricing_ready?: boolean;
@@ -1778,6 +1781,32 @@ export async function pauseBackgroundPricing(): Promise<LiveRefreshStatus> {
   return response.json() as Promise<LiveRefreshStatus>;
 }
 
+export async function pauseSettlementScans(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/settlement-scans/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function resumeSettlementScans(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/settlement-scans/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
 export async function resumeBackgroundPricing(): Promise<LiveRefreshStatus> {
   const response = await fetch(`${API_BASE}/paper/scanner/background-pricing/resume`, {
     method: "POST",
@@ -2128,6 +2157,7 @@ export type PaperTradeLeg = {
   filled_odds?: string | number | null;
   source_market_id: string;
   fill_id?: string | null;
+  tranche_id?: string | null;
   fill_kind: PaperLegFillKind;
   capital_source: string;
   execution_mode: string;
@@ -2405,6 +2435,9 @@ export type PaperSettlementOptions = {
     filled_odds?: string | number | null;
     displayed_odds?: string | number | null;
     fill_kind: string;
+    fill_id?: string | null;
+    tranche_id?: string | null;
+    source_market_id?: string | null;
     opening_action?: string | null;
     canonical_state?: string | null;
   }>;

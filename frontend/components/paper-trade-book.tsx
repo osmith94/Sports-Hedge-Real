@@ -20,7 +20,7 @@ import {
   formatExitDelta,
 } from "../lib/active-trade-exit-display";
 import { formatPositionManagementCell, managementBadgeClass } from "../lib/paper-position-management-display";
-import { compactLegLines, compactMarketHeading } from "../lib/paper-trade-display";
+import { compactLegLines, compactMarketHeading, paperLegListKey } from "../lib/paper-trade-display";
 import { settlementReconciliationLabel } from "../lib/settlement-reconciliation-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { HydratedRelativeTime } from "./hydrated-relative-time";
@@ -84,21 +84,29 @@ function compactManagement(trade: PaperTrade): { state: string; tone: "ready" | 
     return { state: "—", tone: "neutral", detail: block ?? "no evaluation" };
   }
   if (cell.tone === "unsafe") {
-    return { state: "CLOSE BLOCKED", tone: "unsafe", detail: block ?? cell.blocker ?? "unsafe close" };
+    return {
+      state: "CLOSE BLOCKED",
+      tone: "unsafe",
+      detail: block ?? cell.blocker ?? "Close at market needs fresh reverse liquidity",
+    };
   }
   if (exitText !== "—") {
-    return { state: "CLOSE AVAILABLE", tone: "ready", detail: exitText };
+    return { state: "CLOSE AT MARKET", tone: "ready", detail: exitText };
   }
-  return { state: "CLOSE BLOCKED", tone: "waiting", detail: block ?? "incomplete close plan" };
+  return {
+    state: "CLOSE BLOCKED",
+    tone: "waiting",
+    detail: block ?? "Close at market needs fresh reverse liquidity",
+  };
 }
 
 function ManagementCell({ trade, compact = false }: { trade: PaperTrade; compact?: boolean }) {
   const cell = formatPositionManagementCell(trade.position_management);
   if (compact) {
     const brief = compactManagement(trade);
-    return (
-      <td className="paper-trade-management" title={managementHint(trade)}>
-        <span className={managementBadgeClass(brief.tone)}>{brief.state}</span>
+  return (
+    <td className="paper-trade-management" title={`${managementHint(trade)} Close at market uses the current reverse book.`}>
+      <span className={managementBadgeClass(brief.tone)}>{brief.state}</span>
         <div className="panel-meta">
           {brief.detail}
           {cell.checkedIso ? (
@@ -112,7 +120,8 @@ function ManagementCell({ trade, compact = false }: { trade: PaperTrade; compact
     );
   }
   return (
-    <td className="paper-trade-management" title={managementHint(trade)}>
+    <td className="paper-trade-management" title={`${managementHint(trade)} Close at market uses the current reverse book and may stay blocked.`}>
+      <div className="panel-meta">Close at market</div>
       <span className={managementBadgeClass(cell.tone)}>{cell.state}</span>
       {cell.checkedIso ? (
         <div className="panel-meta">
@@ -164,10 +173,11 @@ function tradeStateBadgeClass(state: PaperTrade["state"]): string {
 }
 
 function LegsCell({ trade }: { trade: PaperTrade }) {
+  const lines = compactLegLines(trade);
   return (
     <td className="paper-trade-legs">
-      {compactLegLines(trade).map((line) => (
-        <div key={line} className="paper-trade-leg" title={line}>
+      {lines.map((line, index) => (
+        <div key={paperLegListKey(trade.legs[index] ?? {}, index)} className="paper-trade-leg" title={line}>
           {line}
         </div>
       ))}
@@ -275,7 +285,7 @@ export function PaperTradeBook({ summary, active, closed, apiAvailable, compact 
 
       <TradeTable
         title="Active trades"
-        meta="Open paper trades and native capital locked. PAPER MODE records only."
+        meta="Open paper trades and native capital locked. Close at market needs a fresh reverse book and may stay CLOSE BLOCKED. Settle completed trade records the canonical result from stored fills and does not need a live quote. PAPER MODE records only."
         rows={active}
         openId={openId}
         detail={detail}
@@ -393,6 +403,18 @@ function TradeTable({
                       <button type="button" className="text-link paper-trade-fixture-name" onClick={() => onToggle(trade.trade_id)}>
                         {fixture(trade)}
                       </button>
+                      {compact && onManualClose && trade.state !== "CLOSED" && trade.state !== "AWAITING_MANUAL_EXTERNAL" ? (
+                        <div className="paper-trade-actions">
+                          <button
+                            type="button"
+                            className="text-link"
+                            title="Settle completed trade records the canonical result from stored fills. It does not use the current reverse quote."
+                            onClick={() => onManualClose(trade)}
+                          >
+                            Settle completed trade
+                          </button>
+                        </div>
+                      ) : null}
                       {compact ? null : (
                         <div className="paper-trade-market" title={trade.solver_model ? `${compactMarketHeading(trade)} · ${trade.solver_model}` : compactMarketHeading(trade)}>
                           {compactMarketHeading(trade)}
@@ -413,9 +435,10 @@ function TradeTable({
                               <button
                                 type="button"
                                 className="text-link"
+                                title="Settle completed trade records the canonical result from stored fills. It does not use the current reverse quote."
                                 onClick={() => onManualClose(trade)}
                               >
-                                Manual close / settle result
+                                Settle completed trade
                               </button>
                             </>
                           ) : null}
@@ -509,8 +532,8 @@ function AuditBlock({
         </div>
       ) : null}
       <ul>
-        {trade.legs.map((leg) => (
-          <li key={`${leg.venue}-${leg.outcome}-${leg.source_market_id}`}>
+        {trade.legs.map((leg, index) => (
+          <li key={paperLegListKey(leg, index)}>
             {leg.venue} · {leg.outcome} · {leg.fill_kind} · odds {leg.filled_odds ?? leg.displayed_odds ?? "—"}
             {leg.filled_stake != null ? ` · stake ${leg.filled_stake}` : ""}
           </li>
@@ -538,12 +561,45 @@ function AuditBlock({
       ) : null}
       {onManualClose && trade.state !== "CLOSED" && trade.state !== "AWAITING_MANUAL_EXTERNAL" ? (
         <div className="scan-control-grid" style={{ marginTop: 8 }}>
-          <button className="scan-button" type="button" disabled={busy} onClick={() => onManualClose(trade)}>
-            Manual close / settle result
+          <button
+            className="scan-button"
+            type="button"
+            disabled={busy}
+            title="Records the actual canonical result from stored fills. Does not require a live reverse quote."
+            onClick={() => onManualClose(trade)}
+          >
+            Settle completed trade
           </button>
         </div>
       ) : null}
     </div>
+  );
+}
+
+export function ManualSettlementLegList({
+  legs,
+}: {
+  legs: Array<{
+    venue: string;
+    outcome: string;
+    currency?: string;
+    filled_stake?: string | number | null;
+    filled_odds?: string | number | null;
+    displayed_odds?: string | number | null;
+    fill_id?: string | null;
+    tranche_id?: string | null;
+    source_market_id?: string | null;
+  }>;
+}) {
+  return (
+    <ul>
+      {legs.map((leg, index) => (
+        <li key={paperLegListKey(leg, index)}>
+          {leg.venue} · {leg.outcome} · stake {leg.filled_stake ?? "—"} {leg.currency ?? ""} · odds{" "}
+          {leg.filled_odds ?? leg.displayed_odds ?? "—"}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -596,11 +652,16 @@ function ManualSettleDialog({
         <div className="competition-modal-header">
           <div>
             <div className="competition-modal-kicker">PAPER MODE · FAILSAFE</div>
-            <h2 id="manual-settle-title">Manual close / settle result</h2>
+            <h2 id="manual-settle-title">Settle completed trade</h2>
             <p>
-              Record the actual canonical market result. Sports Hedge will close this PAPER
-              trade using stored filled odds, stakes and fees — never the current quote.
-              Settlement is not inferred from elapsed kickoff.
+              Settle completed trade records the actual canonical result after the event.
+              It uses stored fills and does not require a live reverse quote. A finished
+              event with a missing reverse book stays settleable here.
+            </p>
+            <p>
+              Close at market is separate. That path unwinds against the current reverse
+              book, needs fresh executable reverse liquidity, and may remain CLOSE BLOCKED.
+              This result path does not use current market quotes.
             </p>
           </div>
           <button type="button" className="scan-button" onClick={onClose}>
@@ -610,14 +671,7 @@ function ManualSettleDialog({
         <div className="panel-meta" style={{ marginTop: 10 }}>
           {options?.fixture_label || fixture(trade)} · {compactMarketHeading(trade)}
         </div>
-        <ul>
-          {(options?.legs ?? trade.legs).map((leg) => (
-            <li key={`${leg.venue}-${leg.outcome}`}>
-              {leg.venue} · {leg.outcome} · stake {leg.filled_stake} {leg.currency} · odds{" "}
-              {"filled_odds" in leg ? (leg.filled_odds ?? leg.displayed_odds ?? "—") : "—"}
-            </li>
-          ))}
-        </ul>
+        <ManualSettlementLegList legs={options?.legs ?? trade.legs} />
         {loadError ? <div className="empty-live">{loadError}</div> : null}
         {options?.unsupported_reason ? (
           <div className="empty-live">
@@ -629,8 +683,8 @@ function ManualSettleDialog({
             <label className="scan-field">
               Actual canonical market result
               <select value={winning} onChange={(event) => setWinning(event.target.value)}>
-                {options.choices.map((choice) => (
-                  <option key={choice.value} value={choice.value}>
+                {options.choices.map((choice, index) => (
+                  <option key={`${choice.value}|${index}`} value={choice.value}>
                     {choice.label}
                   </option>
                 ))}

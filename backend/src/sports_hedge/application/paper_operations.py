@@ -3074,6 +3074,9 @@ class PaperOperationsService:
                     filled_odds=leg.filled_odds,
                     displayed_odds=leg.displayed_odds,
                     fill_kind=leg.fill_kind.value,
+                    fill_id=leg.fill_id,
+                    tranche_id=leg.tranche_id,
+                    source_market_id=leg.source_market_id,
                     opening_action=None if leg.opening_action is None else leg.opening_action.value,
                     canonical_state=leg.canonical_state,
                 )

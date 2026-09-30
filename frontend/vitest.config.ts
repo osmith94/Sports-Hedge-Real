@@ -6,7 +6,12 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["lib/**/*.test.ts", "components/**/*.test.ts", "components/**/*.disclosure.test.tsx"],
+    include: [
+      "lib/**/*.test.ts",
+      "components/**/*.test.ts",
+      "components/**/*.disclosure.test.tsx",
+      "components/**/*.tranche-keys.test.tsx",
+    ],
     // node:test display suites run via `tsx --test` in npm test, not Vitest.
     exclude: [
       "lib/tracked-markets-display.test.ts",

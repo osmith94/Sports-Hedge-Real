@@ -348,6 +348,9 @@ class PaperSettlementLegView(BaseModel):
     filled_odds: Decimal | None = None
     displayed_odds: Decimal | None = None
     fill_kind: str
+    fill_id: str | None = None
+    tranche_id: str | None = None
+    source_market_id: str | None = None
     opening_action: str | None = None
     canonical_state: str | None = None
 
