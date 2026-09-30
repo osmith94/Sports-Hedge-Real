@@ -420,6 +420,8 @@ class LiveRefreshStatus(BaseModel):
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
     background_pricing_paused: bool = False
+    settlement_scans_paused: bool = False
+    settlement_operator_summary: str | None = None
     operator_settings: OperatorScannerSettings | None = None
     interval_seconds: int = Field(default=10, ge=5, le=300)
     cycle_in_progress: bool = False
@@ -501,6 +503,8 @@ class OperationsHeartbeat(BaseModel):
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
     background_pricing_paused: bool = False
+    settlement_scans_paused: bool = False
+    settlement_operator_summary: str | None = None
     operator_settings: OperatorScannerSettings | None = None
     interval_seconds: int = Field(default=10, ge=5, le=300)
     cycle_in_progress: bool = False
@@ -666,6 +670,22 @@ class _UniverseCheckpointWrite:
     updated_at: str | None = None
 
 
+AUTO_SETTLE_PAUSED_SUMMARY = (
+    "AUTO SETTLE · paused by operator · no new settlement scan"
+)
+
+
+def _settlement_operator_summary(paused: bool, *, in_flight: bool = False) -> str | None:
+    """Diagnostics for the PAPER auto-settlement cycle. None when scanning."""
+
+    if not paused:
+        return None
+    summary = AUTO_SETTLE_PAUSED_SUMMARY
+    if in_flight:
+        summary = f"{summary} · in-flight scan may finish"
+    return summary
+
+
 class LiveRefreshCoordinator:
     """Independent HOT and UNIVERSE workers with scoped locks (Tenet 19)."""
 
@@ -695,6 +715,7 @@ class LiveRefreshCoordinator:
         self._operator_scanner_stopped = False
         self._universe_scans_paused = False
         self._background_pricing_paused = False
+        self._settlement_scans_paused = False
         self._universe_oneshot_pending = True
         self._startup_barrier_armed = False
         self._startup_pricing_ready = False
@@ -1075,6 +1096,7 @@ class LiveRefreshCoordinator:
             self._operator_scanner_stopped = operator.scanner_stopped
             self._universe_scans_paused = operator.universe_scans_paused
             self._background_pricing_paused = operator.background_pricing_paused
+            self._settlement_scans_paused = operator.settlement_scans_paused
             self.status = self.status.model_copy(
                 update={
                     "server_loop_enabled": resolved.paper_live_refresh_enabled,
@@ -1083,6 +1105,11 @@ class LiveRefreshCoordinator:
                     "scanner_stopped": operator.scanner_stopped,
                     "universe_scans_paused": operator.universe_scans_paused,
                     "background_pricing_paused": operator.background_pricing_paused,
+                    "settlement_scans_paused": operator.settlement_scans_paused,
+                    "settlement_operator_summary": _settlement_operator_summary(
+                        operator.settlement_scans_paused,
+                        in_flight=self._settlement_in_progress,
+                    ),
                     "startup_pricing_ready": self._startup_pricing_ready,
                     "startup_phase": (
                         STARTUP_PHASE_RUNNING
@@ -1749,6 +1776,31 @@ class LiveRefreshCoordinator:
         self._pulse_control()
         return saved
 
+    def apply_settlement_scans_paused(self, paused: bool) -> OperatorScannerSettings:
+        """Pause or resume new PAPER auto-settlement scans.
+
+        Does not cancel an in-flight settlement call, change trade state, delete
+        history, release treasury, or touch HOT, BACKGROUND, UNIVERSE, or
+        ACTIVE TRADE. Manual settlement stays available.
+        """
+
+        store = self._resolved_operator_store()
+        saved = store.save_settlement_scans_paused(paused)
+        with self._state_lock:
+            in_flight = self._settlement_in_progress
+            self._apply_operator_settings_unlocked(saved, cadence_changed=False)
+            self.status = self.status.model_copy(
+                update={
+                    "settlement_scans_paused": saved.settlement_scans_paused,
+                    "settlement_operator_summary": _settlement_operator_summary(
+                        saved.settlement_scans_paused,
+                        in_flight=in_flight,
+                    ),
+                }
+            )
+        self._pulse_control()
+        return saved
+
     def _sync_background_provider_admission(self, paused: bool) -> None:
         """Tell admission to refuse ungranted BACKGROUND leases while paused.
 
@@ -1834,6 +1886,10 @@ class LiveRefreshCoordinator:
     def background_pricing_paused(self) -> bool:
         return self._background_pricing_paused
 
+    @property
+    def settlement_scans_paused(self) -> bool:
+        return self._settlement_scans_paused
+
     def _universe_oneshot_allowed_unlocked(self) -> bool:
         return bool(
             self._universe_oneshot_pending
@@ -1873,6 +1929,7 @@ class LiveRefreshCoordinator:
         self._operator_scanner_stopped = operator.scanner_stopped
         self._universe_scans_paused = operator.universe_scans_paused
         self._background_pricing_paused = operator.background_pricing_paused
+        self._settlement_scans_paused = operator.settlement_scans_paused
         hot_changed = cadence_changed if hot_cadence_changed is None else hot_cadence_changed
         hot_target = int(operator.hot_target_refresh_seconds)
         hot_update: dict[str, Any] = {
@@ -1960,6 +2017,11 @@ class LiveRefreshCoordinator:
                 "scanner_stopped": operator.scanner_stopped,
                 "universe_scans_paused": operator.universe_scans_paused,
                 "background_pricing_paused": operator.background_pricing_paused,
+                "settlement_scans_paused": operator.settlement_scans_paused,
+                "settlement_operator_summary": _settlement_operator_summary(
+                    operator.settlement_scans_paused,
+                    in_flight=self._settlement_in_progress,
+                ),
                 "operator_settings": operator,
                 "interval_seconds": hot_target,
                 "hot": self.status.hot.model_copy(update=hot_update),
@@ -4776,6 +4838,8 @@ class LiveRefreshCoordinator:
             "scanner_stopped": status.scanner_stopped,
             "universe_scans_paused": status.universe_scans_paused,
             "background_pricing_paused": status.background_pricing_paused,
+            "settlement_scans_paused": status.settlement_scans_paused,
+            "settlement_operator_summary": status.settlement_operator_summary,
             "interval_seconds": status.interval_seconds,
             "hot_in_progress": self._hot_in_progress,
             "background_in_progress": self._background_in_progress,
@@ -5748,6 +5812,11 @@ class LiveRefreshCoordinator:
                     "scanner_stopped": self._operator_scanner_stopped,
                     "universe_scans_paused": self._universe_scans_paused,
                     "background_pricing_paused": self._background_pricing_paused,
+                    "settlement_scans_paused": self._settlement_scans_paused,
+                    "settlement_operator_summary": _settlement_operator_summary(
+                        self._settlement_scans_paused,
+                        in_flight=self._settlement_in_progress,
+                    ),
                     "startup_pricing_ready": self._startup_pricing_ready,
                     "startup_phase": (
                         STARTUP_PHASE_RUNNING
@@ -6278,6 +6347,14 @@ class LiveRefreshCoordinator:
         cadence = int(get_settings().paper_settlement_interval_seconds)
         with self._state_lock:
             if self._settlement_in_progress:
+                return
+            if self._settlement_scans_paused:
+                self.status = self.status.model_copy(
+                    update={
+                        "settlement_scans_paused": True,
+                        "settlement_operator_summary": _settlement_operator_summary(True),
+                    }
+                )
                 return
             due = self._next_settlement_due
             if due is not None and now < due:

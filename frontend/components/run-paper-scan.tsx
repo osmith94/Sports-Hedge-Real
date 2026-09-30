@@ -14,10 +14,12 @@ import {
   clearPaperUniverse,
   getEconomicsStatus,
   pauseBackgroundPricing,
+  pauseSettlementScans,
   pauseUniverseSchedule,
   resetMatchbookFee,
   resumeBackgroundPricing,
   resumePaperScanner,
+  resumeSettlementScans,
   resumeUniverseSchedule,
   runPaperBackgroundRefresh,
   runPaperCollection,
@@ -245,6 +247,7 @@ export function RunPaperScan() {
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
   const [universeScheduleBusy, setUniverseScheduleBusy] = useState(false);
   const [backgroundPauseBusy, setBackgroundPauseBusy] = useState(false);
+  const [settlementPauseBusy, setSettlementPauseBusy] = useState(false);
   const [universeRunMode, setUniverseRunMode] = useState<UniverseRunMode>("update");
   const [universeActionBusy, setUniverseActionBusy] = useState<"run" | "clear" | null>(null);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -514,6 +517,23 @@ export function RunPaperScan() {
     }
   }
 
+  async function toggleSettlementScansPaused() {
+    setSettlementPauseBusy(true);
+    setSettingsMessage(null);
+    try {
+      const status = liveRefresh?.settlement_scans_paused
+        ? await resumeSettlementScans()
+        : await pauseSettlementScans();
+      applyLiveRefresh(status, { forceSettings: true });
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error ? error.message : "Could not change AUTO SETTLE pause.",
+      );
+    } finally {
+      setSettlementPauseBusy(false);
+    }
+  }
+
   async function toggleUniverseSchedulePaused() {
     setUniverseScheduleBusy(true);
     setSettingsMessage(null);
@@ -697,6 +717,7 @@ export function RunPaperScan() {
   const scannerStopped = Boolean(liveRefresh?.scanner_stopped);
   const universeScansPaused = Boolean(liveRefresh?.universe_scans_paused);
   const backgroundPricingPaused = Boolean(liveRefresh?.background_pricing_paused);
+  const settlementScansPaused = Boolean(liveRefresh?.settlement_scans_paused);
   const nextHotMs = liveRefresh?.hot?.next_due_at
     ? Date.parse(liveRefresh.hot.next_due_at)
     : Number.NaN;
@@ -1009,6 +1030,28 @@ export function RunPaperScan() {
                 ? "Resume BACKGROUND"
                 : "Pause BACKGROUND"}
           </button>
+          <button
+            className={settlementScansPaused ? "scan-button" : "scan-button-secondary"}
+            type="button"
+            disabled={settlementPauseBusy || loading}
+            onClick={() => void toggleSettlementScansPaused()}
+            aria-label={
+              settlementScansPaused ? "Resume AUTO SETTLE" : "Pause AUTO SETTLE"
+            }
+            title={
+              settlementScansPaused
+                ? "Resume the 30-second PAPER auto-settlement cycle. Does not infer results."
+                : "Stop new automatic settlement scans. An in-flight scan may finish. HOT, BACKGROUND, UNIVERSE and ACTIVE TRADE continue. Manual settlement stays available."
+            }
+          >
+            {settlementPauseBusy
+              ? settlementScansPaused
+                ? "Resuming AUTO SETTLE…"
+                : "Pausing AUTO SETTLE…"
+              : settlementScansPaused
+                ? "Resume AUTO SETTLE"
+                : "Pause AUTO SETTLE"}
+          </button>
         </div>
         <div className="scan-ops-actions">
           <button
@@ -1047,6 +1090,11 @@ export function RunPaperScan() {
               BACKGROUND PAUSED · cursor preserved · HOT / ACTIVE / UNIVERSE continue
             </span>
           ) : null}
+          {settlementScansPaused ? (
+            <span className="status-badge" role="status">
+              AUTO SETTLE paused by operator · HOT / BACKGROUND / UNIVERSE / ACTIVE TRADE continue
+            </span>
+          ) : null}
         </div>
         {settingsMessage ? (
           <div className="scan-note" role="status">
@@ -1066,6 +1114,7 @@ export function RunPaperScan() {
             Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
             Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge discovery refresh, and the stored discovery refresh stays editable for resume.
             Pause BACKGROUND stops new BACKGROUND pricing slices only. In-flight provider calls finish, the coverage cursor stays, and HOT, ACTIVE and UNIVERSE continue. Resume continues from that cursor.
+            Pause AUTO SETTLE stops new 30-second PaperSettlementAgent scans only. An in-flight settlement call may finish. HOT, BACKGROUND, UNIVERSE and ACTIVE TRADE continue. Manual settlement and reverse-book unwind stay available. The pause does not change trade state, delete history, release treasury, or infer a result. Resume restores automatic scanning.
             Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT target refresh and UNIVERSE discovery refresh
             and max allocated per trade for subsequent server-owned work and does not trigger a scan.
             Football competitions Apply changes the current session scope, including season

@@ -1228,6 +1228,32 @@ def resume_background_pricing(
     return _operations_heartbeat(coordinator)
 
 
+@router.post("/scanner/settlement-scans/pause", response_model=OperationsHeartbeat)
+def pause_settlement_scans(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> OperationsHeartbeat:
+    """Stop new PAPER auto-settlement scans. In-flight settlement may finish.
+
+    HOT, BACKGROUND, UNIVERSE and ACTIVE TRADE continue. Manual settlement
+    and reverse-book unwind stay available. No venue orders.
+    """
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_settlement_scans_paused(True)
+    return _operations_heartbeat(coordinator)
+
+
+@router.post("/scanner/settlement-scans/resume", response_model=OperationsHeartbeat)
+def resume_settlement_scans(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> OperationsHeartbeat:
+    """Resume the PAPER auto-settlement cadence. Does not infer results."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_settlement_scans_paused(False)
+    return _operations_heartbeat(coordinator)
+
+
 @router.post(
     "/collect/hot",
     response_model=CollectionReport,

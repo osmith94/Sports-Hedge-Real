@@ -10,6 +10,7 @@ import {
   compactFillKindLabel,
   compactLegLine,
   compactLegLines,
+  paperLegListKey,
   compactMarketHeading,
   formatCompactDecimalOdds,
   formatStoredLine,
@@ -88,6 +89,34 @@ describe("active-trade canonical line and compact odds", () => {
     );
     const lines = compactLegLines(row);
     assert.equal(lines.length, 2);
+    const repeated = trade({
+      legs: [
+        leg({ fill_id: "mb-yes-1", tranche_id: "opening", outcome: "yes" }),
+        leg({ fill_id: "mb-yes-2", tranche_id: "topup-1", outcome: "yes" }),
+        leg({
+          venue: "kalshi",
+          outcome: "no",
+          currency: "USD",
+          fill_id: "ks-no-1",
+          tranche_id: "opening",
+          source_market_id: "kx-no",
+        }),
+        leg({
+          venue: "kalshi",
+          outcome: "no",
+          currency: "USD",
+          fill_id: "ks-no-2",
+          tranche_id: "topup-1",
+          source_market_id: "kx-no",
+        }),
+      ],
+    });
+    const repeatedLines = compactLegLines(repeated);
+    assert.equal(repeatedLines.length, 4);
+    assert.equal(repeatedLines[0], repeatedLines[1]);
+    assert.equal(repeatedLines[2], repeatedLines[3]);
+    const keys = repeated.legs.map((item, index) => paperLegListKey(item, index));
+    assert.equal(new Set(keys).size, keys.length);
     assert.match(lines[0], /Matchbook · OVER 2\.5 @ 1\.935/);
     assert.match(lines[1], /Kalshi · UNDER 2\.5 @ 2\.168/);
   });

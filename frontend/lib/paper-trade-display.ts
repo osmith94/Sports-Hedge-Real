@@ -143,6 +143,23 @@ export function compactLegLines(trade: PaperTrade): string[] {
   return trade.legs.map((leg) => compactLegLine(trade, leg));
 }
 
+export type LegListIdentity = {
+  fill_id?: string | null;
+  tranche_id?: string | null;
+  venue?: string | null;
+  outcome?: string | null;
+  source_market_id?: string | null;
+};
+
+/** Stable list key. Identity first, index always last so repeated tranches stay distinct. */
+export function paperLegListKey(leg: LegListIdentity, index: number): string {
+  const identity = [leg.fill_id, leg.tranche_id, leg.venue, leg.outcome, leg.source_market_id]
+    .filter((part) => part != null && String(part).length > 0)
+    .map((part) => String(part))
+    .join("|");
+  return identity ? `${identity}|${index}` : `leg|${index}`;
+}
+
 function familyDisplayLabel(trade: PaperTrade): string {
   if (trade.market_family) {
     return FAMILY_LABELS[trade.market_family] ?? humanizeToken(trade.market_family);

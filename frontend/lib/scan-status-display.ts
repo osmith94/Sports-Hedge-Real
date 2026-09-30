@@ -145,23 +145,52 @@ export function dualScanStatusLines(
   now: number | null = null,
 ): string[] {
   if (status?.scanner_stopped) {
-    return [
+    const stopped = [
       "ACTIVE TRADE · stopped by operator · no provider call",
       `${HOT_PRICING_LABEL} · stopped by operator · no provider call`,
       `${BACKGROUND_PRICING_LABEL} · stopped by operator · no provider call`,
       `${UNIVERSE_DISCOVERY_LABEL} · stopped by operator · no provider call`,
     ];
+    const autoSettle = autoSettleCopy(status);
+    if (autoSettle) {
+      stopped.push(`${autoSettle.label} · ${autoSettle.detail}`);
+    }
+    return stopped;
   }
   const active = activeTradeCopy(status, now);
   const hot = hotPricingCopy(status, now);
   const background = backgroundPriceCopy(status, now);
   const universe = universeDiscoveryCopy(status, now);
-  return [
+  const lines = [
     `${active.label} · ${active.detail}`,
     `${hot.label} · ${hot.detail}`,
     `${background.label} · ${background.detail}`,
     `${universe.label} · ${universe.detail}`,
   ];
+  const autoSettle = autoSettleCopy(status);
+  if (autoSettle) {
+    lines.push(`${autoSettle.label} · ${autoSettle.detail}`);
+  }
+  return lines;
+}
+
+export function autoSettleCopy(
+  status: LiveRefreshStatus | null,
+): LaneScanCopy | null {
+  if (!status?.settlement_scans_paused) return null;
+  const recorded = status.settlement_operator_summary?.trim();
+  if (recorded && recorded.startsWith("AUTO SETTLE")) {
+    const detail = recorded.replace(/^AUTO SETTLE\s*·\s*/, "");
+    return {
+      label: "AUTO SETTLE",
+      detail: detail || "paused by operator",
+    };
+  }
+  return {
+    label: "AUTO SETTLE",
+    detail:
+      "paused by operator · no new settlement scan · HOT / BACKGROUND / UNIVERSE / ACTIVE TRADE continue",
+  };
 }
 
 export function activeTradeCopy(

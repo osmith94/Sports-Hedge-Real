@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { LaneRefreshStatus, LiveRefreshStatus } from "./api";
-import { BACKGROUND_PRICING_LABEL, HOT_PRICING_LABEL, UNIVERSE_DISCOVERY_LABEL, backgroundPriceCopy, dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
+import { BACKGROUND_PRICING_LABEL, HOT_PRICING_LABEL, UNIVERSE_DISCOVERY_LABEL, autoSettleCopy, backgroundPriceCopy, dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
@@ -113,6 +113,18 @@ describe("dual cadence operator copy", () => {
       backgroundPriceCopy(backgroundResumed, now).detail,
       /paused by operator/,
     );
+    const settlementPaused = status({
+      settlement_scans_paused: true,
+      settlement_operator_summary: "AUTO SETTLE · paused by operator · no new settlement scan",
+    });
+    const settlementLines = dualScanStatusLines(settlementPaused, now);
+    assert.match(settlementLines.join("\n"), /AUTO SETTLE · paused by operator/);
+    assert.match(autoSettleCopy(settlementPaused)?.detail || "", /paused by operator/);
+    assert.match(settlementLines[0], /ACTIVE TRADE/);
+    assert.match(settlementLines[1], /HOT pricing/);
+    assert.match(settlementLines[2], /BACKGROUND pricing/);
+    assert.match(settlementLines[3], /UNIVERSE discovery/);
+    assert.equal(autoSettleCopy(status()), null);
     assert.equal(fastScanCopy(status(), now).label, HOT_PRICING_LABEL);
     assert.equal(fullSweepCopy(status(), now).label, UNIVERSE_DISCOVERY_LABEL);
     assert.equal(backgroundPriceCopy(status(), now).label, BACKGROUND_PRICING_LABEL);

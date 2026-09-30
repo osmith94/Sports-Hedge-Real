@@ -143,6 +143,7 @@ class OperatorScannerSettings(BaseModel):
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
     background_pricing_paused: bool = False
+    settlement_scans_paused: bool = False
     source: Literal["operator", "env_default"] = "env_default"
     updated_at: datetime | None = None
     restart_semantics: str = OPERATOR_SCANNER_RESTART_SEMANTICS
@@ -410,6 +411,7 @@ def env_operator_scanner_settings(
     scanner_stopped: bool = False,
     universe_scans_paused: bool = False,
     background_pricing_paused: bool = False,
+    settlement_scans_paused: bool = False,
     updated_at: datetime | None = None,
 ) -> OperatorScannerSettings:
     resolved = settings or get_settings()
@@ -440,6 +442,7 @@ def env_operator_scanner_settings(
         scanner_stopped=scanner_stopped,
         universe_scans_paused=universe_scans_paused,
         background_pricing_paused=background_pricing_paused,
+        settlement_scans_paused=settlement_scans_paused,
         source="env_default",
         updated_at=updated_at,
         restart_semantics=OPERATOR_SCANNER_RESTART_SEMANTICS,
@@ -516,6 +519,7 @@ class SqliteOperatorScannerSettingsStore:
                 scanner_stopped INTEGER NOT NULL,
                 universe_scans_paused INTEGER NOT NULL DEFAULT 0,
                 background_pricing_paused INTEGER NOT NULL DEFAULT 0,
+                settlement_scans_paused INTEGER NOT NULL DEFAULT 0,
                 source TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -554,6 +558,11 @@ class SqliteOperatorScannerSettingsStore:
             connection.execute(
                 "ALTER TABLE operator_scanner_settings "
                 "ADD COLUMN background_pricing_paused INTEGER NOT NULL DEFAULT 0"
+            )
+        if "settlement_scans_paused" not in columns:
+            connection.execute(
+                "ALTER TABLE operator_scanner_settings "
+                "ADD COLUMN settlement_scans_paused INTEGER NOT NULL DEFAULT 0"
             )
         if "outright_min_net_edge" not in columns:
             connection.execute(
@@ -608,6 +617,7 @@ class SqliteOperatorScannerSettingsStore:
         scanner_stopped: bool | None = None,
         universe_scans_paused: bool | None = None,
         background_pricing_paused: bool | None = None,
+        settlement_scans_paused: bool | None = None,
     ) -> OperatorScannerSettings:
         current = self.load()
         stopped = current.scanner_stopped if current is not None and scanner_stopped is None else bool(
@@ -623,6 +633,13 @@ class SqliteOperatorScannerSettingsStore:
             if current is not None and background_pricing_paused is None
             else bool(
                 background_pricing_paused if background_pricing_paused is not None else False
+            )
+        )
+        settlement_paused = (
+            current.settlement_scans_paused
+            if current is not None and settlement_scans_paused is None
+            else bool(
+                settlement_scans_paused if settlement_scans_paused is not None else False
             )
         )
         hot_reprice = _resolve_optional_seconds(
@@ -736,6 +753,7 @@ class SqliteOperatorScannerSettingsStore:
             scanner_stopped=stopped,
             universe_scans_paused=paused,
             background_pricing_paused=background_paused,
+            settlement_scans_paused=settlement_paused,
             source="operator",
             updated_at=datetime.now(UTC),
             restart_semantics=OPERATOR_SCANNER_RESTART_SEMANTICS,
@@ -759,6 +777,9 @@ class SqliteOperatorScannerSettingsStore:
             background_pricing_paused=(
                 current.background_pricing_paused if current is not None else False
             ),
+            settlement_scans_paused=(
+                current.settlement_scans_paused if current is not None else False
+            ),
         )
         if current is None or current.source != "operator":
             payload = env.model_copy(
@@ -769,6 +790,9 @@ class SqliteOperatorScannerSettingsStore:
                     ),
                     "background_pricing_paused": (
                         current.background_pricing_paused if current is not None else False
+                    ),
+                    "settlement_scans_paused": (
+                        current.settlement_scans_paused if current is not None else False
                     ),
                     "updated_at": datetime.now(UTC),
                 }
@@ -799,6 +823,9 @@ class SqliteOperatorScannerSettingsStore:
             background_pricing_paused=(
                 current.background_pricing_paused if current is not None else False
             ),
+            settlement_scans_paused=(
+                current.settlement_scans_paused if current is not None else False
+            ),
         )
         if current is None or current.source != "operator":
             payload = env.model_copy(
@@ -809,6 +836,9 @@ class SqliteOperatorScannerSettingsStore:
                     "universe_scans_paused": bool(paused),
                     "background_pricing_paused": (
                         current.background_pricing_paused if current is not None else False
+                    ),
+                    "settlement_scans_paused": (
+                        current.settlement_scans_paused if current is not None else False
                     ),
                     "updated_at": datetime.now(UTC),
                 }
@@ -839,6 +869,9 @@ class SqliteOperatorScannerSettingsStore:
                 current.universe_scans_paused if current is not None else False
             ),
             background_pricing_paused=paused,
+            settlement_scans_paused=(
+                current.settlement_scans_paused if current is not None else False
+            ),
         )
         if current is None or current.source != "operator":
             payload = env.model_copy(
@@ -850,6 +883,9 @@ class SqliteOperatorScannerSettingsStore:
                         current.universe_scans_paused if current is not None else False
                     ),
                     "background_pricing_paused": bool(paused),
+                    "settlement_scans_paused": (
+                        current.settlement_scans_paused if current is not None else False
+                    ),
                     "updated_at": datetime.now(UTC),
                 }
             )
@@ -857,6 +893,54 @@ class SqliteOperatorScannerSettingsStore:
             payload = current.model_copy(
                 update={
                     "background_pricing_paused": bool(paused),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+        self._upsert(payload)
+        loaded = self.load()
+        assert loaded is not None
+        return loaded
+
+    def save_settlement_scans_paused(
+        self,
+        paused: bool,
+        *,
+        settings: Settings | None = None,
+    ) -> OperatorScannerSettings:
+        """Persist AUTO SETTLE pause without changing other operator controls."""
+
+        current = self.load()
+        env = env_operator_scanner_settings(
+            settings,
+            scanner_stopped=current.scanner_stopped if current is not None else False,
+            universe_scans_paused=(
+                current.universe_scans_paused if current is not None else False
+            ),
+            background_pricing_paused=(
+                current.background_pricing_paused if current is not None else False
+            ),
+            settlement_scans_paused=paused,
+        )
+        if current is None or current.source != "operator":
+            payload = env.model_copy(
+                update={
+                    "scanner_stopped": (
+                        current.scanner_stopped if current is not None else False
+                    ),
+                    "universe_scans_paused": (
+                        current.universe_scans_paused if current is not None else False
+                    ),
+                    "background_pricing_paused": (
+                        current.background_pricing_paused if current is not None else False
+                    ),
+                    "settlement_scans_paused": bool(paused),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+        else:
+            payload = current.model_copy(
+                update={
+                    "settlement_scans_paused": bool(paused),
                     "updated_at": datetime.now(UTC),
                 }
             )
@@ -879,9 +963,10 @@ class SqliteOperatorScannerSettingsStore:
                     universe_cadence_seconds, universe_discovery_refresh_seconds,
                     max_allocated_per_trade_gbp, max_event_gbp, max_opportunity_gbp,
                     max_one_time_gbp, scanner_stopped,
-                    universe_scans_paused, background_pricing_paused, source, updated_at
+                    universe_scans_paused, background_pricing_paused, settlement_scans_paused,
+                    source, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_net_edge = excluded.min_net_edge,
                     outright_min_net_edge = excluded.outright_min_net_edge,
@@ -902,6 +987,7 @@ class SqliteOperatorScannerSettingsStore:
                     scanner_stopped = excluded.scanner_stopped,
                     universe_scans_paused = excluded.universe_scans_paused,
                     background_pricing_paused = excluded.background_pricing_paused,
+                    settlement_scans_paused = excluded.settlement_scans_paused,
                     source = excluded.source,
                     updated_at = excluded.updated_at
                 """,
@@ -927,6 +1013,7 @@ class SqliteOperatorScannerSettingsStore:
                     1 if payload.scanner_stopped else 0,
                     1 if payload.universe_scans_paused else 0,
                     1 if payload.background_pricing_paused else 0,
+                    1 if payload.settlement_scans_paused else 0,
                     payload.source,
                     now,
                 ),
@@ -953,6 +1040,7 @@ def resolve_operator_scanner_settings(
             scanner_stopped=saved.scanner_stopped,
             universe_scans_paused=saved.universe_scans_paused,
             background_pricing_paused=saved.background_pricing_paused,
+            settlement_scans_paused=saved.settlement_scans_paused,
             updated_at=saved.updated_at,
         )
     return saved.model_copy(
@@ -1151,6 +1239,9 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         universe_scans_paused=bool(int(_row_optional(row, "universe_scans_paused") or 0)),
         background_pricing_paused=bool(
             int(_row_optional(row, "background_pricing_paused") or 0)
+        ),
+        settlement_scans_paused=bool(
+            int(_row_optional(row, "settlement_scans_paused") or 0)
         ),
         source=source,
         updated_at=updated,

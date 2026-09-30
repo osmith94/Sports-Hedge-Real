@@ -50,7 +50,9 @@ describe("settlement reconciliation display", () => {
 
   it("operator failsafe asks for a canonical result, not source/source id", () => {
     const book = readFileSync(join(frontendRoot, "components/paper-trade-book.tsx"), "utf8");
-    expect(book).toMatch(/Manual close \/ settle result/);
+    expect(book).toMatch(/Settle completed trade/);
+    expect(book).toMatch(/does not use current market quotes/);
+    expect(book).not.toMatch(/Manual close \/ settle result/);
     expect(book).toMatch(/Confirm result & close trade/);
     expect(book).toMatch(/Actual canonical market result/);
     expect(book).not.toMatch(/name="source_id"/);
