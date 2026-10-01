@@ -384,13 +384,14 @@ describe("compact venue mini-cards", () => {
     expect(failingVenueChecks(healthy).join(" ")).not.toContain("Settlement fingerprint complete");
   });
 
-  it("names PAPER-assumed NFL settlement instead of an unknown fingerprint", () => {
+  it("names registered NFL settlement instead of an unknown fingerprint", () => {
     const paper = facts("kalshi", yesNo, {
       settlement_complete: false,
       settlement_status: "paper_assumed",
       settlement_provenance: "exceptional_settlement_mismatch_possible",
     });
-    expect(settlementLabel(paper)).toContain("PAPER-assumed settlement");
+    expect(settlementLabel(paper)).toContain("Registered equivalent");
+    expect(settlementLabel(paper).toLowerCase()).not.toContain("never live-execution");
     expect(settlementLabel(paper)).not.toContain("incomplete/unknown");
     expect(failingVenueChecks(paper).join(" ")).not.toContain("incomplete/unknown");
     const unknown = facts("kalshi", yesNo, {
@@ -442,7 +443,7 @@ describe("sport-aware approved families", () => {
     expect(isPrimaryApprovedFamily("mlb", "first_team_to_score")).toBe(false);
   });
 
-  it("uses 1X2 paper copy for football and structural copy for NFL families", () => {
+  it("labels admitted football and NFL rows as registered equivalents", () => {
     const twoWay = [quote("home", 1.91, 200), quote("away", 2.05, 200)];
     const football = inventoryCardViewModel(
       row({
@@ -451,7 +452,8 @@ describe("sport-aware approved families", () => {
         kalshi: facts("kalshi", homeDrawAway),
       }),
     );
-    expect(football.discoveredNotes.join(" ")).toContain("1X2 paper-mode assumption");
+    expect(football.discoveredNotes.join(" ")).toContain("Registered equivalent");
+    expect(football.discoveredNotes.join(" ").toLowerCase()).not.toContain("never live-execution");
     const nfl = inventoryCardViewModel(
       row({
         family: "game_winner",
@@ -461,7 +463,8 @@ describe("sport-aware approved families", () => {
         kalshi: facts("kalshi", twoWay, { family: "game_winner" }),
       }),
     );
-    expect(nfl.discoveredNotes.join(" ")).toContain("PAPER structural equivalence");
+    expect(nfl.discoveredNotes.join(" ")).toContain("Registered equivalent");
+    expect(nfl.discoveredNotes.join(" ").toLowerCase()).not.toContain("never live-execution");
     expect(nfl.title.toLowerCase()).toContain("game winner");
   });
 });

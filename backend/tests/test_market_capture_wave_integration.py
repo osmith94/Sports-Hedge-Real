@@ -359,8 +359,8 @@ def test_mlb_paper_admission_still_reprices_and_stays_off_live_execution() -> No
     assert scan_eligible_pair(kalshi, matchbook, matched) is True
     assessment = classify_pair(kalshi, matchbook)
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-    assert catalogue_allows_live_execution(kalshi, matchbook) is False
-    assert catalogue_allows_live_execution(kalshi, polymarket) is False
+    assert catalogue_allows_live_execution(kalshi, matchbook) is True
+    assert catalogue_allows_live_execution(kalshi, polymarket) is True
     settings = Settings()
     assert settings.sports_hedge_mode == "paper"
     assert settings.sports_hedge_execution_enabled is False

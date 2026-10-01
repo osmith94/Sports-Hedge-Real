@@ -166,7 +166,7 @@ def test_gamewin_is_paper_assumed_and_proven_90m_is_approved() -> None:
     )
     assert unknown.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert unknown.settlement_assumption == "regulation_time"
-    assert unknown.execution_eligible is False
+    assert unknown.execution_eligible is True
     mb = PayloadSide(venue=VenueName.MATCHBOOK, event=mb_event, markets=[_mb_match_odds()])
     kalshi_unknown = PayloadSide(
         venue=VenueName.KALSHI,
@@ -179,7 +179,7 @@ def test_gamewin_is_paper_assumed_and_proven_90m_is_approved() -> None:
     left = normalize_payload_side(mb)
     right = normalize_payload_side(kalshi_unknown)
     assert catalogue_allows_solver(left, right) is True
-    assert catalogue_allows_live_execution(left, right) is False
+    assert catalogue_allows_live_execution(left, right) is True
     proven = classify_payload_pair(
         PayloadSide(venue=VenueName.MATCHBOOK, event=mb_event, markets=[_mb_match_odds()]),
         PayloadSide(
@@ -215,7 +215,7 @@ def test_gamewin_is_paper_assumed_and_proven_90m_is_approved() -> None:
     )
     assert fair.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert fair.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
-    assert fair.execution_eligible is False
+    assert fair.execution_eligible is True
     assert fair.paper_mode_admitted is True
     incomplete = classify_payload_pair(
         PayloadSide(venue=VenueName.MATCHBOOK, event=mb_event, markets=[_mb_match_odds()]),

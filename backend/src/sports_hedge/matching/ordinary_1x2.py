@@ -14,7 +14,7 @@ Issue #316 additionally admits a bounded PAPER-MODE assumption for ordinary
 Matchbook↔Kalshi 1X2 when GAME HOME/DRAW/AWAY is complete. Issue #326 extends
 that owner-approved paper assumption to BTTS, exact-line TOTAL, and FTTS, and
 does not let Kalshi cancel/reschedule-to-fair-price wording block PAPER
-admission. That assumption is never live-execution eligible.
+admission. That stored assumption is not, by itself, a Real execution block.
 """
 
 from __future__ import annotations

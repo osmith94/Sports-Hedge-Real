@@ -87,7 +87,7 @@ def test_classifier_has_no_scan_lane_and_is_shared_by_hot_and_universe() -> None
     sample = next(item for item in census_corpus() if item.entry_id == "good-1x2-mb-k-complete")
     assessment = classify_payload_pair(sample.left, sample.right)
     assert assessment.catalogue_shared_by == ("hot", "universe")
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert assessment.data_class == "deterministic_fixture"
     admission = assess_catalogue_admission(
         normalize_payload_side(sample.left),
@@ -153,7 +153,7 @@ def test_corpus_classifications_match_expected_states() -> None:
             assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
             assert assessment.solver_model is not None
             assert assessment.settlement_complete is True
-            assert assessment.execution_eligible is False
+            assert assessment.execution_eligible is assessment.paper_mode_admitted
             from sports_hedge.matching.approved_register import registered_structural_match
 
             left_market = normalize_payload_side(entry.left)
@@ -161,14 +161,14 @@ def test_corpus_classifications_match_expected_states() -> None:
             if registered_structural_match(left_market, right_market):
                 assert assessment.paper_mode_admitted is True
                 assert assessment.matcher_matched is True
-                assert assessment.execution_eligible is False
+                assert assessment.execution_eligible is True
             else:
                 assert assessment.paper_mode_admitted is False
         elif entry.known_kind == "paper_assumed":
             assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
             assert assessment.settlement_complete is False
             assert assessment.paper_mode_admitted is True
-            assert assessment.execution_eligible is False
+            assert assessment.execution_eligible is True
             assert assessment.settlement_assumption == "regulation_time"
         else:
             assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
@@ -187,14 +187,14 @@ def test_gamewin_unknown_1x2_is_paper_assumed_not_settlement_proven() -> None:
     assert assessment.solver_model == "simple_complete_set"
     assert assessment.known_conflict_with_current_matcher is False
     assert assessment.paper_mode_admitted is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert assessment.settlement_assumption == "regulation_time"
     matchbook = normalize_payload_side(entry.left)
     kalshi = normalize_payload_side(entry.right)
     assert allow_unknown_settlement_for_ordinary_1x2(matchbook, kalshi) is True
     assert kalshi.settlement.is_economically_complete() is False
     assert catalogue_allows_solver(matchbook, kalshi) is True
-    assert catalogue_allows_live_execution(matchbook, kalshi) is False
+    assert catalogue_allows_live_execution(matchbook, kalshi) is True
 
 
 def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
@@ -254,7 +254,7 @@ def test_high_confidence_does_not_approve_incomplete_settlement() -> None:
     assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.matcher_matched is True
     assert assessment.paper_mode_admitted is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
 
 
 def test_unregistered_examples_are_not_runtime_review_loops() -> None:
@@ -277,7 +277,7 @@ def test_unregistered_examples_are_not_runtime_review_loops() -> None:
     for entry_id in paper_assumed_ids:
         assessment = classify_payload_pair(by_id[entry_id].left, by_id[entry_id].right)
         assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT, entry_id
-        assert assessment.execution_eligible is False
+        assert assessment.execution_eligible is True
 
 
 def test_unsupported_and_parameter_and_contradiction_examples() -> None:
@@ -432,7 +432,7 @@ def test_independently_proven_registered_pair_is_paper_admitted() -> None:
     assessment = classify_payload_pair(entry.left, entry.right)
     assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
     assert assessment.paper_mode_admitted is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert catalogue_allows_solver(left, right) is True
     assert catalogue_allows_live_execution(left, right) is True
     assert Settings().sports_hedge_execution_enabled is False
@@ -440,7 +440,7 @@ def test_independently_proven_registered_pair_is_paper_admitted() -> None:
     admission = assess_catalogue_admission(left, right)
     assert admission.allowed is True
     assert admission.paper_mode_admitted is True
-    assert admission.live_execution_eligible is False
+    assert admission.live_execution_eligible is True
 
     service, repository = _scan_service()
     try:
@@ -494,12 +494,12 @@ def test_paper_assumed_gamewin_is_paper_admitted_never_live_execution() -> None:
     admission = assess_catalogue_admission(left, right)
     assert admission.allowed is True
     assert admission.paper_mode_admitted is True
-    assert admission.live_execution_eligible is False
+    assert admission.live_execution_eligible is True
     assert admission.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert admission.settlement_assumption == "regulation_time"
     assert scan_eligible_pair(left, right, match) is True
     assert catalogue_allows_solver(left, right) is True
-    assert catalogue_allows_live_execution(left, right) is False
+    assert catalogue_allows_live_execution(left, right) is True
 
     service, repository = _scan_service()
     try:

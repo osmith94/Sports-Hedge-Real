@@ -30,8 +30,9 @@ DNB / handicap / double chance / team total / team-to-score / clean sheet stay
 explicit in diagnostics as deferred / unsupported / venue-unavailable. They must
 not trigger settlement enrichment, depth, solver, or HOT promotion.
 
-PAPER_ASSUMED_EQUIVALENT is paper-mode only. It is never live-execution eligible
-and is never represented as independently proven settlement. Cross-venue
+PAPER_ASSUMED_EQUIVALENT is the stored register label. It is not represented
+as independently proven settlement, and that label alone is not a Real
+execution block. Cross-venue
 equivalence for the four locked families is an owner-approved PAPER product
 assumption (Issue #326). The scanner must not re-litigate settlement text on
 every scan.
@@ -266,7 +267,7 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                 "template / soccergamewin placeholder is PAPER_ASSUMED_EQUIVALENT in "
                 "paper mode when HOME/DRAW/AWAY is complete. Cancel/reschedule-to-"
                 "fair-price does not block PAPER admission (Issue #326). "
-                "Series ticker never approves. Paper-assumed is never live-execution eligible."
+                "Series ticker never approves. Paper-assumed is a registered equivalent."
             ),
             evidence=(
                 _K_SERIES,
@@ -300,8 +301,8 @@ ARCHETYPE_SPECS: tuple[CatalogueArchetypeSpec, ...] = (
                     "Phase-1 Matchbook↔Kalshi 1X2 is PAPER_ASSUMED_EQUIVALENT when "
                     "Kalshi GAME contracts assemble HOME/DRAW/AWAY, fixture identity "
                     "is exact, and period/line are structurally consistent. "
-                    "settlement_assumption=regulation_time. This is paper-mode only "
-                    "and is never live-execution eligible. Independently proven "
+                    "settlement_assumption=regulation_time. The historical paper label "
+                    "does not reject this registered equivalent. Independently proven "
                     "90-minute wording remains APPROVED_EQUIVALENT. Extra time, "
                     "penalties, and to-qualify fail closed. Cancel/reschedule-to-"
                     "fair-price does not block PAPER admission. Series ticker never approves."

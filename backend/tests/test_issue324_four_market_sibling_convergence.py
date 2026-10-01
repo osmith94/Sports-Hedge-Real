@@ -589,7 +589,7 @@ def test_gamewin_1x2_is_paper_assumed_across_three_minute_offset() -> None:
     )
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.settlement_assumption == "regulation_time"
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert assessment.paper_mode_admitted is True
 
     left = normalize_payload_side(

@@ -332,8 +332,9 @@ def test_structural_game_winner_and_half_run_totals_are_paper_keys() -> None:
     assert registered_canonical_key(matchbook, matchbook) is None
     assessment = classify_pair(kalshi, polymarket)
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-    assert assessment.execution_eligible is False
-    assert catalogue_allows_live_execution(kalshi, polymarket) is False
+    assert assessment.execution_eligible is True
+    assert catalogue_allows_live_execution(kalshi, polymarket) is True
+    assert "mlb_settlement_equivalence_not_proven" not in assessment.reason
     assert Settings().sports_hedge_execution_enabled is False
 
     same_line_kalshi = _total_market("kalshi", "7.5")

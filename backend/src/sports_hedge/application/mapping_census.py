@@ -133,8 +133,9 @@ def census_from_report(
             "Inventory MATCHED_EQUIVALENT / PAPER_ASSUMED_EQUIVALENT and "
             "market_family_breakdown require the shared catalogue gate. "
             "PAPER_ASSUMED_EQUIVALENT is the locked four-family paper-mode "
-            "assumption (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS) and is "
-            "never live-execution eligible. Matcher structural hits remain on match_reasons."
+            "assumption (MATCH_RESULT / BTTS / exact-line TOTAL / FTTS). "
+            "That label does not reject an already-admitted relationship. "
+            "Matcher structural hits remain on match_reasons."
         ),
         (
             "catalogue_by_archetype counts Tenet-20 coverage states per target "

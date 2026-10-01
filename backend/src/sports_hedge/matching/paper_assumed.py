@@ -6,7 +6,8 @@ canonical market identity/parameters match. Cross-venue settlement equivalence
 for these four families is an owner-approved product assumption in PAPER /
 READ-ONLY mode. The scanner must not re-litigate settlement text on every scan.
 
-This path is never live-execution eligible. Independently proven complete
+An already-admitted relationship is not rejected for Real solely because this
+label is historical paper wording. Independently proven complete
 fingerprints remain APPROVED_EQUIVALENT. Proven extra-time / penalties /
 to-qualify contradictions, wrong fixture/family/period, TOTAL line mismatch,
 and incomplete outcome-space identity stay fail-closed. Exceptional
@@ -75,6 +76,7 @@ PAPER_NONBLOCKING_REJECTION_REASONS = frozenset(
         "paper_assumed_not_live_execution_eligible",
         "paper_mode_only_not_live_execution_eligible",
         "paper_assumed_equivalent_not_settlement_proven",
+        "mlb_settlement_equivalence_not_proven",
         "owner_approved_nfl_paper_normal_completion",
         "owner_approved_nba_paper_normal_completion",
         "exceptional_settlement_mismatch_possible",

@@ -435,7 +435,7 @@ def test_game_winner_kalshi_polymarket_is_paper_admitted() -> None:
     assert registered_canonical_key(kalshi, pm) == CANONICAL_NBA_GAME_WINNER
     assert NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT not in result.reasons
     assert catalogue_allows_solver(kalshi, pm)
-    assert catalogue_allows_live_execution(kalshi, pm) is False
+    assert catalogue_allows_live_execution(kalshi, pm) is True
     assessment = classify_pair(kalshi, pm)
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.settlement_assumption == "regulation_time"

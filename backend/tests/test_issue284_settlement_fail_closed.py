@@ -191,7 +191,7 @@ def test_complete_regulation_and_complete_include_et_fields_fail_closed() -> Non
         ),
     )
     assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is assessment.paper_mode_admitted
 
 
 def test_no_matchbook_kalshi_cancel_fair_price_assumption_exists() -> None:
@@ -215,7 +215,7 @@ def test_captured_fair_price_payload_is_not_approved_equivalent() -> None:
     assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
     assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.settlement_complete is False
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is assessment.paper_mode_admitted
     assert assessment.paper_mode_admitted is True
     assert assessment.matcher_matched is True
     mb = normalize_payload_side(
@@ -235,7 +235,7 @@ def test_captured_fair_price_payload_is_not_approved_equivalent() -> None:
     assert scan_eligible_pair(mb, kalshi, match) is True
     admission = assess_catalogue_admission(mb, kalshi)
     assert admission.allowed is True
-    assert admission.live_execution_eligible is False
+    assert admission.live_execution_eligible is True
     assert admission.catalogue_shared_by == ("hot", "universe")
 
 
@@ -276,7 +276,7 @@ def test_explicit_90_minute_without_fair_price_sibling_remains_approved() -> Non
     assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
     assert assessment.reason == "approved_equivalent"
     assert assessment.settlement_complete is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is assessment.paper_mode_admitted
 
 
 def test_generic_gamewin_is_paper_assumed_not_approved() -> None:
@@ -287,7 +287,7 @@ def test_generic_gamewin_is_paper_assumed_not_approved() -> None:
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.matcher_admits_unknown_1x2 is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is assessment.paper_mode_admitted
     left = normalize_payload_side(_mb([_mb_1x2()]))
     right = normalize_payload_side(
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES)

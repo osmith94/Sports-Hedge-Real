@@ -214,7 +214,6 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
     if paper_assumed:
         settlement_assumption = "regulation_time"
         notes.append("settlement_assumption=regulation_time")
-        notes.append("paper_mode_only_not_live_execution_eligible")
         if OWNER_APPROVED_PAPER_EQUIVALENCE_REASON not in notes:
             notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
         if REGISTER_ADMITTED_REASON not in notes:
@@ -230,7 +229,7 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         settlement_complete=complete,
         known_conflict_with_current_matcher=conflict,
         notes=notes,
-        execution_eligible=False,
+        execution_eligible=paper_admitted,
         paper_mode_admitted=paper_admitted,
         settlement_assumption=settlement_assumption,
     )

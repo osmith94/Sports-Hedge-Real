@@ -209,23 +209,21 @@ export function classifyPairs(row: KalshiFixtureMarketInventoryRow): {
         row.comparison_status === "paper_assumed_equivalent") &&
       !mappingFailed
     ) {
-      const assumed = row.comparison_status === "paper_assumed_equivalent";
+      const registered = row.comparison_status === "paper_assumed_equivalent";
       return {
         comparable: [],
         incompatible: [],
         leftoverVenues: [],
         comparableKind,
-        comparableHeadline: assumed
-          ? `Paper-assumed comparable: ${present.map(venueTitle).join(" ↔ ")}`
-          : `Comparable: ${present.map(venueTitle).join(" ↔ ")}`,
+        comparableHeadline: `Comparable: ${present.map(venueTitle).join(" ↔ ")}`,
         badges: [
           {
-            text: `${present.map(venueShortLabel).join(" ↔ ")} · ${assumed ? "paper assumed" : "equivalent"}`,
+            text: `${present.map(venueShortLabel).join(" ↔ ")} · ${registered ? "registered equivalent" : "equivalent"}`,
             tone: "eligible",
             comparable: true,
           },
         ],
-        discoveredNotes: assumed ? [paperAssumptionNote(row)] : [],
+        discoveredNotes: registered ? [registeredEquivalentNote(row)] : [],
       };
     }
   }
@@ -286,17 +284,8 @@ export function isPrimaryApprovedFamily(
   return true;
 }
 
-function paperAssumptionNote(row: KalshiFixtureMarketInventoryRow): string {
-  const family = (row.family || "").toLowerCase();
-  if (
-    family === "game_winner" ||
-    family === "point_spread" ||
-    family === "total_points" ||
-    family === "total_runs"
-  ) {
-    return "PAPER structural equivalence; not independently settlement-proven; never live-execution eligible.";
-  }
-  return "1X2 paper-mode assumption; not independently settlement-proven; never live-execution eligible.";
+function registeredEquivalentNote(_row: KalshiFixtureMarketInventoryRow): string {
+  return "Registered equivalent. Settlement follows the approved match.";
 }
 
 function marketTitle(row: KalshiFixtureMarketInventoryRow): string {

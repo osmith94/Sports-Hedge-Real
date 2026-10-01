@@ -7,7 +7,7 @@ import {
 
 const STATE_LABELS: Record<string, string> = {
   approved_equivalent: "APPROVED_EQUIVALENT",
-  paper_assumed_equivalent: "PAPER_ASSUMED_EQUIVALENT",
+  paper_assumed_equivalent: "REGISTERED_EQUIVALENT",
   approved_parameter_mismatch: "APPROVED_PARAMETER_MISMATCH",
   known_contradiction: "KNOWN_CONTRADICTION",
   review_required: "REVIEW_REQUIRED",
@@ -77,7 +77,7 @@ export function universeArchetypeSummaryLines(status: LiveRefreshStatus | null):
     const unsupported = counts.unsupported ?? 0;
     const unavailable = counts.venue_unavailable ?? 0;
     return (
-      `${archetype}: ${approved} approved · ${paperAssumed} paper-assumed · ` +
+      `${archetype}: ${approved} approved · ${paperAssumed} registered equivalent · ` +
       `${review} review · ${unsupported} unsupported · ${unavailable} unavailable`
     );
   });

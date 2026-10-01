@@ -430,13 +430,13 @@ def test_material_kalshi_fair_price_is_paper_assumed_never_approved() -> None:
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
     assert assessment.reason == "paper_assumed_equivalent"
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     mb = normalize_payload_side(left)
     kalshi = normalize_payload_side(right)
     assert kalshi.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
     assert catalogue_allows_solver(mb, kalshi) is True
     assert scan_eligible_pair(mb, kalshi, MarketMatcher().match(mb, kalshi)) is True
-    assert assess_catalogue_admission(mb, kalshi).live_execution_eligible is False
+    assert assess_catalogue_admission(mb, kalshi).live_execution_eligible is True
 
 
 @pytest.mark.asyncio
@@ -525,7 +525,7 @@ async def test_collector_fair_price_monza_collapses_with_precise_reason_and_solv
     assert kalshi_side.settlement.unknown_reason == KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
     assert catalogue_allows_solver(mb, kalshi_side) is True
     assert assess_catalogue_admission(mb, kalshi_side).allowed is True
-    assert assess_catalogue_admission(mb, kalshi_side).live_execution_eligible is False
+    assert assess_catalogue_admission(mb, kalshi_side).live_execution_eligible is True
     assert scan_eligible_pair(mb, kalshi_side, MarketMatcher().match(mb, kalshi_side)) is True
 
 

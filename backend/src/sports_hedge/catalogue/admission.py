@@ -6,9 +6,9 @@ admission, even when a legacy settlement fingerprint is independently
 complete. Independently proven APPROVED_EQUIVALENT remains offline
 census/onboarding knowledge until that venue archetype is registered.
 
-Registered PAPER_ASSUMED_EQUIVALENT / APPROVED_EQUIVALENT Matchbook↔Kalshi
-rows carry settlement_assumption=regulation_time and are never
-live-execution eligible.
+Registered PAPER_ASSUMED_EQUIVALENT / APPROVED_EQUIVALENT rows carry
+settlement_assumption=regulation_time. That historical paper label does not
+by itself reject Real execution of an already-admitted relationship.
 
 REVIEW_REQUIRED, UNSUPPORTED, parameter mismatch and known contradiction
 cannot reach the solver. This module is scan-lane independent.
@@ -66,7 +66,7 @@ def assess_catalogue_admission(
             allowed=True,
             assessment=assessment,
             paper_mode_admitted=True,
-            live_execution_eligible=False,
+            live_execution_eligible=True,
             settlement_assumption=assessment.settlement_assumption,
         )
     rejection = catalogue_rejection_reason(assessment)
@@ -85,22 +85,16 @@ def assess_catalogue_admission(
 
 
 def catalogue_allows_solver(left: CanonicalMarket, right: CanonicalMarket) -> bool:
-    """Paper-mode solver/scan eligibility. Never live execution."""
+    """Solver eligibility for an already-admitted registered relationship."""
 
     return assess_catalogue_admission(left, right).allowed
 
 
 def catalogue_allows_live_execution(left: CanonicalMarket, right: CanonicalMarket) -> bool:
-    """Live execution requires independently proven AND registered equivalence.
+    """Real eligibility follows admission. Historical paper wording is not a block.
 
-    Phase 1 still has execution disabled. Unregistered venues cannot enter
-    the live-execution helper merely because fingerprints are complete.
+    Unregistered venues, structural mismatches, and other fail-closed catalogue
+    states stay ineligible. No venue order is placed here.
     """
 
-    from sports_hedge.matching.approved_register import registered_structural_match
-
-    assessment = classify_pair(left, right)
-    return (
-        assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
-        and registered_structural_match(left, right)
-    )
+    return assess_catalogue_admission(left, right).live_execution_eligible

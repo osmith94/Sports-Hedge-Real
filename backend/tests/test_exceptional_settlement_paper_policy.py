@@ -90,7 +90,7 @@ def test_football_polymarket_kalshi_match_result_is_paper_admitted() -> None:
     assert scan_eligible_pair(promoted, kalshi[0], match) is True
     assessment = classify_pair(promoted, kalshi[0])
     assert assessment.paper_mode_admitted is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT not in match.reasons
 
 
@@ -101,7 +101,7 @@ def test_football_polymarket_matchbook_match_result_is_paper_admitted() -> None:
     assert registered_canonical_key(matchbook[0], promoted) == "MATCH_RESULT_FT"
     assert scan_eligible_pair(matchbook[0], promoted, match) is True
     assert classify_pair(matchbook[0], promoted).paper_mode_admitted is True
-    assert classify_pair(matchbook[0], promoted).execution_eligible is False
+    assert classify_pair(matchbook[0], promoted).execution_eligible is True
 
 
 def test_one_football_row_yields_pairwise_paper_without_native_id_overwrite() -> None:
@@ -194,7 +194,7 @@ def test_mlb_approved_families_are_not_blocked_by_settlement_equivalence() -> No
     polymarket_total = _total_market("polymarket", "8.5")
     assert registered_canonical_key(kalshi_total, polymarket_total) == "MLB_TOTAL_RUNS_FT:8.5"
     assert classify_pair(kalshi, matchbook).paper_mode_admitted is True
-    assert classify_pair(kalshi, matchbook).execution_eligible is False
+    assert classify_pair(kalshi, matchbook).execution_eligible is True
 
 
 def test_tennis_match_winner_is_not_blocked_only_by_retirement() -> None:
@@ -203,7 +203,7 @@ def test_tennis_match_winner_is_not_blocked_only_by_retirement() -> None:
     matched = MarketMatcher().match(left, right)
     assert TENNIS_RETIREMENT_SETTLEMENT_NOT_EQUIVALENT not in matched.reasons
     assert scan_eligible_pair(left, right, matched) is True
-    assert classify_pair(left, right).execution_eligible is False
+    assert classify_pair(left, right).execution_eligible is True
 
 
 def test_nba_and_ncaab_ordinary_contract_blocks_remain() -> None:

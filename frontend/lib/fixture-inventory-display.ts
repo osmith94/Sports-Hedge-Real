@@ -23,7 +23,7 @@ export type KalshiFixtureMarketInventoryRow = FixtureMarketInventoryRow & {
 
 const COMPARISON_LABELS: Record<string, string> = {
   matched_equivalent: "Matched equivalent",
-  paper_assumed_equivalent: "Paper-assumed equivalent",
+  paper_assumed_equivalent: "Registered equivalent",
   venue_only: "Venue only",
   settlement_mismatch: "Settlement mismatch",
   unsupported_outcome_model: "Unsupported outcome model",
@@ -144,7 +144,7 @@ export function settlementLabel(facts: VenueMarketFacts): string {
     const detail = facts.settlement_provenance
       ? humanizeToken(facts.settlement_provenance)
       : "owner-approved paper comparison";
-    return `PAPER-assumed settlement · ${detail}`;
+    return `Registered equivalent · ${detail}`;
   }
   if (facts.settlement_status === "complete" || (facts.settlement_status == null && facts.settlement_complete)) {
     return "Settlement fingerprint complete";
