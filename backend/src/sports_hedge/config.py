@@ -155,7 +155,14 @@ def emit_dotenv_operator_diagnostics(*, force: bool = False) -> DotenvDiagnostic
 
 
 class Settings(BaseSettings):
-    """Runtime configuration for the Phase 1 paper-only service."""
+    """Runtime configuration.
+
+    The default remains paper with execution disabled. ``real`` names the
+    live-execution seam in this repository. Arming that seam requires both
+    ``sports_hedge_mode="real"`` and ``sports_hedge_execution_enabled=True``.
+    Read-only Matchbook and Kalshi market-data clients stay unchanged either way.
+    Paper autofill still uses simulated fills until a later wave wires the seam.
+    """
 
     model_config = SettingsConfigDict(
         env_file_encoding="utf-8",
@@ -189,7 +196,7 @@ class Settings(BaseSettings):
             file_secret_settings,
         )
 
-    sports_hedge_mode: Literal["paper"] = "paper"
+    sports_hedge_mode: Literal["paper", "real"] = "paper"
     sports_hedge_execution_enabled: bool = False
 
     matchbook_username: str | None = None
@@ -513,9 +520,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def enforce_phase_one_safety(self) -> Settings:
-        if self.sports_hedge_mode != "paper":
-            raise ValueError("Phase 1 supports paper mode only")
-        if self.sports_hedge_execution_enabled:
+        if self.sports_hedge_execution_enabled and self.sports_hedge_mode != "real":
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
         # PAPER_LIVE_REFRESH_INTERVAL_SECONDS remains the HOT reprice-after alias.
         # It does not set the HOT scan interval.

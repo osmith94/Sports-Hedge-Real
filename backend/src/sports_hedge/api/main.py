@@ -26,6 +26,7 @@ from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.serving_build import get_serving_build_info
 from sports_hedge.config import emit_dotenv_operator_diagnostics, get_settings, inspect_dotenv_sources
+from sports_hedge.execution.package import execution_capability
 from sports_hedge.persistence.universe_checkpoint import get_universe_checkpoint_store
 from sports_hedge.domain.models import VenueCapabilities, VenueName
 from sports_hedge.application.provider_runtime import (
@@ -112,6 +113,7 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "mode": settings.sports_hedge_mode,
         "execution_enabled": settings.sports_hedge_execution_enabled,
+        "execution": execution_capability(settings),
         "paper_autofill_enabled": settings.paper_autofill_enabled,
         "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
         "dotenv": inspect_dotenv_sources().as_public_dict(),
