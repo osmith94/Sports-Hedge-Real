@@ -24,20 +24,40 @@ class ExecutionRuntime:
     ) -> None:
         self.matchbook = matchbook
         self.kalshi = kalshi
+        self.explicit = False
+        self.configured_signature: str | None = None
 
 
 _RUNTIME = ExecutionRuntime()
 
 
 def get_execution_runtime() -> ExecutionRuntime:
+    """The one process runtime. Callers must not keep a second copy."""
+
     return _RUNTIME
 
 
 def set_execution_runtime(runtime: ExecutionRuntime | None) -> None:
-    """Replace the process runtime. None restores the empty default."""
+    """Install clients on the process runtime. None clears that installation.
 
-    global _RUNTIME
-    _RUNTIME = runtime if runtime is not None else ExecutionRuntime()
+    The object identity of ``get_execution_runtime()`` does not change. Health
+    and the scanner therefore cannot diverge by holding different instances.
+    An installed runtime is explicit until cleared, so a later settings bind
+    does not replace test or operator clients.
+    """
+
+    current = _RUNTIME
+    if runtime is None:
+        current.matchbook = None
+        current.kalshi = None
+        current.explicit = False
+        current.configured_signature = None
+        return
+    if runtime is not current:
+        current.matchbook = runtime.matchbook
+        current.kalshi = runtime.kalshi
+    current.explicit = True
+    current.configured_signature = None
 
 
 def mark_dispatch_seam_available() -> None:

@@ -39,9 +39,11 @@ def execution_capability(settings: Settings) -> dict[str, bool | str]:
     """
 
     from sports_hedge.execution import dispatch as _dispatch_seam
+    from sports_hedge.execution.composition import bind_process_execution_runtime
     from sports_hedge.execution.runtime import scanner_execution_posture
 
     del _dispatch_seam
+    bind_process_execution_runtime(settings)
     posture = scanner_execution_posture()
     armed = execution_armed(settings)
     ready = bool(armed and posture["live_execution_ready"])

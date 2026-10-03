@@ -12,8 +12,10 @@ Official semantics used here, from developers.matchbook.com:
   appears on some offer payloads but is not a documented submit idempotency
   field, so it is not sent. Retry safety is process-local: a second dispatch
   of a client order id that already has an offer id reads that offer and does
-  not POST again. A retry after a lost response, or after process restart,
-  can create a second offer. That limitation is intentional.
+  not POST again. A lost or unreadable submit response is an unknown fill
+  (``filled_size`` is None), stays in the unknown set, and is not POSTed again
+  in this process. A retry after process restart can still create a second
+  offer. That limitation is intentional.
 - Status is ``GET /edge/rest/v2/offers/{offer_id}``.
 - Cancel is ``DELETE /edge/rest/v2/offers?offer-ids=<offer_id>``. The session
   token authenticates that request. There is no IOC or FOK.
@@ -85,7 +87,7 @@ class MatchbookHttpExecutionTransport:
         if request.client_order_id in self._offer_ids:
             return await self._read(request, self._offer_ids[request.client_order_id], at=now)
         if request.client_order_id in self._unknown_submit:
-            return _result(request, status=VenueOrderStatus.FAILED, at=now)
+            return _result(request, status=VenueOrderStatus.FAILED, at=now, filled_size=None)
         try:
             odds = matchbook_limit_odds(request.requested_price, side=request.side)
             stake = matchbook_stake(request.requested_size)
@@ -128,17 +130,21 @@ class MatchbookHttpExecutionTransport:
                 ),
             )
         except httpx.HTTPError:
-            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock())
+            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock(), filled_size=None)
+        if response.status_code >= 500:
+            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock(), filled_size=None)
         if response.status_code >= 400:
             self._unknown_submit.discard(request.client_order_id)
-            status = VenueOrderStatus.REJECTED if response.status_code < 500 else VenueOrderStatus.FAILED
-            return _result(request, status=status, at=self._clock())
+            return _result(
+                request,
+                status=VenueOrderStatus.REJECTED,
+                at=self._clock(),
+                filled_size=Decimal(0),
+            )
         offer = _first_offer(response)
-        if offer is None:
-            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock())
-        offer_id = offer.get("id")
-        if offer_id is None:
-            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock())
+        offer_id = None if offer is None else offer.get("id")
+        if offer is None or offer_id is None:
+            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock(), filled_size=None)
         self._offer_ids[request.client_order_id] = str(offer_id)
         self._unknown_submit.discard(request.client_order_id)
         return self._remember_match(request, _from_offer(request, offer, submitted_stake=stake, at=self._clock()))
@@ -154,9 +160,21 @@ class MatchbookHttpExecutionTransport:
             await self._login()
             response = await self._client.delete(SUBMIT_PATH, params={"offer-ids": offer_id})
         except httpx.HTTPError:
-            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock(), venue_order_id=offer_id)
+            return _result(
+                request,
+                status=VenueOrderStatus.FAILED,
+                at=self._clock(),
+                filled_size=None,
+                venue_order_id=offer_id,
+            )
         if response.status_code >= 400:
-            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock(), venue_order_id=offer_id)
+            return _result(
+                request,
+                status=VenueOrderStatus.FAILED,
+                at=self._clock(),
+                filled_size=None,
+                venue_order_id=offer_id,
+            )
         offer = _first_offer(response) or _object_offer(response)
         if offer is None:
             return await self._read(request, offer_id, at=self._clock())
@@ -170,12 +188,30 @@ class MatchbookHttpExecutionTransport:
             await self._login()
             response = await self._client.get(f"{SUBMIT_PATH}/{offer_id}")
         except httpx.HTTPError:
-            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock(), venue_order_id=offer_id)
+            return _result(
+                request,
+                status=VenueOrderStatus.FAILED,
+                at=self._clock(),
+                filled_size=None,
+                venue_order_id=offer_id,
+            )
         if response.status_code >= 400:
-            return _result(request, status=VenueOrderStatus.FAILED, at=self._clock(), venue_order_id=offer_id)
+            return _result(
+                request,
+                status=VenueOrderStatus.FAILED,
+                at=self._clock(),
+                filled_size=None,
+                venue_order_id=offer_id,
+            )
         offer = _first_offer(response) or _object_offer(response)
         if offer is None:
-            return _result(request, status=VenueOrderStatus.FAILED, at=at, venue_order_id=offer_id)
+            return _result(
+                request,
+                status=VenueOrderStatus.FAILED,
+                at=at,
+                filled_size=None,
+                venue_order_id=offer_id,
+            )
         return self._remember_match(
             request,
             _from_offer(request, offer, submitted_stake=request.requested_size, at=self._clock()),

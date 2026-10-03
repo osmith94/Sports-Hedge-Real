@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS live_execution_attempts (
     outcome TEXT,
     detail TEXT,
     orders_json TEXT NOT NULL,
+    recovery_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )
@@ -70,6 +71,9 @@ class LiveExecutionAttemptStore:
         self._memory: dict[str, dict[str, Any]] = {}
         if connection is not None:
             connection.execute(_CREATE)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(live_execution_attempts)")}
+            if "recovery_json" not in columns:
+                connection.execute("ALTER TABLE live_execution_attempts ADD COLUMN recovery_json TEXT")
 
     def get(self, package_id: str) -> dict[str, Any] | None:
         if self._connection is None:
@@ -82,6 +86,14 @@ class LiveExecutionAttemptStore:
         if found is None:
             return None
         return _row_to_dict(found)
+
+    def list_all(self) -> list[dict[str, Any]]:
+        if self._connection is None:
+            return [dict(row) for row in self._memory.values()]
+        rows = self._connection.execute(
+            "SELECT * FROM live_execution_attempts ORDER BY created_at, package_id"
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
 
     def reserve(self, record: dict[str, Any]) -> bool:
         """Insert the pre-write reservation. False means the package already exists."""
@@ -100,6 +112,7 @@ class LiveExecutionAttemptStore:
             "outcome": None,
             "detail": record.get("detail"),
             "orders_json": "[]",
+            "recovery_json": record.get("recovery_json"),
             "created_at": _iso(record["created_at"]),
             "updated_at": _iso(record["created_at"]),
         }
@@ -111,8 +124,9 @@ class LiveExecutionAttemptStore:
                 """
                 INSERT INTO live_execution_attempts (
                     package_id, trade_id, tranche_id, opportunity_id, snapshot_ref,
-                    snapshot_json, status, outcome, detail, orders_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    snapshot_json, status, outcome, detail, orders_json, recovery_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stored["package_id"],
@@ -125,6 +139,7 @@ class LiveExecutionAttemptStore:
                     stored["outcome"],
                     stored["detail"],
                     stored["orders_json"],
+                    stored["recovery_json"],
                     stored["created_at"],
                     stored["updated_at"],
                 ),

@@ -14,6 +14,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.execution.attempts import scrub_secrets
@@ -88,6 +89,60 @@ def scrubbed_snapshot_json(plan: PaperFillPlan) -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
+    return json.dumps(scrub_secrets(payload), default=str)
+
+
+def recovery_context(plan: PaperFillPlan, trade_id: str) -> str:
+    """Leg identity stored with the attempt so a later restart can rebuild a trade.
+
+    Economics are not copied. The client order id is the same digest dispatch uses.
+    """
+
+    legs: list[dict[str, Any]] = []
+    for leg in plan.legs:
+        if leg.requested_stake <= 0:
+            continue
+        request = _request_for_leg(leg, trade_id=trade_id, tranche_id=OPENING_TRANCHE_ID)
+        if request is None:
+            continue
+        mode = plan.execution_modes.get(leg.venue, LegExecutionMode.INTERNAL)
+        legs.append(
+            {
+                "client_order_id": request.client_order_id,
+                "venue": leg.venue.value,
+                "outcome": leg.outcome,
+                "currency": leg.currency,
+                "requested_stake": str(leg.requested_stake),
+                "displayed_odds": str(leg.displayed_odds),
+                "source_market_id": leg.source_market_id,
+                "source_runner_id": leg.source_runner_id,
+                "source_event_id": leg.source_event_id,
+                "execution_mode": mode.value,
+            }
+        )
+    payload = {
+        "canonical_event_id": plan.canonical_event_id,
+        "canonical_market_id": plan.canonical_market_id,
+        "scanned_at": plan.scanned_at.isoformat(),
+        "provenance": plan.provenance.value if hasattr(plan.provenance, "value") else str(plan.provenance),
+        "authority": {
+            "settlement_equivalent": plan.settlement_equivalent,
+            "execution_authoritative": plan.execution_authoritative,
+            "eligible_for_paper_simulation": plan.eligible_for_paper_simulation,
+            "solver_model": plan.decision.solver_model,
+            "market_match": plan.decision.market_match.model_dump(mode="json"),
+        },
+        "legs": legs,
+        "fx": [
+            {
+                "currency": item.currency,
+                "gbp_per_unit": str(item.gbp_per_unit),
+                "source": item.source,
+                "captured_at": item.captured_at.isoformat(),
+            }
+            for item in plan.fx_snapshots
+        ],
+    }
     return json.dumps(scrub_secrets(payload), default=str)
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import uuid4
 
@@ -84,15 +84,16 @@ from sports_hedge.execution.dispatch import (
     opening_package_id,
     order_audit_facts,
     order_for_leg,
+    recovery_context,
     refusal_reason,
     run_blocking,
     run_live_opening,
     scrubbed_snapshot_json,
     snapshot_ref,
 )
-from sports_hedge.execution.models import LivePackageOutcome, VenueOrderStatus
+from sports_hedge.execution.models import LivePackageOutcome, VenueOrderResult, VenueOrderStatus
 from sports_hedge.execution.package import execution_armed
-from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime
+from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime, set_execution_runtime
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
@@ -228,6 +229,180 @@ def paper_trade_id(opportunity_id: str) -> str:
 
     slug = opportunity_id.replace(":", "-").replace("/", "-")
     return f"ptrade-{slug}"
+
+
+def _package_already_persisted(trade: Any, package_id: str) -> bool:
+    """True when this package id is already the saved live trade."""
+
+    if trade is None or not getattr(trade, "places_orders", False):
+        return False
+    for event in getattr(trade, "audit", []):
+        if getattr(event, "event_type", None) is not PaperTradeAuditEventType.LIVE_PACKAGE_RECORDED:
+            continue
+        detail = getattr(event, "detail", None)
+        if not detail:
+            continue
+        try:
+            payload = json.loads(detail)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("package_id") == package_id:
+            return True
+    return False
+
+
+def _orphan_reason(
+    recovery: dict[str, Any] | None,
+    outcome: str | None,
+    stored: str | None,
+    trade: Any,
+) -> str:
+    if trade is not None:
+        return "existing_trade_is_not_live"
+    if recovery is None:
+        return "recovery_context_incomplete"
+    if outcome is None:
+        return "fill_quantity_unknown"
+    if outcome == "FAILED":
+        return "known_zero_or_failed_not_an_active_hedge"
+    if stored is not None and stored != outcome:
+        return "outcome_disagrees_with_persisted_fills"
+    return "recovery_context_does_not_match_orders"
+
+
+def _attempt_instant(attempt: dict[str, Any]) -> datetime:
+    raw = attempt.get("updated_at") or attempt.get("created_at")
+    if isinstance(raw, datetime):
+        when = raw
+    else:
+        when = datetime.fromisoformat(str(raw))
+    if when.tzinfo is None:
+        return when.replace(tzinfo=UTC)
+    return when
+
+
+def _orders_from_facts(orders: list[dict[str, Any]]) -> list[VenueOrderResult] | None:
+    rebuilt: list[VenueOrderResult] = []
+    for order in orders:
+        try:
+            average = order.get("average_fill_price")
+            rebuilt.append(
+                VenueOrderResult(
+                    venue=VenueName(str(order["venue"])),
+                    client_order_id=str(order["client_order_id"]),
+                    venue_order_id=(
+                        None if order.get("venue_order_id") is None else str(order["venue_order_id"])
+                    ),
+                    status=VenueOrderStatus(str(order["venue_status"])),
+                    requested_size=Decimal(str(order["requested_size"])),
+                    filled_size=Decimal(str(order["filled_size"])),
+                    requested_price=Decimal(str(order["requested_price"])),
+                    average_fill_price=None if average is None else Decimal(str(average)),
+                    submitted_at=_fact_instant(order.get("submitted_at")),
+                    updated_at=_fact_instant(order.get("updated_at")),
+                )
+            )
+        except (KeyError, ValueError, InvalidOperation):
+            return None
+    return rebuilt
+
+
+def _fact_instant(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        when = value
+    else:
+        when = datetime.fromisoformat(str(value))
+    if when.tzinfo is None:
+        return when.replace(tzinfo=UTC)
+    return when
+
+
+def _plan_from_recovery(
+    opportunity_id: str,
+    snapshot_json: str | None,
+    recovery: dict[str, Any],
+) -> PaperFillPlan | None:
+    """Rebuild a plan from facts stored with the attempt. Matching is not rerun."""
+
+    from sports_hedge.matching.markets import MarketMatchResult
+
+    raw_legs = recovery.get("legs")
+    authority = recovery.get("authority")
+    if not isinstance(raw_legs, list) or not raw_legs or not isinstance(authority, dict):
+        return None
+    if "settlement_equivalent" not in authority or "execution_authoritative" not in authority:
+        return None
+    if "market_match" not in authority or "eligible_for_paper_simulation" not in authority:
+        return None
+    try:
+        scanned_at = _fact_instant(recovery.get("scanned_at"))
+        market_match = MarketMatchResult.model_validate(authority["market_match"])
+        legs = [
+            PaperOpportunityLeg(
+                outcome=str(leg["outcome"]),
+                venue=VenueName(str(leg["venue"])),
+                source_market_id=str(leg["source_market_id"]),
+                source_runner_id=str(leg["source_runner_id"]),
+                source_event_id=(
+                    None if leg.get("source_event_id") is None else str(leg["source_event_id"])
+                ),
+                currency=str(leg.get("currency") or "GBP"),
+                requested_stake=Decimal(str(leg["requested_stake"])),
+                displayed_odds=Decimal(str(leg["displayed_odds"])),
+            )
+            for leg in raw_legs
+        ]
+        modes = {
+            VenueName(str(leg["venue"])): LegExecutionMode(
+                str(leg.get("execution_mode") or "internal")
+            )
+            for leg in raw_legs
+        }
+        fx = [
+            FxRateSnapshot(
+                currency=str(item["currency"]),
+                gbp_per_unit=Decimal(str(item["gbp_per_unit"])),
+                source=str(item.get("source") or "live_attempt"),
+                captured_at=_fact_instant(item.get("captured_at") or scanned_at),
+            )
+            for item in recovery.get("fx") or []
+        ]
+    except (KeyError, ValueError, InvalidOperation, TypeError):
+        return None
+    market_id = recovery.get("canonical_market_id") or opportunity_id
+    return PaperFillPlan(
+        opportunity_id=opportunity_id,
+        canonical_event_id=(
+            None if recovery.get("canonical_event_id") is None else str(recovery["canonical_event_id"])
+        ),
+        canonical_market_id=None if market_id is None else str(market_id),
+        scanned_at=scanned_at,
+        eligible_for_paper_simulation=bool(authority["eligible_for_paper_simulation"]),
+        settlement_equivalent=bool(authority["settlement_equivalent"]),
+        legs=legs,
+        execution_modes=modes,
+        fx_snapshots=fx,
+        decision=PaperScanDecision(
+            canonical_market_id=str(market_id),
+            canonical_event_id=(
+                None
+                if recovery.get("canonical_event_id") is None
+                else str(recovery["canonical_event_id"])
+            ),
+            eligible_for_paper_simulation=bool(authority["eligible_for_paper_simulation"]),
+            market_match=market_match,
+            solver_model=(
+                None if authority.get("solver_model") is None else str(authority["solver_model"])
+            ),
+            fill_legs=legs,
+            scanned_at=scanned_at,
+        ),
+        execution_authoritative=bool(authority["execution_authoritative"]),
+        execution_snapshot_json=snapshot_json,
+        provenance=DataProvenance(
+            str(recovery.get("provenance") or DataProvenance.LIVE_PAPER.value)
+        ),
+    )
 
 
 def _pricing_lane_label(lane: str | None) -> str:
@@ -453,10 +628,17 @@ class PaperOperationsService:
         self._requalified_after_execution_miss: set[str] = set()
         self.on_zero_fill_execution_miss = None
         self._fill_persist_lock = threading.RLock()
-        self.execution_runtime = (
-            execution_runtime if execution_runtime is not None else get_execution_runtime()
-        )
+        self._opening_persist_lock = threading.Lock()
+        self._opening_persist_active = False
+        if execution_runtime is not None:
+            set_execution_runtime(execution_runtime)
         self._memory_attempts = LiveExecutionAttemptStore()
+
+    @property
+    def execution_runtime(self) -> ExecutionRuntime:
+        """The process runtime health also reads. Never a construction-time copy."""
+
+        return get_execution_runtime()
 
     def query_active_trade_events(
         self,
@@ -2666,8 +2848,178 @@ class PaperOperationsService:
             return self.ledger.live_attempts
         return self._memory_attempts
 
+    def inspect_orphaned_live_executions(self) -> list[dict[str, Any]]:
+        """Read attempts that have no live trade. Does not write and does not submit."""
+
+        reports = [
+            report
+            for report in (
+                self._classify_orphan_attempt(attempt, persist=False)
+                for attempt in self._live_attempt_store().list_all()
+            )
+            if report is not None
+        ]
+        from sports_hedge.execution.orphans import publish_orphaned_live_executions
+
+        publish_orphaned_live_executions(reports)
+        return reports
+
+    def recover_orphaned_live_executions(self) -> list[dict[str, Any]]:
+        """Rebuild unambiguous completed attempts. Never submits a venue order.
+
+        Refuses to write while this service is inside the live-package persist
+        window. A later call is idempotent for a package that is already saved.
+        """
+
+        if not self._opening_persist_lock.acquire(blocking=False):
+            return self.inspect_orphaned_live_executions()
+        try:
+            if self._opening_persist_active:
+                return self.inspect_orphaned_live_executions()
+            reports = [
+                report
+                for report in (
+                    self._classify_orphan_attempt(attempt, persist=True)
+                    for attempt in self._live_attempt_store().list_all()
+                )
+                if report is not None
+            ]
+            from sports_hedge.execution.orphans import publish_orphaned_live_executions
+
+            publish_orphaned_live_executions(reports)
+            return reports
+        finally:
+            self._opening_persist_lock.release()
+
+    def _classify_orphan_attempt(
+        self,
+        attempt: dict[str, Any],
+        *,
+        persist: bool,
+    ) -> dict[str, Any] | None:
+        from sports_hedge.execution.orphans import (
+            derived_outcome,
+            fills_are_known,
+            orders_match_recovery,
+            parse_json_object,
+            parse_orders,
+            reconstructed_report,
+            remember_reconstructed,
+        )
+
+        package_id = str(attempt.get("package_id") or "")
+        trade = self._live_trade_for_attempt(attempt)
+        if trade is not None and trade.places_orders:
+            return reconstructed_report(package_id)
+        orders = parse_orders(attempt.get("orders_json"))
+        report = self._orphan_report(attempt, orders)
+        if orders is None or not fills_are_known(orders) or attempt.get("status") != "completed":
+            report["reason"] = (
+                "attempt_reserved_or_incomplete"
+                if attempt.get("status") != "completed"
+                else "fill_quantity_unknown"
+            )
+            return report
+        recovery = parse_json_object(attempt.get("recovery_json"))
+        outcome = derived_outcome(orders)
+        stored = attempt.get("outcome")
+        authority = None if recovery is None else recovery.get("authority")
+        if not isinstance(authority, dict) or "market_match" not in authority:
+            report["reason"] = "recovery_authority_not_persisted"
+            return report
+        if (
+            recovery is None
+            or outcome not in {"FULLY_FILLED", "PARTIAL"}
+            or not orders_match_recovery(orders, recovery)
+            or (stored is not None and stored != outcome)
+            or trade is not None
+        ):
+            report["reason"] = _orphan_reason(recovery, outcome, stored, trade)
+            return report
+        if not persist:
+            report["reason"] = "awaiting_explicit_recovery"
+            return report
+        rebuilt = self._reconstruct_live_trade(attempt, orders, recovery, outcome)
+        if rebuilt is None or not rebuilt.places_orders:
+            report["reason"] = "reconstruction_refused"
+            return report
+        report = {
+            **report,
+            "classification": "reconstructed_active",
+            "reason": "persisted_fills_complete",
+            "trade_state": rebuilt.state.value,
+            "active_trade_phase": (
+                None if rebuilt.active_trade_phase is None else rebuilt.active_trade_phase.value
+            ),
+            "live_fill_unknown": rebuilt.live_fill_unknown,
+            "recovered_from_persisted_attempt": True,
+        }
+        remember_reconstructed(report)
+        return report
+
+    def _live_trade_for_attempt(self, attempt: dict[str, Any]) -> Any:
+        if self.trades is None:
+            return None
+        trade_id = str(attempt.get("trade_id") or "")
+        trade = self.trades.get(trade_id) if trade_id else None
+        if trade is not None:
+            return trade
+        opportunity_id = str(attempt.get("opportunity_id") or "")
+        if not opportunity_id:
+            return None
+        return self.trades.get_by_opportunity(opportunity_id)
+
+    def _orphan_report(
+        self,
+        attempt: dict[str, Any],
+        orders: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        return {
+            "classification": "orphaned_unresolved",
+            "reason": "venue_result_not_represented",
+            "package_id": attempt.get("package_id"),
+            "trade_id": attempt.get("trade_id"),
+            "opportunity_id": attempt.get("opportunity_id"),
+            "status": attempt.get("status"),
+            "outcome": attempt.get("outcome"),
+            "orders": [] if orders is None else orders,
+        }
+
+    def _reconstruct_live_trade(
+        self,
+        attempt: dict[str, Any],
+        orders: list[dict[str, Any]],
+        recovery: dict[str, Any],
+        outcome: str,
+    ) -> PaperTrade | None:
+        plan = _plan_from_recovery(
+            str(attempt["opportunity_id"]),
+            attempt.get("snapshot_json"),
+            recovery,
+        )
+        if plan is None:
+            return None
+        rebuilt_orders = _orders_from_facts(orders)
+        if rebuilt_orders is None:
+            return None
+        when = _attempt_instant(attempt)
+        return self._persist_live_package(
+            plan,
+            package_outcome=LivePackageOutcome(outcome),
+            orders=rebuilt_orders,
+            facts=orders,
+            remainder="recovered_from_persisted_attempt",
+            occurred_at=when,
+            trade_id=str(attempt["trade_id"]),
+            package_id=str(attempt["package_id"]),
+            snapshot_json=attempt.get("snapshot_json"),
+        )
+
     def _dispatch_live_opening(self, plan: PaperFillPlan, *, now: datetime | None) -> None:
         when = now or datetime.now(UTC)
+        from sports_hedge.execution.composition import bind_process_execution_runtime
+
+        bind_process_execution_runtime(self.settings)
         runtime = self.execution_runtime
         matchbook = None if runtime is None else runtime.matchbook
         kalshi = None if runtime is None else runtime.kalshi
@@ -2687,6 +3039,7 @@ class PaperOperationsService:
                 "opportunity_id": plan.opportunity_id,
                 "snapshot_ref": snapshot_ref(plan),
                 "snapshot_json": snapshot_json,
+                "recovery_json": recovery_context(plan, trade_id),
                 "created_at": when,
             }
         )
@@ -2706,26 +3059,31 @@ class PaperOperationsService:
         package = result.package
         facts = [] if package is None else order_audit_facts(package.orders, result.requests)
         outcome = None if package is None else package.outcome.value
-        store.complete(
-            package_id,
-            outcome=outcome,
-            detail=result.remainder if result.sent else result.refusal,
-            orders=facts,
-            updated_at=when,
-        )
-        if package is None:
-            return
-        self._persist_live_package(
-            plan,
-            package_outcome=package.outcome,
-            orders=package.orders,
-            facts=facts,
-            remainder=result.remainder,
-            occurred_at=when,
-            trade_id=trade_id,
-            package_id=package_id,
-            snapshot_json=snapshot_json,
-        )
+        with self._opening_persist_lock:
+            self._opening_persist_active = True
+            try:
+                store.complete(
+                    package_id,
+                    outcome=outcome,
+                    detail=result.remainder if result.sent else result.refusal,
+                    orders=facts,
+                    updated_at=when,
+                )
+                if package is None:
+                    return
+                self._persist_live_package(
+                    plan,
+                    package_outcome=package.outcome,
+                    orders=package.orders,
+                    facts=facts,
+                    remainder=result.remainder,
+                    occurred_at=when,
+                    trade_id=trade_id,
+                    package_id=package_id,
+                    snapshot_json=snapshot_json,
+                )
+            finally:
+                self._opening_persist_active = False
 
     def _persist_live_package(
         self,
@@ -2742,6 +3100,11 @@ class PaperOperationsService:
     ) -> PaperTrade | None:
         if self.trades is None:
             return None
+        already = self._live_trade_for_attempt(
+            {"trade_id": trade_id, "opportunity_id": plan.opportunity_id}
+        )
+        if _package_already_persisted(already, package_id):
+            return already
         opportunity = self.watchlist.repository.get(plan.opportunity_id)
         trade = self.trades.get_by_opportunity(plan.opportunity_id)
         if trade is None:
@@ -2864,6 +3227,7 @@ class PaperOperationsService:
             "orders": facts,
             "package_outcome": package_outcome.value,
             "remainder": remainder,
+            "recovered_from_persisted_attempt": remainder == "recovered_from_persisted_attempt",
         }
         self._append_trade_event_once(
             trade,

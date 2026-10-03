@@ -424,6 +424,15 @@ def get_paper_journal_holder() -> PaperOperationsService:
     )
 
 
+def recover_orphaned_live_executions_at_startup() -> list[dict[str, Any]]:
+    """Rebuild unambiguous orphaned attempts once, before live dispatch starts.
+
+    Callers that only resolve the paper service, and ``/health``, must not use this.
+    """
+
+    return get_paper_journal_holder().recover_orphaned_live_executions()
+
+
 def _unresolved_depends(value: Any) -> bool:
     """True when a FastAPI Depends marker was passed in as a real service."""
 

@@ -48,6 +48,9 @@ async def lifespan(_app: FastAPI):
             coordinator = get_live_refresh_coordinator()
             coordinator.bind_universe_checkpoint_store(get_universe_checkpoint_store())
             coordinator.configure_from_settings()
+            from sports_hedge.api.paper import recover_orphaned_live_executions_at_startup
+
+            recover_orphaned_live_executions_at_startup()
             schedule = get_accounting_schedule()
             await coordinator.start_server_loop(server_owned_refresh_tick)
             await schedule.start()
@@ -105,6 +108,19 @@ async def build_info() -> dict[str, object]:
     return get_serving_build_info().as_public_dict()
 
 
+def _orphaned_live_executions() -> list[dict[str, object]]:
+    """Read-only operator status. This path does not reconstruct trades."""
+
+    from sports_hedge.api.paper import get_paper_journal_holder
+    from sports_hedge.execution.orphans import orphaned_live_executions
+
+    holder_factory = get_paper_journal_holder
+    cache_info = getattr(holder_factory, "cache_info", None)
+    if cache_info is not None and cache_info().currsize:
+        return holder_factory().inspect_orphaned_live_executions()
+    return orphaned_live_executions()
+
+
 @app.get("/health")
 async def health() -> dict[str, object]:
     settings = get_settings()
@@ -114,6 +130,7 @@ async def health() -> dict[str, object]:
         "mode": settings.sports_hedge_mode,
         "execution_enabled": settings.sports_hedge_execution_enabled,
         "execution": execution_capability(settings),
+        "orphaned_live_executions": _orphaned_live_executions(),
         "paper_autofill_enabled": settings.paper_autofill_enabled,
         "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
         "dotenv": inspect_dotenv_sources().as_public_dict(),
