@@ -104,9 +104,13 @@ def _leg(venue: VenueName, *, runner: str, market: str, currency: str, odds: str
     )
 
 
-class _FakeKey:
-    def sign(self, _message: bytes, _padding: object, _algorithm: object) -> bytes:
-        return b"signed-request"
+_RSA_TEST_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def _FakeKey():
+    """Real RSA key so the signer accepts the test double after the type check."""
+
+    return _RSA_TEST_KEY
 
 
 def _client(handler) -> httpx.AsyncClient:

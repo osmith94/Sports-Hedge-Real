@@ -31,9 +31,10 @@ Auto-routing requires ``market_ticker`` when ``exchange_index`` is omitted or
 ``-1``. This cancel sends ``market_ticker`` and omits ``exchange_index``. An
 order id alone is not sent, because that would default to shard 0.
 
-Signing is RSA-PSS SHA-256 over ``timestamp_ms + METHOD + path``. The path is
-the URL path from the host, without the query string. The private key is
-never logged.
+Signing is over ``timestamp_ms + METHOD + path``. Ed25519 signs that message
+directly. RSA keeps RSA-PSS with SHA-256, MGF1(SHA-256), and a salt length
+equal to the digest length. The path is the URL path from the host, without
+the query string. The private key is never logged.
 """
 
 from __future__ import annotations
@@ -365,7 +366,7 @@ def kalshi_auth_headers(
     sign_path: str,
 ) -> dict[str, str]:
     message = f"{timestamp_ms}{method.upper()}{sign_path}".encode()
-    signature = _sign_pss(private_key, message)
+    signature = base64.b64encode(sign_kalshi_message(private_key, message)).decode("ascii")
     return {
         "KALSHI-ACCESS-KEY": key_id,
         "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
@@ -373,16 +374,26 @@ def kalshi_auth_headers(
     }
 
 
-def _sign_pss(private_key: Any, message: bytes) -> str:
+def sign_kalshi_message(private_key: Any, message: bytes) -> bytes:
+    """Sign the Kalshi pre-sign text. Unsupported key types fail closed."""
+
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
-    signature = private_key.sign(
-        message,
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-        hashes.SHA256(),
-    )
-    return base64.b64encode(signature).decode("ascii")
+    if isinstance(private_key, Ed25519PrivateKey):
+        return private_key.sign(message)
+    if isinstance(private_key, RSAPrivateKey):
+        return private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+    raise TypeError("Unsupported Kalshi private key type")
 
 
 def _from_order(
