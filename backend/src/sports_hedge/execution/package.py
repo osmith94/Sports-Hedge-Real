@@ -34,13 +34,15 @@ LIVE_EXECUTION_TRANSPORT_UNAVAILABLE = "LIVE_EXECUTION_TRANSPORT_UNAVAILABLE"
 def execution_capability(settings: Settings) -> dict[str, bool | str]:
     """Operator-facing execution posture. Configuration is not live-order capability.
 
-    No genuine Matchbook or Kalshi write transport is registered. The scanner
-    remains on paper fills. ``live_execution_ready`` stays false while that is true,
-    including when mode is real and execution is configured on.
+    Credential presence is not a live order path. The scanner remains on paper
+    fills, and ``live_execution_ready`` stays false until a later wave actually
+    invokes an armed transport from application flow.
     """
 
     return {
         "configured_execution_enabled": settings.sports_hedge_execution_enabled is True,
+        "matchbook_execution_configured": _matchbook_execution_configured(settings),
+        "kalshi_execution_configured": _kalshi_execution_configured(settings),
         "live_execution_ready": False,
         "execution_transport": "unavailable",
         "scanner_execution": "paper",
@@ -51,6 +53,19 @@ def execution_armed(settings: Settings) -> bool:
     """True only when this repository is explicitly in real mode with execution on."""
 
     return settings.sports_hedge_mode == "real" and settings.sports_hedge_execution_enabled is True
+
+
+def _matchbook_execution_configured(settings: Settings) -> bool:
+    username = (settings.matchbook_username or "").strip()
+    password = (settings.matchbook_password or "").strip()
+    return bool(username and password)
+
+
+def _kalshi_execution_configured(settings: Settings) -> bool:
+    return bool(
+        (settings.kalshi_api_key_id or "").strip()
+        and (settings.kalshi_private_key_path or "").strip()
+    )
 
 
 async def execute_live_package(
@@ -152,6 +167,7 @@ def _request_for_leg(
         native_market_id=market_id,
         native_runner_id=runner_id,
         side=MarketSide.BACK,
+        currency=leg.currency,
         requested_price=leg.displayed_odds,
         requested_size=leg.requested_stake,
         client_order_id=_client_order_id(
@@ -217,6 +233,6 @@ def _outcome(orders: list[VenueOrderResult]) -> LivePackageOutcome:
     )
     if complete:
         return LivePackageOutcome.FULLY_FILLED
-    if any(order.filled_size > 0 for order in orders):
+    if any(order.filled_size is not None and order.filled_size > 0 for order in orders):
         return LivePackageOutcome.PARTIAL
     return LivePackageOutcome.FAILED

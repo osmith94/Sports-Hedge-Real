@@ -245,6 +245,10 @@ class Settings(BaseSettings):
     kalshi_base_url: str = "https://external-api.kalshi.com/trade-api/v2"
     kalshi_demo_base_url: str = "https://external-api.demo.kalshi.co/trade-api/v2"
     kalshi_use_demo: bool = False
+    # Execution signing material. Empty means the Kalshi execution transport is
+    # not configured. The private key file is never read by health.
+    kalshi_api_key_id: str | None = None
+    kalshi_private_key_path: str | None = None
     kalshi_event_page_limit: int = Field(default=200, ge=1, le=200)
     kalshi_event_max_pages: int = Field(default=10, ge=1, le=50)
     kalshi_series_tickers: Annotated[list[str], NoDecode] = Field(

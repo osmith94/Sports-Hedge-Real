@@ -1,7 +1,8 @@
 """Venue execution clients, separate from the read-only market-data clients.
 
-This wave dispatches only through an injected in-process transport. Nothing
-here opens a socket or calls Matchbook or Kalshi.
+Callers inject the transport. The deterministic transport never performs
+venue I/O. Authenticated Matchbook and Kalshi HTTP transports live in their
+own modules and are not constructed by the scanner.
 """
 
 from __future__ import annotations
@@ -16,10 +17,10 @@ from sports_hedge.execution.models import VenueOrderRequest, VenueOrderResult, V
 
 
 class ExecutionTransport(Protocol):
-    """In-process order transport. Implementations must not perform venue I/O."""
+    """Order transport injected into an execution client."""
 
     async def dispatch(self, request: VenueOrderRequest) -> VenueOrderResult:
-        """Return a deterministic acknowledgement for one prepared order."""
+        """Return one order acknowledgement. HTTP transports may perform venue I/O."""
 
 
 class DeterministicExecutionTransport:

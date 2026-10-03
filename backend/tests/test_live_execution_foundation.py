@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -371,7 +372,10 @@ async def test_no_external_write_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         kalshi=kalshi,
     )
     assert result.outcome is LivePackageOutcome.FULLY_FILLED
+    http_modules = {"matchbook_http.py", "kalshi_http.py"}
     for path in EXECUTION.glob("*.py"):
+        if path.name in http_modules:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         imported = [
             alias.name
@@ -386,6 +390,9 @@ async def test_no_external_write_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         assert "httpx" not in imported
         assert "requests" not in imported
+    package_source = (EXECUTION / "package.py").read_text(encoding="utf-8")
+    assert "matchbook_http" not in package_source
+    assert "kalshi_http" not in package_source
 
 
 @pytest.mark.asyncio
@@ -406,6 +413,8 @@ async def test_armed_real_execution_without_injected_transport_fails_closed() ->
     assert result.orders == []
     assert execution_capability(armed) == {
         "configured_execution_enabled": True,
+        "matchbook_execution_configured": False,
+        "kalshi_execution_configured": False,
         "live_execution_ready": False,
         "execution_transport": "unavailable",
         "scanner_execution": "paper",
@@ -440,10 +449,27 @@ def test_health_separates_configured_execution_from_live_capability(monkeypatch:
     assert body["execution_enabled"] is True
     assert body["execution"] == {
         "configured_execution_enabled": True,
+        "matchbook_execution_configured": False,
+        "kalshi_execution_configured": False,
         "live_execution_ready": False,
         "execution_transport": "unavailable",
         "scanner_execution": "paper",
     }
+    configured = Settings(
+        sports_hedge_mode="real",
+        sports_hedge_execution_enabled=True,
+        matchbook_username="user",
+        matchbook_password="mb-exec-secret",
+        kalshi_api_key_id="key-id",
+        kalshi_private_key_path="C:/unused/kalshi.pem",
+    )
+    monkeypatch.setattr("sports_hedge.api.main.get_settings", lambda: configured)
+    ready = TestClient(app).get("/health").json()
+    assert ready["execution"]["matchbook_execution_configured"] is True
+    assert ready["execution"]["kalshi_execution_configured"] is True
+    assert ready["execution"]["live_execution_ready"] is False
+    assert ready["execution"]["scanner_execution"] == "paper"
+    assert "mb-exec-secret" not in json.dumps(ready)
 
 
 def test_paper_fill_path_is_not_wired_to_live_dispatch() -> None:

@@ -18,6 +18,8 @@ from sports_hedge.domain.models import MarketSide, VenueName
 class VenueOrderStatus(StrEnum):
     FILLED = "filled"
     PARTIAL = "partial"
+    OPEN = "open"
+    CANCELLED = "cancelled"
     REJECTED = "rejected"
     FAILED = "failed"
 
@@ -38,6 +40,7 @@ class VenueOrderRequest(BaseModel):
     native_market_id: str
     native_runner_id: str
     side: MarketSide
+    currency: str = "GBP"
     requested_price: Decimal = Field(gt=0)
     requested_size: Decimal = Field(gt=0)
     client_order_id: str
@@ -51,11 +54,16 @@ class VenueOrderResult(BaseModel):
     venue_order_id: str | None = None
     status: VenueOrderStatus
     requested_size: Decimal
-    filled_size: Decimal = Field(ge=0)
+    # None means this response did not supply a cumulative fill. It is not zero.
+    filled_size: Decimal | None = Field(default=None, ge=0)
     requested_price: Decimal
     average_fill_price: Decimal | None = None
     submitted_at: datetime
     updated_at: datetime
+    # Venue-native quantities. Matchbook stake is account currency. Kalshi
+    # quantity is contracts. ``filled_size`` stays in the request's currency units.
+    native_filled_quantity: Decimal | None = None
+    native_remaining_quantity: Decimal | None = None
 
 
 class LiveExecutionPackage(BaseModel):
