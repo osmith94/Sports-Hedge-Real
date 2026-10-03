@@ -210,6 +210,8 @@ LOGGER = logging.getLogger(__name__)
 def _accumulation_eligible(trade: Any) -> bool:
     """Open exposure that may request another Price-2 cycle, not a recovery."""
 
+    if getattr(trade, "places_orders", False):
+        return False
     if getattr(trade, "unresolved_recovery", False):
         return False
     phase = getattr(trade, "active_trade_phase", None)
@@ -217,6 +219,7 @@ def _accumulation_eligible(trade: Any) -> bool:
         PaperActiveTradePhase.EXIT_MANAGEMENT,
         PaperActiveTradePhase.MONITORING_CAP_REACHED,
         PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+        PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE,
     }:
         return False
     return trade.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}

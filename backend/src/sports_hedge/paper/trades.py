@@ -51,6 +51,7 @@ class PaperLegFillKind(StrEnum):
     PAPER_SIMULATED_EXTERNAL = "PAPER_SIMULATED_EXTERNAL"
     MANUAL_EXTERNAL = "MANUAL_EXTERNAL"
     UNFILLED = "UNFILLED"
+    LIVE_VENUE = "LIVE_VENUE"
 
 
 OPENING_TRANCHE_ID = "opening"
@@ -68,6 +69,7 @@ class PaperActiveTradePhase(StrEnum):
     MONITORING_CAP_REACHED = "monitoring_cap_reached"
     EXIT_MANAGEMENT = "exit_management"
     RECOVERING_PARTIAL_ENTRY = "recovering_partial_entry"
+    LIVE_PARTIAL_EXPOSURE = "live_partial_exposure"
 
 
 class PaperTradeTranche(BaseModel):
@@ -126,6 +128,7 @@ class PaperTradeAuditEventType(StrEnum):
     UNWIND_ABORTED = "unwind_aborted"
     DEMO_STORE_REINITIALIZED = "demo_store_reinitialized"
     LIFECYCLE_REJECTED = "lifecycle_rejected"
+    LIVE_PACKAGE_RECORDED = "live_package_recorded"
 
 
 PAPER_UNWIND_SOURCE = "paper_unwind"
@@ -159,6 +162,8 @@ class PaperTradeLeg(BaseModel):
     capital_source: CapitalSource = CapitalSource.AUTO_POOL
     execution_mode: str = "INTERNAL"
     tranche_id: str = OPENING_TRANCHE_ID
+    # False means filled_stake is not a known venue quantity. Zero is not implied.
+    fill_quantity_known: bool = True
 
     @model_validator(mode="after")
     def normalize(self) -> PaperTradeLeg:
@@ -257,6 +262,7 @@ class PaperTrade(BaseModel):
     active_trade_phase: PaperActiveTradePhase | None = None
     residual_exposure_gbp: Decimal | None = None
     unresolved_recovery: bool = False
+    live_fill_unknown: bool = False
     last_settlement_check_at: datetime | None = None
     settlement_reconciliation_status: SettlementReconciliationStatus = (
         SettlementReconciliationStatus.UNCHECKED

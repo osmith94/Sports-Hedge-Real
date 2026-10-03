@@ -34,18 +34,24 @@ LIVE_EXECUTION_TRANSPORT_UNAVAILABLE = "LIVE_EXECUTION_TRANSPORT_UNAVAILABLE"
 def execution_capability(settings: Settings) -> dict[str, bool | str]:
     """Operator-facing execution posture. Configuration is not live-order capability.
 
-    Credential presence is not a live order path. The scanner remains on paper
-    fills, and ``live_execution_ready`` stays false until a later wave actually
-    invokes an armed transport from application flow.
+    Credential presence is not a live order path. Scanner execution is live only
+    when REAL mode, execution, armed transports, and the dispatch seam all hold.
     """
 
+    from sports_hedge.execution import dispatch as _dispatch_seam
+    from sports_hedge.execution.runtime import scanner_execution_posture
+
+    del _dispatch_seam
+    posture = scanner_execution_posture()
+    armed = execution_armed(settings)
+    ready = bool(armed and posture["live_execution_ready"])
     return {
         "configured_execution_enabled": settings.sports_hedge_execution_enabled is True,
         "matchbook_execution_configured": _matchbook_execution_configured(settings),
         "kalshi_execution_configured": _kalshi_execution_configured(settings),
-        "live_execution_ready": False,
-        "execution_transport": "unavailable",
-        "scanner_execution": "paper",
+        "live_execution_ready": ready,
+        "execution_transport": "armed" if ready else "unavailable",
+        "scanner_execution": "live" if ready else "paper",
     }
 
 

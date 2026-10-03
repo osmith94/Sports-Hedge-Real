@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -78,6 +79,20 @@ from sports_hedge.arbitrage.watchlist.service import (
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import format_stored_line
 from sports_hedge.domain.models import VenueName
+from sports_hedge.execution.attempts import LiveExecutionAttemptStore
+from sports_hedge.execution.dispatch import (
+    opening_package_id,
+    order_audit_facts,
+    order_for_leg,
+    refusal_reason,
+    run_blocking,
+    run_live_opening,
+    scrubbed_snapshot_json,
+    snapshot_ref,
+)
+from sports_hedge.execution.models import LivePackageOutcome, VenueOrderStatus
+from sports_hedge.execution.package import execution_armed
+from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
@@ -399,7 +414,8 @@ def _autofill_begin_rejection_reason(exc: BaseException) -> str:
 class PaperOperationsService:
     """Wire scan → optional autofill/priority alert → paper fill → journal → settlement.
 
-    Never places venue orders, signs wallets, or treats MANUAL_EXTERNAL as automated.
+    Paper mode and disabled execution still simulate fills and place no venue orders.
+    Armed REAL mode hands an accepted Price-2 plan to the existing live package.
     PAPER_SIMULATED_EXTERNAL is a paper-only stand-in for a future external leg.
     """
 
@@ -414,6 +430,7 @@ class PaperOperationsService:
         ledger: SqlitePaperLedger | None = None,
         trades: SqlitePaperTradeRepository | None = None,
         catalogue: Any | None = None,
+        execution_runtime: ExecutionRuntime | None = None,
     ) -> None:
         self.watchlist = watchlist
         self.alerts = alerts or PriorityAlertService()
@@ -436,6 +453,10 @@ class PaperOperationsService:
         self._requalified_after_execution_miss: set[str] = set()
         self.on_zero_fill_execution_miss = None
         self._fill_persist_lock = threading.RLock()
+        self.execution_runtime = (
+            execution_runtime if execution_runtime is not None else get_execution_runtime()
+        )
+        self._memory_attempts = LiveExecutionAttemptStore()
 
     def query_active_trade_events(
         self,
@@ -626,7 +647,7 @@ class PaperOperationsService:
                         skip_reason = _autofill_begin_rejection_reason(exc)
                 if should_simulate:
                     try:
-                        self.simulate_fill(
+                        self.capture_opening_fill(
                             opportunity_id,
                             simulate_external=True,
                             provenance=provenance,
@@ -1655,6 +1676,11 @@ class PaperOperationsService:
                 trade = loaded
         if trade.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             return None
+        if (
+            trade.places_orders
+            or trade.active_trade_phase is PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE
+        ):
+            return self._result_from_existing_trade(trade, when)
         self._ensure_opening_tranche(trade, when)
         self._promote_active_trade(trade, when)
         if require_current_plan:
@@ -2451,11 +2477,16 @@ class PaperOperationsService:
             trade.unresolved_recovery
             or trade.active_trade_phase is PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY
         )
+        live_partial = trade.active_trade_phase is PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE
         self._append_trade_event_once(
             trade,
             event_type=PaperTradeAuditEventType.ACTIVE_TRADE_PROMOTED,
             occurred_at=when,
-            detail="paper fill result entered ACTIVE TRADE 5s management",
+            detail=(
+                "live partial package entered ACTIVE TRADE without a residual hedge"
+                if live_partial
+                else "paper fill result entered ACTIVE TRADE 5s management"
+            ),
         )
         if self.trades is not None:
             self.trades.save(trade)
@@ -2466,7 +2497,9 @@ class PaperOperationsService:
             event_type=ActiveTradeEventType.PROMOTED_TO_ACTIVE,
             reason_code=ActiveTradeReasonCode.PROMOTED,
             operator_copy=(
-                "ACTIVE TRADE 5s management started after the initial partial fill; recovery is next"
+                "ACTIVE TRADE records the actual venue fills; the live package is not fully hedged"
+                if live_partial
+                else "ACTIVE TRADE 5s management started after the initial partial fill; recovery is next"
                 if recovering
                 else "ACTIVE TRADE 5s management started after the initial fill result"
             ),
@@ -2475,7 +2508,7 @@ class PaperOperationsService:
             payload={
                 "native_ids": compact_native_ids(trade),
                 "pricing_lane": lane,
-                "fill_state": "partial" if recovering else "complete",
+                "fill_state": "partial" if recovering or live_partial else "complete",
             },
         )
         get_active_trade_registry().promote(
@@ -2612,6 +2645,271 @@ class PaperOperationsService:
                 self.trades.save(trade)
             except Exception:
                 pass
+
+    def capture_opening_fill(
+        self,
+        opportunity_id: str,
+        **simulate_kwargs: Any,
+    ) -> SimulatePaperFillResult | None:
+        """Paper keeps simulate_fill. Armed REAL submits the accepted plan once."""
+
+        if not execution_armed(self.settings):
+            return self.simulate_fill(opportunity_id, **simulate_kwargs)
+        plan = self._plans.get(opportunity_id)
+        if plan is None:
+            return None
+        self._dispatch_live_opening(plan, now=simulate_kwargs.get("now"))
+        return None
+
+    def _live_attempt_store(self) -> LiveExecutionAttemptStore:
+        if self.ledger is not None and getattr(self.ledger, "live_attempts", None) is not None:
+            return self.ledger.live_attempts
+        return self._memory_attempts
+
+    def _dispatch_live_opening(self, plan: PaperFillPlan, *, now: datetime | None) -> None:
+        when = now or datetime.now(UTC)
+        runtime = self.execution_runtime
+        matchbook = None if runtime is None else runtime.matchbook
+        kalshi = None if runtime is None else runtime.kalshi
+        if refusal_reason(plan, settings=self.settings, matchbook=matchbook, kalshi=kalshi):
+            return
+        trade_id = paper_trade_id(plan.opportunity_id)
+        package_id = opening_package_id(trade_id)
+        store = self._live_attempt_store()
+        if store.get(package_id) is not None:
+            return
+        snapshot_json = scrubbed_snapshot_json(plan)
+        reserved = store.reserve(
+            {
+                "package_id": package_id,
+                "trade_id": trade_id,
+                "tranche_id": OPENING_TRANCHE_ID,
+                "opportunity_id": plan.opportunity_id,
+                "snapshot_ref": snapshot_ref(plan),
+                "snapshot_json": snapshot_json,
+                "created_at": when,
+            }
+        )
+        if not reserved:
+            return
+        result = run_blocking(
+            run_live_opening(
+                plan,
+                trade_id=trade_id,
+                tranche_id=OPENING_TRANCHE_ID,
+                settings=self.settings,
+                matchbook=matchbook,
+                kalshi=kalshi,
+                clock=lambda: when,
+            )
+        )
+        package = result.package
+        facts = [] if package is None else order_audit_facts(package.orders, result.requests)
+        outcome = None if package is None else package.outcome.value
+        store.complete(
+            package_id,
+            outcome=outcome,
+            detail=result.remainder if result.sent else result.refusal,
+            orders=facts,
+            updated_at=when,
+        )
+        if package is None:
+            return
+        self._persist_live_package(
+            plan,
+            package_outcome=package.outcome,
+            orders=package.orders,
+            facts=facts,
+            remainder=result.remainder,
+            occurred_at=when,
+            trade_id=trade_id,
+            package_id=package_id,
+            snapshot_json=snapshot_json,
+        )
+
+    def _persist_live_package(
+        self,
+        plan: PaperFillPlan,
+        *,
+        package_outcome: LivePackageOutcome,
+        orders: list[Any],
+        facts: list[dict[str, Any]],
+        remainder: str,
+        occurred_at: datetime,
+        trade_id: str,
+        package_id: str,
+        snapshot_json: str | None,
+    ) -> PaperTrade | None:
+        if self.trades is None:
+            return None
+        opportunity = self.watchlist.repository.get(plan.opportunity_id)
+        trade = self.trades.get_by_opportunity(plan.opportunity_id)
+        if trade is None:
+            if opportunity is None:
+                return None
+            trade = self._new_trade_shell(plan, opportunity, occurred_at, plan.provenance)
+        opening = [leg for leg in plan.legs if leg.requested_stake > 0]
+        unknown = False
+        known_positive = False
+        complete = bool(opening)
+        legs: list[PaperTradeLeg] = []
+        native: dict[str, Decimal] = {}
+        gbp = Decimal(0)
+        fx = {item.currency: item for item in plan.fx_snapshots}
+        for plan_leg in opening:
+            order = order_for_leg(
+                plan_leg,
+                orders,
+                trade_id=trade_id,
+                tranche_id=OPENING_TRANCHE_ID,
+            )
+            quantity_known = order is not None and order.filled_size is not None
+            filled = order.filled_size if quantity_known and order is not None else Decimal(0)
+            if not quantity_known:
+                unknown = True
+                complete = False
+            elif (
+                order is None
+                or order.status is not VenueOrderStatus.FILLED
+                or filled != plan_leg.requested_stake
+            ):
+                complete = False
+            if quantity_known and filled is not None and filled > 0:
+                known_positive = True
+            average = None if order is None else order.average_fill_price
+            legs.append(
+                PaperTradeLeg(
+                    venue=plan_leg.venue,
+                    outcome=plan_leg.outcome,
+                    currency=plan_leg.currency,
+                    requested_stake=plan_leg.requested_stake,
+                    filled_stake=filled if filled is not None else Decimal(0),
+                    displayed_odds=plan_leg.displayed_odds,
+                    filled_odds=average if average is not None and average > 1 else None,
+                    source_market_id=plan_leg.source_market_id,
+                    source_event_id=_native_source_event_id(plan_leg, plan),
+                    source_runner_id=plan_leg.source_runner_id,
+                    opening_action=(
+                        MarketAction.BUY
+                        if plan_leg.venue in {VenueName.POLYMARKET, VenueName.KALSHI}
+                        else MarketAction.BACK
+                    ),
+                    canonical_state=plan_leg.outcome,
+                    settlement_fingerprint_key=(
+                        None if opportunity is None else opportunity.settlement_key
+                    ),
+                    fill_id=(
+                        None
+                        if order is None or not quantity_known or filled <= 0
+                        else f"live:{order.client_order_id}"
+                    ),
+                    fill_kind=(
+                        PaperLegFillKind.LIVE_VENUE
+                        if quantity_known and filled > 0
+                        else PaperLegFillKind.UNFILLED
+                    ),
+                    execution_mode=plan.execution_modes.get(
+                        plan_leg.venue, LegExecutionMode.INTERNAL
+                    ).value,
+                    tranche_id=OPENING_TRANCHE_ID,
+                    fill_quantity_known=quantity_known,
+                )
+            )
+            if quantity_known and filled > 0:
+                native[plan_leg.currency] = native.get(plan_leg.currency, Decimal(0)) + filled
+                if plan_leg.currency == "GBP":
+                    gbp += filled
+                elif plan_leg.currency in fx:
+                    gbp += filled * fx[plan_leg.currency].gbp_per_unit
+        if package_outcome is not LivePackageOutcome.FULLY_FILLED:
+            complete = False
+        if unknown or not known_positive:
+            if known_positive and not complete:
+                state = PaperTradeState.PARTIAL
+            else:
+                state = PaperTradeState.PENDING
+                complete = False
+        elif complete:
+            state = PaperTradeState.OPEN
+        else:
+            state = PaperTradeState.PARTIAL
+        trade.legs = legs
+        trade.state = state
+        trade.paper_only = False
+        trade.places_orders = True
+        trade.live_fill_unknown = unknown
+        trade.unresolved_recovery = False
+        trade.capital_locked_native = native
+        trade.capital_locked_gbp = gbp
+        trade.guaranteed_profit_gbp_at_open = None
+        trade.last_updated_at = occurred_at
+        trade.provenance = plan.provenance
+        trade.fx_snapshots = list(plan.fx_snapshots)
+        trade.venue_costs = list(plan.venue_costs)
+        if state is PaperTradeState.PARTIAL:
+            trade.active_trade_phase = PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE
+            trade.residual_exposure_gbp = None if unknown else residual_exposure_gbp(trade)
+        elif state is PaperTradeState.OPEN:
+            trade.active_trade_phase = PaperActiveTradePhase.ACCUMULATING
+            trade.residual_exposure_gbp = Decimal(0)
+        else:
+            trade.active_trade_phase = None
+            trade.residual_exposure_gbp = None
+        audit_payload = {
+            "trade_id": trade_id,
+            "tranche_id": OPENING_TRANCHE_ID,
+            "package_id": package_id,
+            "snapshot_ref": snapshot_ref(plan),
+            "execution_snapshot": json.loads(snapshot_json) if snapshot_json else None,
+            "orders": facts,
+            "package_outcome": package_outcome.value,
+            "remainder": remainder,
+        }
+        self._append_trade_event_once(
+            trade,
+            event_type=PaperTradeAuditEventType.LIVE_PACKAGE_RECORDED,
+            occurred_at=occurred_at,
+            detail=json.dumps(audit_payload, default=str),
+        )
+        saved = self.trades.save(trade)
+        if saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
+            self._ensure_opening_tranche(saved, occurred_at)
+            self._promote_active_trade(saved, occurred_at)
+            saved = self.trades.get(saved.trade_id) or saved
+        self._record_live_watch_stage(plan.opportunity_id, saved.state, occurred_at, package_outcome)
+        return saved
+
+    def _record_live_watch_stage(
+        self,
+        opportunity_id: str,
+        state: PaperTradeState,
+        occurred_at: datetime,
+        package_outcome: LivePackageOutcome,
+    ) -> None:
+        try:
+            if state is PaperTradeState.OPEN:
+                self._record_watchlist_fill(
+                    opportunity_id,
+                    stage=OpportunityStatus.FILLED,
+                    occurred_at=occurred_at,
+                    detail="live package fully filled from venue results",
+                )
+            elif state is PaperTradeState.PARTIAL:
+                self._record_watchlist_fill(
+                    opportunity_id,
+                    stage=OpportunityStatus.PARTIAL,
+                    occurred_at=occurred_at,
+                    detail="live package partial; actual fills are not a complete hedge",
+                )
+            else:
+                self._record_entry_rejection(
+                    opportunity_id,
+                    f"live_package_{package_outcome.value.lower()}",
+                    occurred_at,
+                    reject_triggered=True,
+                )
+        except (PaperOperationsError, ValueError):
+            return
 
     def simulate_fill(
         self,

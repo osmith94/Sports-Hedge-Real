@@ -573,10 +573,13 @@ def _open_iterative_trade(operations: Any, opportunity_id: str) -> Any | None:
     trade = getter(opportunity_id) if callable(getter) else None
     if trade is None or trade.state is not PaperTradeState.OPEN:
         return None
+    if getattr(trade, "places_orders", False):
+        return None
     if trade.unresolved_recovery or trade.active_trade_phase in {
         PaperActiveTradePhase.EXIT_MANAGEMENT,
         PaperActiveTradePhase.MONITORING_CAP_REACHED,
         PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+        PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE,
     }:
         return None
     return trade

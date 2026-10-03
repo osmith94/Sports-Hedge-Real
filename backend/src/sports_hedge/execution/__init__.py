@@ -1,4 +1,4 @@
-"""Live execution seam beside paper simulation. Not wired into autofill."""
+"""Live execution seam. Paper autofill stays on simulate_fill unless REAL is armed."""
 
 from sports_hedge.execution.clients import (
     DeterministicExecutionTransport,
