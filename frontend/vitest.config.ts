@@ -31,6 +31,7 @@ export default defineConfig({
       "lib/catalogue-coverage-display.test.ts",
       "lib/venue-degradation-incident.test.ts",
       "lib/system-load-display.test.ts",
+      "lib/runtime-mode.test.ts",
       "lib/active-trade-timeline-display.test.ts",
       "lib/activity-feed-display.test.ts",
       "lib/opportunity-history-display.test.ts",

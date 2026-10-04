@@ -10,6 +10,7 @@ import {
   simulatePaperFill,
 } from "../lib/api";
 import { money, percent } from "../lib/format";
+import { useRuntimeMode } from "./runtime-mode-provider";
 
 export function PaperDeploymentPreview({
   opportunities,
@@ -31,6 +32,13 @@ export function PaperDeploymentPreview({
   );
   const focused = defaults.find((item) => item.opportunity_id === focusOpportunityId);
   const initial = focused ?? defaults[0];
+  const runtime = useRuntimeMode();
+  const ticketTitle = runtime.simulationSection
+    ? "Bet Ticket · simulation only · not Real execution"
+    : "Bet Ticket · paper only";
+  const ticketBadge = runtime.simulationSection
+    ? "SIMULATION / PAPER TOOL"
+    : "PAPER MODE · NO EXECUTION";
   const [opportunityId, setOpportunityId] = useState(initial?.opportunity_id ?? "");
   const selected = defaults.find((item) => item.opportunity_id === opportunityId) ?? initial;
   const [sizeGbp, setSizeGbp] = useState(
@@ -115,7 +123,7 @@ export function PaperDeploymentPreview({
     return (
       <article id="paper-deployment" className="opp-card bet-ticket" tabIndex={-1}>
         <span id="bet-ticket" />
-        <div className="opp-event">Bet Ticket · paper only</div>
+        <div className="opp-event">{ticketTitle}</div>
         <p className="section-copy">
           No settlement-equivalent qualified opportunity is preparable on this fixture. Rejected,
           unevaluated, stale or unsupported rows do not expose BET. This panel does not OPEN a trade
@@ -199,13 +207,13 @@ export function PaperDeploymentPreview({
       <span id="bet-ticket" />
       <div className="opp-card-top">
         <div>
-          <div className="opp-event">Bet Ticket</div>
+          <div className="opp-event">{ticketTitle}</div>
           <div className="muted">
             PAPER MODE · modelled · recommended size from allocator constraints · does not lock
             treasury or place orders
           </div>
         </div>
-        <span className="status-badge">PAPER MODE · NO EXECUTION</span>
+        <span className="status-badge">{ticketBadge}</span>
       </div>
       <p className="section-copy">
         Default amount is the system-recommended GBP deployment, bounded by treasury, executable

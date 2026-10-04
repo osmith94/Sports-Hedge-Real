@@ -9,6 +9,7 @@ import { PaperTradeBook } from "../components/paper-trade-book";
 import { RunPaperScan } from "../components/run-paper-scan";
 import { ScanCycleHistoryPanel } from "../components/scan-cycle-history-panel";
 import { PriorityAlertsSeam } from "../components/arbitrage/priority-alerts/priority-alerts-seam";
+import { OperationsConsoleIntro, SimulationOnlyChip } from "../components/runtime-mode-provider";
 import {
   getActivePaperTrades,
   getLivePriorityAlerts,
@@ -97,18 +98,7 @@ export default async function ArbitragePage() {
   return (
     <>
       <div className="page-heading">
-        <div>
-          <div className="eyebrow">Arbitrage operations</div>
-          <h1>Operations console</h1>
-          <p className="page-subtitle">
-            Paper treasury, venue feeds, live pairwise discovery and positions. One operator surface.
-          </p>
-        </div>
-        <div className="heading-actions">
-          <div className="demo-label">
-            {liveConnected ? "LIVE PAPER READ MODEL" : "PAPER API OFFLINE"}
-          </div>
-        </div>
+        <OperationsConsoleIntro liveConnected={liveConnected} />
       </div>
 
       <LiquidityPools
@@ -122,6 +112,7 @@ export default async function ArbitragePage() {
       <section className="ops-section">
         <div className="section-label">
           <span>Open paper positions</span>
+          <SimulationOnlyChip />
           <span className={tradesAvailable ? "status-badge" : "demo-chip"}>
             {tradesAvailable ? (activeTrades.length ? "LIVE PAPER" : "EMPTY") : "UNAVAILABLE"}
           </span>

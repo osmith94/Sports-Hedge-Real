@@ -21,6 +21,7 @@ import {
   exitRequestInit,
   type ExitState,
 } from "../lib/desktop-exit-state";
+import { useRuntimeMode } from "./runtime-mode-provider";
 
 const POLL_INTERVAL_MS = 1000;
 const POLL_TIMEOUT_MS = 1500;
@@ -29,6 +30,7 @@ const SLOW_AFTER_MS = 90_000;
 
 type ViewProps = {
   state: ExitState;
+  modeLabel?: string;
   onOpen?: () => void;
   onCancel?: () => void;
   onConfirm?: () => void;
@@ -40,7 +42,13 @@ function atBodyLevel(layer: ReactNode): ReactNode {
   return typeof document === "undefined" ? layer : createPortal(layer, document.body);
 }
 
-export function ExitSportsHedgeView({ state, onOpen, onCancel, onConfirm }: ViewProps) {
+export function ExitSportsHedgeView({
+  state,
+  modeLabel = "PAPER MODE",
+  onOpen,
+  onCancel,
+  onConfirm,
+}: ViewProps) {
   const { phase, message } = state;
   if (phase === "checking" || phase === "unavailable") {
     return null;
@@ -51,7 +59,7 @@ export function ExitSportsHedgeView({ state, onOpen, onCancel, onConfirm }: View
     return atBodyLevel(
       <div className="desktop-exit-overlay" role="status" aria-live="polite" data-phase={phase}>
         <div className="desktop-exit-overlay-card">
-          <div className="paper-pill"><span className="paper-dot" /> PAPER MODE</div>
+          <div className="paper-pill"><span className="paper-dot" /> {modeLabel}</div>
           <h1>{title}</h1>
           <p>{body}</p>
         </div>
@@ -96,6 +104,7 @@ async function statusReachable(): Promise<boolean> {
 }
 
 export function ExitSportsHedge({ initialState = INITIAL_EXIT_STATE }: { initialState?: ExitState }) {
+  const runtime = useRuntimeMode();
   const [state, dispatch] = useReducer(exitReducer, initialState);
 
   useEffect(() => {
@@ -155,6 +164,7 @@ export function ExitSportsHedge({ initialState = INITIAL_EXIT_STATE }: { initial
   return (
     <ExitSportsHedgeView
       state={state}
+      modeLabel={runtime.footerMode}
       onOpen={() => dispatch({ type: "open_confirm" })}
       onCancel={() => dispatch({ type: "cancel" })}
       onConfirm={() => void confirm()}

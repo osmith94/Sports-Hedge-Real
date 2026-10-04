@@ -237,7 +237,12 @@ def merge_current_market_slots(
             continue
         merged[key] = CurrentMarketSlot(
             key=key,
-            row=_row_preserving_relationship(previous, row, discovery=discovery),
+            row=_row_preserving_relationship(
+                previous,
+                row,
+                discovery=discovery,
+                pricing_refresh=pricing_refresh,
+            ),
             scan_lane=lane,
             last_scanned_at=scanned,
             paper_market_ids=paper_market_ids,
@@ -865,23 +870,22 @@ def _row_preserving_relationship(
     incoming: FixtureMarketInventoryRow,
     *,
     discovery: bool,
+    pricing_refresh: bool,
 ) -> FixtureMarketInventoryRow:
-    """HOT/BACKGROUND may refresh economics; they may not revoke ApprovedEquivalent."""
+    """Pricing may refresh economics; it is not relationship authority.
 
-    if discovery or previous is None:
+    Ordinary HOT/UNIVERSE evaluations may authoritatively replace an existing
+    relationship. Only a price-engine refresh preserves the previously proved
+    comparable status when its reconstructed row is non-comparable.
+    """
+
+    if discovery or previous is None or not pricing_refresh:
         return incoming
     if not inventory_is_comparable_opportunity(previous.row.comparison_status):
         return incoming
     if inventory_is_comparable_opportunity(incoming.comparison_status):
         return incoming
-    if incoming.comparison_status in {
-        InventoryComparisonStatus.MISSING_COSTS,
-        InventoryComparisonStatus.MISSING_FX,
-        InventoryComparisonStatus.STALE,
-        InventoryComparisonStatus.VENUE_ONLY,
-    }:
-        return incoming.model_copy(update={"comparison_status": previous.row.comparison_status})
-    return incoming
+    return incoming.model_copy(update={"comparison_status": previous.row.comparison_status})
 
 
 def _slot_generation_id(
