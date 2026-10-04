@@ -13,9 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from sports_hedge.config import Settings
-from sports_hedge.execution.clients import KalshiExecutionClient, MatchbookExecutionClient
+from sports_hedge.execution.clients import (
+    KalshiExecutionClient,
+    MatchbookExecutionClient,
+    PolymarketExecutionClient,
+)
 from sports_hedge.execution.kalshi_http import KalshiHttpExecutionTransport
 from sports_hedge.execution.matchbook_http import MatchbookHttpExecutionTransport
+from sports_hedge.execution.polymarket_http import PolymarketHttpExecutionTransport
+from sports_hedge.execution.polymarket_sdk import wallet_config
 from sports_hedge.execution.package import execution_armed
 from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime
 
@@ -31,6 +37,7 @@ def bind_process_execution_runtime(settings: Settings) -> ExecutionRuntime:
         return runtime
     runtime.matchbook = None
     runtime.kalshi = None
+    runtime.polymarket = None
     runtime.configured_signature = signature
     if not execution_armed(settings):
         return runtime
@@ -41,6 +48,8 @@ def bind_process_execution_runtime(settings: Settings) -> ExecutionRuntime:
         runtime.kalshi = KalshiExecutionClient(
             KalshiHttpExecutionTransport(settings, private_key=private_key)
         )
+    if wallet_config(settings) is not None:
+        runtime.polymarket = PolymarketExecutionClient(PolymarketHttpExecutionTransport(settings))
     return runtime
 
 
@@ -55,9 +64,20 @@ def _signature(settings: Settings) -> str:
             (settings.kalshi_api_key_id or "").strip(),
             (settings.kalshi_private_key_path or "").strip(),
             settings.resolved_kalshi_base_url(),
+            (settings.polymarket_private_key_path or "").strip(),
+            (settings.polymarket_funder_address or "").strip(),
+            "" if settings.polymarket_signature_type is None else str(settings.polymarket_signature_type),
+            _fingerprint(settings.polymarket_api_key or ""),
+            _fingerprint(settings.polymarket_api_secret or ""),
+            _fingerprint(settings.polymarket_api_passphrase or ""),
+            settings.polymarket_geoblock_url,
         )
     )
     return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _matchbook_ready(settings: Settings) -> bool:

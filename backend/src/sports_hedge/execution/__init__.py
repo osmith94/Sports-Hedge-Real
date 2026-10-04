@@ -4,6 +4,7 @@ from sports_hedge.execution.clients import (
     DeterministicExecutionTransport,
     KalshiExecutionClient,
     MatchbookExecutionClient,
+    PolymarketExecutionClient,
 )
 from sports_hedge.execution.models import (
     LiveExecutionPackage,
@@ -20,6 +21,7 @@ __all__ = [
     "LiveExecutionPackage",
     "LivePackageOutcome",
     "MatchbookExecutionClient",
+    "PolymarketExecutionClient",
     "VenueOrderRequest",
     "VenueOrderResult",
     "VenueOrderStatus",

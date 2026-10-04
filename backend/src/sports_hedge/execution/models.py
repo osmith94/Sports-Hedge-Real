@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -64,6 +65,13 @@ class VenueOrderResult(BaseModel):
     # quantity is contracts. ``filled_size`` stays in the request's currency units.
     native_filled_quantity: Decimal | None = None
     native_remaining_quantity: Decimal | None = None
+    order_type: str | None = None
+    venue_fee: Decimal | None = None
+    venue_fee_rate_bps: Decimal | None = None
+    remainder_quantity: Decimal | None = None
+    cancel_result: str | None = None
+    eligibility: dict[str, Any] | None = None
+    note: str | None = None
 
 
 class LiveExecutionPackage(BaseModel):

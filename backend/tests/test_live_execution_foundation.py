@@ -372,7 +372,7 @@ async def test_no_external_write_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         kalshi=kalshi,
     )
     assert result.outcome is LivePackageOutcome.FULLY_FILLED
-    http_modules = {"matchbook_http.py", "kalshi_http.py"}
+    http_modules = {"matchbook_http.py", "kalshi_http.py", "polymarket_http.py", "polymarket_geoblock.py"}
     for path in EXECUTION.glob("*.py"):
         if path.name in http_modules:
             continue
@@ -393,6 +393,7 @@ async def test_no_external_write_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     package_source = (EXECUTION / "package.py").read_text(encoding="utf-8")
     assert "matchbook_http" not in package_source
     assert "kalshi_http" not in package_source
+    assert "polymarket_http" not in package_source
 
 
 @pytest.mark.asyncio
@@ -415,6 +416,7 @@ async def test_armed_real_execution_without_injected_transport_fails_closed() ->
         "configured_execution_enabled": True,
         "matchbook_execution_configured": False,
         "kalshi_execution_configured": False,
+        "polymarket_execution_configured": False,
         "live_execution_ready": False,
         "execution_transport": "unavailable",
         "scanner_execution": "paper",
@@ -451,6 +453,7 @@ def test_health_separates_configured_execution_from_live_capability(monkeypatch:
         "configured_execution_enabled": True,
         "matchbook_execution_configured": False,
         "kalshi_execution_configured": False,
+        "polymarket_execution_configured": False,
         "live_execution_ready": False,
         "execution_transport": "unavailable",
         "scanner_execution": "paper",

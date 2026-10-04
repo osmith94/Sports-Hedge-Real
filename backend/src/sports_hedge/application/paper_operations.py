@@ -3023,7 +3023,14 @@ class PaperOperationsService:
         runtime = self.execution_runtime
         matchbook = None if runtime is None else runtime.matchbook
         kalshi = None if runtime is None else runtime.kalshi
-        if refusal_reason(plan, settings=self.settings, matchbook=matchbook, kalshi=kalshi):
+        polymarket = None if runtime is None else runtime.polymarket
+        if refusal_reason(
+            plan,
+            settings=self.settings,
+            matchbook=matchbook,
+            kalshi=kalshi,
+            polymarket=polymarket,
+        ):
             return
         trade_id = paper_trade_id(plan.opportunity_id)
         package_id = opening_package_id(trade_id)
@@ -3053,6 +3060,7 @@ class PaperOperationsService:
                 settings=self.settings,
                 matchbook=matchbook,
                 kalshi=kalshi,
+                polymarket=polymarket,
                 clock=lambda: when,
             )
         )

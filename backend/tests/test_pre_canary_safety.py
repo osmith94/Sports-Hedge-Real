@@ -145,7 +145,13 @@ class _Client:
 def test_health_and_scanner_share_one_execution_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     matchbook = _Client("matchbook_http")
     kalshi = _Client("kalshi_http")
-    set_execution_runtime(ExecutionRuntime(matchbook=matchbook, kalshi=kalshi))  # type: ignore[arg-type]
+    set_execution_runtime(
+        ExecutionRuntime(
+            matchbook=matchbook,  # type: ignore[arg-type]
+            kalshi=kalshi,  # type: ignore[arg-type]
+            polymarket=_Client("polymarket_http"),  # type: ignore[arg-type]
+        )
+    )
     shared = get_execution_runtime()
     settings = _armed()
     ops = PaperOperationsService(
@@ -214,6 +220,10 @@ def test_bind_constructs_http_transports_without_submitting(tmp_path: Path, monk
     assert posts == []
 
     set_execution_runtime(None)
+    from eth_account import Account
+
+    polymarket_key = tmp_path / "polymarket-private-key"
+    polymarket_key.write_text(Account.create().key.hex(), encoding="utf-8")
     armed = Settings(
         sports_hedge_mode="real",
         sports_hedge_execution_enabled=True,
@@ -221,6 +231,8 @@ def test_bind_constructs_http_transports_without_submitting(tmp_path: Path, monk
         matchbook_password="secret",
         kalshi_api_key_id="key-id",
         kalshi_private_key_path=str(pem),
+        polymarket_private_key_path=str(polymarket_key),
+        polymarket_signature_type=0,
     )
     ready = execution_capability(armed)
     runtime = get_execution_runtime()
@@ -228,6 +240,8 @@ def test_bind_constructs_http_transports_without_submitting(tmp_path: Path, monk
     assert ready["scanner_execution"] == "live"
     assert isinstance(runtime.matchbook, MatchbookExecutionClient)
     assert isinstance(runtime.kalshi, KalshiExecutionClient)
+    assert runtime.polymarket is not None
+    assert runtime.polymarket._transport.transport_kind == "polymarket_http"  # type: ignore[union-attr]
     assert runtime.matchbook._transport.transport_kind == "matchbook_http"  # type: ignore[union-attr]
     assert runtime.kalshi._transport.transport_kind == "kalshi_http"  # type: ignore[union-attr]
     assert posts == []

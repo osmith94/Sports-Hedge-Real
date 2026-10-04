@@ -598,6 +598,7 @@ def test_health_reports_live_scanner_only_when_transports_are_armed() -> None:
             ExecutionRuntime(
                 matchbook=_Client("matchbook_http"),  # type: ignore[arg-type]
                 kalshi=_Client("kalshi_http"),  # type: ignore[arg-type]
+                polymarket=_Client("polymarket_http"),  # type: ignore[arg-type]
             )
         )
         ready = execution_capability(configured)

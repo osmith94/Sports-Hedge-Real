@@ -6,10 +6,14 @@ health must not treat stored usernames or key paths as a live order path.
 
 from __future__ import annotations
 
-from sports_hedge.execution.clients import KalshiExecutionClient, MatchbookExecutionClient
+from sports_hedge.execution.clients import (
+    KalshiExecutionClient,
+    MatchbookExecutionClient,
+    PolymarketExecutionClient,
+)
 
 _MATCHBOOK_HTTP = "matchbook_http"
-_KALSHI_HTTP = "kalshi_http"
+_POLYMARKET_HTTP = "polymarket_http"
 _seam_available = False
 
 
@@ -21,9 +25,11 @@ class ExecutionRuntime:
         *,
         matchbook: MatchbookExecutionClient | None = None,
         kalshi: KalshiExecutionClient | None = None,
+        polymarket: PolymarketExecutionClient | None = None,
     ) -> None:
         self.matchbook = matchbook
         self.kalshi = kalshi
+        self.polymarket = polymarket
         self.explicit = False
         self.configured_signature: str | None = None
 
@@ -50,12 +56,14 @@ def set_execution_runtime(runtime: ExecutionRuntime | None) -> None:
     if runtime is None:
         current.matchbook = None
         current.kalshi = None
+        current.polymarket = None
         current.explicit = False
         current.configured_signature = None
         return
     if runtime is not current:
         current.matchbook = runtime.matchbook
         current.kalshi = runtime.kalshi
+        current.polymarket = runtime.polymarket
     current.explicit = True
     current.configured_signature = None
 
@@ -87,8 +95,10 @@ def scanner_execution_posture() -> dict[str, bool | str]:
 
     runtime = get_execution_runtime()
     matchbook_armed = transport_armed(runtime.matchbook, kind=_MATCHBOOK_HTTP)
-    kalshi_armed = transport_armed(runtime.kalshi, kind=_KALSHI_HTTP)
-    ready = bool(dispatch_seam_available() and matchbook_armed and kalshi_armed)
+    polymarket_armed = transport_armed(runtime.polymarket, kind=_POLYMARKET_HTTP)
+    # The first canary pair is Matchbook + Polymarket. Kalshi stays dispatchable
+    # when its own client is installed, and is not required for this flag.
+    ready = bool(dispatch_seam_available() and matchbook_armed and polymarket_armed)
     return {
         "live_execution_ready": ready,
         "execution_transport": "armed" if ready else "unavailable",

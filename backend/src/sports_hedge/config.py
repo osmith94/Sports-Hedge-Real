@@ -240,6 +240,18 @@ class Settings(BaseSettings):
     )
     polymarket_gamma_page_limit: int = Field(default=100, ge=1, le=100)
     polymarket_gamma_max_pages_per_series: int = Field(default=5, ge=1, le=20)
+    # Execution signing material. Empty means the Polymarket execution transport
+    # is not configured. The private key file is never read by health.
+    # 0 EOA, 1 POLY_PROXY, 2 GNOSIS_SAFE, 3 deposit wallet. Omit both funder and
+    # signature type and the transport stays unarmed: the official client would
+    # otherwise deploy a deposit wallet.
+    polymarket_private_key_path: str | None = None
+    polymarket_funder_address: str | None = None
+    polymarket_signature_type: int | None = Field(default=None, ge=0, le=3)
+    polymarket_api_key: str | None = None
+    polymarket_api_secret: str | None = None
+    polymarket_api_passphrase: str | None = None
+    polymarket_geoblock_url: str = "https://polymarket.com/api/geoblock"
 
     # Public Kalshi Trade API v2 market data. Demo host is opt-in.
     kalshi_base_url: str = "https://external-api.kalshi.com/trade-api/v2"

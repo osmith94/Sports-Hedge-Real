@@ -134,3 +134,37 @@ class KalshiExecutionClient:
         if request.venue is not VenueName.KALSHI:
             raise ValueError("Kalshi execution client received another venue")
         return await self._transport.dispatch(request)
+
+
+class PolymarketExecutionClient:
+    """Polymarket order dispatch. Not the read-only Gamma/CLOB market-data client."""
+
+    venue = VenueName.POLYMARKET
+
+    def __init__(self, transport: ExecutionTransport) -> None:
+        self._transport = transport
+
+    async def dispatch(self, request: VenueOrderRequest) -> VenueOrderResult:
+        if request.venue is not VenueName.POLYMARKET:
+            raise ValueError("Polymarket execution client received another venue")
+        return await self._transport.dispatch(request)
+
+    async def cancel(self, request: VenueOrderRequest) -> VenueOrderResult:
+        if request.venue is not VenueName.POLYMARKET:
+            raise ValueError("Polymarket execution client received another venue")
+        cancel = getattr(self._transport, "cancel", None)
+        if cancel is None:
+            now = datetime.now(UTC)
+            return VenueOrderResult(
+                venue=request.venue,
+                client_order_id=request.client_order_id,
+                venue_order_id=None,
+                status=VenueOrderStatus.FAILED,
+                requested_size=request.requested_size,
+                filled_size=None,
+                requested_price=request.requested_price,
+                average_fill_price=None,
+                submitted_at=now,
+                updated_at=now,
+            )
+        return await cancel(request)

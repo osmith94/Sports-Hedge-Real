@@ -40,6 +40,7 @@ _SECRET_MARKERS = (
     "credential",
     "session-token",
     "session_token",
+    "passphrase",
 )
 
 

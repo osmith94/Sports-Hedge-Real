@@ -296,3 +296,153 @@ def _floor_to(value: Decimal, quantum: Decimal) -> Decimal:
 def _ceil_to(value: Decimal, quantum: Decimal) -> Decimal:
     units = (value / quantum).to_integral_value(rounding=ROUND_CEILING)
     return units * quantum
+
+
+# py-clob / polymarket-client 0.12.0 market-order rounding table.
+# https://docs.polymarket.com/trading/orders/create
+# Price decimals, size decimals. Amount decimals are applied by the SDK.
+_POLYMARKET_TICKS: dict[str, int] = {
+    "0.1": 2,
+    "0.01": 2,
+    "0.005": 2,
+    "0.0025": 2,
+    "0.001": 2,
+    "0.0001": 2,
+}
+# Official immediate type. FAK fills what is available and cancels the rest.
+# FOK would turn a partial book into a zero fill. The package already records
+# PARTIAL from the actual quantity, so FAK is the IOC equivalent.
+POLYMARKET_ORDER_TYPE = "FAK"
+
+
+class PolymarketOrderSide(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+@dataclass(frozen=True)
+class PolymarketNativeOrder:
+    """One V2 token order with the same payoff direction as the approved leg.
+
+    ``amount`` is pUSD to spend on a BUY. ``shares`` is the conditional-token
+    size. A SELL's stake is the pUSD received if the token loses, which is the
+    lay stake. Neither quantity is larger than the approved stake.
+    """
+
+    token_id: str
+    side: PolymarketOrderSide
+    price: Decimal
+    amount: Decimal
+    shares: Decimal
+    stake: Decimal
+    decimal_odds: Decimal
+    tick_size: str
+    order_type: str
+
+
+def polymarket_token_id(native_runner_id: str) -> str:
+    """The Price-2 runner id is the CLOB token id. A synthetic index is not tradable."""
+
+    token = native_runner_id.strip()
+    if not token.isdigit() or len(token) < 10 or ":" in native_runner_id:
+        raise TranslationError("Polymarket execution requires the exact CLOB token id")
+    return token
+
+
+def polymarket_native_order(
+    *,
+    native_runner_id: str,
+    native_market_id: str,
+    side: MarketSide,
+    decimal_odds: Decimal,
+    requested_stake: Decimal,
+    tick_size: str,
+    minimum_shares: Decimal,
+) -> PolymarketNativeOrder:
+    """Translate one approved decimal-odds leg into a V2 BUY or SELL.
+
+    BACK buys the selected token. LAY sells that same token. The price is
+    snapped to the venue tick in the direction that does not worsen the
+    approved odds. Size is floored. A stake below the venue minimum fails.
+    """
+
+    if not native_market_id.strip():
+        raise TranslationError("Polymarket market id is required")
+    if decimal_odds <= 1:
+        raise TranslationError("decimal odds must be greater than 1")
+    if requested_stake <= 0:
+        raise TranslationError("Polymarket stake must be positive")
+    if tick_size not in _POLYMARKET_TICKS:
+        raise TranslationError("Polymarket tick size is not a current V2 increment")
+    if minimum_shares <= 0:
+        raise TranslationError("Polymarket minimum size is missing")
+    token = polymarket_token_id(native_runner_id)
+    tick = Decimal(tick_size)
+    quantum = Decimal(10) ** -_POLYMARKET_TICKS[tick_size]
+    implied = Decimal(1) / decimal_odds
+    if side is MarketSide.BACK:
+        price = _floor_to(implied, tick)
+        if price <= 0 or price >= 1:
+            raise TranslationError("Polymarket buy limit is outside the tradable price range")
+        odds = Decimal(1) / price
+        if odds < decimal_odds:
+            raise TranslationError("Polymarket price rounding would worsen the approved odds")
+        amount = _floor_to(requested_stake, quantum)
+        if amount <= 0:
+            raise TranslationError("Polymarket stake is below the size increment")
+        _require_stake_coverage(requested_stake, amount)
+        shares = amount / price
+        if shares < minimum_shares:
+            raise TranslationError("Polymarket stake is below the minimum order size")
+        return PolymarketNativeOrder(
+            token_id=token,
+            side=PolymarketOrderSide.BUY,
+            price=price,
+            amount=amount,
+            shares=shares,
+            stake=amount,
+            decimal_odds=odds,
+            tick_size=tick_size,
+            order_type=POLYMARKET_ORDER_TYPE,
+        )
+    if side is MarketSide.LAY:
+        price = _ceil_to(implied, tick)
+        if price <= 0 or price >= 1:
+            raise TranslationError("Polymarket sell limit is outside the tradable price range")
+        odds = Decimal(1) / price
+        if odds > decimal_odds:
+            raise TranslationError("Polymarket price rounding would worsen the approved lay")
+        shares = _floor_to(requested_stake / price, quantum)
+        if shares <= 0:
+            raise TranslationError("Polymarket stake is below the size increment")
+        received = price * shares
+        if received > requested_stake:
+            raise TranslationError("translated size would increase the approved stake")
+        _require_stake_coverage(requested_stake, received)
+        if shares < minimum_shares:
+            raise TranslationError("Polymarket stake is below the minimum order size")
+        return PolymarketNativeOrder(
+            token_id=token,
+            side=PolymarketOrderSide.SELL,
+            price=price,
+            amount=received,
+            shares=shares,
+            stake=received,
+            decimal_odds=odds,
+            tick_size=tick_size,
+            order_type=POLYMARKET_ORDER_TYPE,
+        )
+    raise TranslationError("Polymarket execution only maps back to buy and lay to sell")
+
+
+def polymarket_payoff(order: PolymarketNativeOrder, *, outcome_wins: bool) -> Decimal:
+    """Payout minus stake for the token the order trades.
+
+    A BUY wins ``shares - stake`` when the token pays 1. A SELL wins ``stake``
+    when the token pays 0 and loses ``(1 - price) * shares`` when it pays 1.
+    """
+
+    if order.side is PolymarketOrderSide.BUY:
+        return order.shares - order.stake if outcome_wins else -order.stake
+    liability = (Decimal(1) - order.price) * order.shares
+    return -liability if outcome_wins else order.stake

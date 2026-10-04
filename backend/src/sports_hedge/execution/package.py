@@ -16,7 +16,11 @@ from decimal import Decimal
 
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import MarketSide, VenueName
-from sports_hedge.execution.clients import KalshiExecutionClient, MatchbookExecutionClient
+from sports_hedge.execution.clients import (
+    KalshiExecutionClient,
+    MatchbookExecutionClient,
+    PolymarketExecutionClient,
+)
 from sports_hedge.execution.models import (
     LiveExecutionPackage,
     LivePackageOutcome,
@@ -27,7 +31,7 @@ from sports_hedge.execution.models import (
 from sports_hedge.paper.chain import PaperFillPlan
 from sports_hedge.paper.fills import PaperOpportunityLeg
 
-_SUPPORTED = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI})
+_SUPPORTED = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET})
 LIVE_EXECUTION_TRANSPORT_UNAVAILABLE = "LIVE_EXECUTION_TRANSPORT_UNAVAILABLE"
 
 
@@ -51,6 +55,7 @@ def execution_capability(settings: Settings) -> dict[str, bool | str]:
         "configured_execution_enabled": settings.sports_hedge_execution_enabled is True,
         "matchbook_execution_configured": _matchbook_execution_configured(settings),
         "kalshi_execution_configured": _kalshi_execution_configured(settings),
+        "polymarket_execution_configured": _polymarket_execution_configured(settings),
         "live_execution_ready": ready,
         "execution_transport": "armed" if ready else "unavailable",
         "scanner_execution": "live" if ready else "paper",
@@ -76,6 +81,10 @@ def _kalshi_execution_configured(settings: Settings) -> bool:
     )
 
 
+def _polymarket_execution_configured(settings: Settings) -> bool:
+    return bool((settings.polymarket_private_key_path or "").strip())
+
+
 async def execute_live_package(
     plan: PaperFillPlan,
     *,
@@ -84,6 +93,7 @@ async def execute_live_package(
     settings: Settings,
     matchbook: MatchbookExecutionClient | None = None,
     kalshi: KalshiExecutionClient | None = None,
+    polymarket: PolymarketExecutionClient | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> LiveExecutionPackage:
     """Prepare hedge legs from the accepted plan and dispatch them concurrently."""
@@ -100,7 +110,9 @@ async def execute_live_package(
     ]
     if not prepared:
         return LiveExecutionPackage(outcome=LivePackageOutcome.FAILED, detail="no_legs")
-    if _required_transport_missing(prepared, matchbook=matchbook, kalshi=kalshi):
+    if _required_transport_missing(
+        prepared, matchbook=matchbook, kalshi=kalshi, polymarket=polymarket
+    ):
         return LiveExecutionPackage(
             outcome=LivePackageOutcome.FAILED,
             detail=LIVE_EXECUTION_TRANSPORT_UNAVAILABLE,
@@ -110,7 +122,7 @@ async def execute_live_package(
         submitted = now()
         if request is None or leg.venue not in _SUPPORTED:
             return _unsent(leg, trade_id=trade_id, tranche_id=tranche_id, at=submitted)
-        client = matchbook if leg.venue is VenueName.MATCHBOOK else kalshi
+        client = _client_for(leg.venue, matchbook=matchbook, kalshi=kalshi, polymarket=polymarket)
         if client is None:
             return _unsent(leg, trade_id=trade_id, tranche_id=tranche_id, at=submitted)
         try:
@@ -127,11 +139,28 @@ async def execute_live_package(
     return LiveExecutionPackage(outcome=_outcome(orders), orders=orders)
 
 
+def _client_for(
+    venue: VenueName,
+    *,
+    matchbook: MatchbookExecutionClient | None,
+    kalshi: KalshiExecutionClient | None,
+    polymarket: PolymarketExecutionClient | None,
+) -> MatchbookExecutionClient | KalshiExecutionClient | PolymarketExecutionClient | None:
+    if venue is VenueName.MATCHBOOK:
+        return matchbook
+    if venue is VenueName.KALSHI:
+        return kalshi
+    if venue is VenueName.POLYMARKET:
+        return polymarket
+    return None
+
+
 def _required_transport_missing(
     prepared: list[VenueOrderRequest | None],
     *,
     matchbook: MatchbookExecutionClient | None,
     kalshi: KalshiExecutionClient | None,
+    polymarket: PolymarketExecutionClient | None,
 ) -> bool:
     """A supported leg with no injected client has no runtime transport.
 
@@ -141,7 +170,9 @@ def _required_transport_missing(
     venues = {request.venue for request in prepared if request is not None}
     if VenueName.MATCHBOOK in venues and matchbook is None:
         return True
-    return VenueName.KALSHI in venues and kalshi is None
+    if VenueName.KALSHI in venues and kalshi is None:
+        return True
+    return VenueName.POLYMARKET in venues and polymarket is None
 
 
 def _accepted_plan(plan: PaperFillPlan) -> bool:

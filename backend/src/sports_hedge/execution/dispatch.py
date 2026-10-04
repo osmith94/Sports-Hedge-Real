@@ -18,7 +18,11 @@ from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.execution.attempts import scrub_secrets
-from sports_hedge.execution.clients import KalshiExecutionClient, MatchbookExecutionClient
+from sports_hedge.execution.clients import (
+    KalshiExecutionClient,
+    MatchbookExecutionClient,
+    PolymarketExecutionClient,
+)
 from sports_hedge.execution.models import (
     LiveExecutionPackage,
     LivePackageOutcome,
@@ -152,6 +156,7 @@ def refusal_reason(
     settings: Settings,
     matchbook: MatchbookExecutionClient | None,
     kalshi: KalshiExecutionClient | None,
+    polymarket: PolymarketExecutionClient | None = None,
 ) -> str | None:
     """Why this plan must not be submitted. None means the existing package may run."""
 
@@ -169,11 +174,13 @@ def refusal_reason(
     if any(request is None for request in requests):
         return "missing_native_ids"
     venues = {leg.venue for leg in legs}
-    if not venues <= {VenueName.MATCHBOOK, VenueName.KALSHI}:
+    if not venues <= {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}:
         return "unsupported_venue"
     if VenueName.MATCHBOOK in venues and matchbook is None:
         return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
     if VenueName.KALSHI in venues and kalshi is None:
+        return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
+    if VenueName.POLYMARKET in venues and polymarket is None:
         return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
     return None
 
@@ -186,11 +193,18 @@ async def run_live_opening(
     settings: Settings,
     matchbook: MatchbookExecutionClient | None,
     kalshi: KalshiExecutionClient | None,
+    polymarket: PolymarketExecutionClient | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> LiveDispatchResult:
     """Submit once, then cancel a known Matchbook resting remainder."""
 
-    reason = refusal_reason(plan, settings=settings, matchbook=matchbook, kalshi=kalshi)
+    reason = refusal_reason(
+        plan,
+        settings=settings,
+        matchbook=matchbook,
+        kalshi=kalshi,
+        polymarket=polymarket,
+    )
     if reason is not None:
         return LiveDispatchResult(sent=False, refusal=reason)
     legs = [leg for leg in plan.legs if leg.requested_stake > 0]
@@ -208,6 +222,7 @@ async def run_live_opening(
         settings=settings,
         matchbook=matchbook,
         kalshi=kalshi,
+        polymarket=polymarket,
         clock=clock,
     )
     orders, remainder = await release_matchbook_remainders(
@@ -293,6 +308,17 @@ def order_audit_facts(
                     None if order.average_fill_price is None else str(order.average_fill_price)
                 ),
                 "updated_at": order.updated_at.isoformat(),
+                "order_type": order.order_type,
+                "venue_fee": None if order.venue_fee is None else str(order.venue_fee),
+                "venue_fee_rate_bps": (
+                    None if order.venue_fee_rate_bps is None else str(order.venue_fee_rate_bps)
+                ),
+                "remainder": (
+                    None if order.remainder_quantity is None else str(order.remainder_quantity)
+                ),
+                "cancel_result": order.cancel_result,
+                "eligibility": order.eligibility,
+                "note": order.note,
             }
         )
     return facts
