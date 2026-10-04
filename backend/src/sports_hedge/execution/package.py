@@ -129,6 +129,11 @@ async def execute_live_package(
     ]
     if not prepared:
         return LiveExecutionPackage(outcome=LivePackageOutcome.FAILED, detail="no_legs")
+    if not _frozen_package_ready(prepared):
+        return LiveExecutionPackage(
+            outcome=LivePackageOutcome.FAILED,
+            detail="frozen_execution_package_required",
+        )
     if _required_transport_missing(
         prepared, matchbook=matchbook, kalshi=kalshi, polymarket=polymarket
     ):
@@ -190,6 +195,30 @@ def _client_for(
     if venue is VenueName.POLYMARKET:
         return polymarket
     return None
+
+
+def _frozen_package_ready(prepared: list[VenueOrderRequest | None]) -> bool:
+    """All Real MB/PM legs must come from the same frozen Price-2 package."""
+
+    if not prepared or any(request is None for request in prepared):
+        return False
+    for request in prepared:
+        assert request is not None
+        if request.venue not in {VenueName.MATCHBOOK, VenueName.POLYMARKET}:
+            continue
+        if not request.price2_snapshot_id:
+            return False
+        if request.frozen_limit_price is None or request.frozen_amount is None:
+            return False
+        if request.venue is VenueName.POLYMARKET:
+            if (
+                request.frozen_order_type is None
+                or request.frozen_shares is None
+                or request.frozen_tick_size is None
+                or request.frozen_minimum_size is None
+            ):
+                return False
+    return True
 
 
 def _required_transport_missing(
