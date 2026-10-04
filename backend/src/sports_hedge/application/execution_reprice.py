@@ -571,9 +571,9 @@ def _release_iteration(opportunity_id: str) -> None:
 
 
 def _paper_operations(watchlist: WatchlistService) -> Any:
-    from sports_hedge.api.paper import get_paper_operations_service, get_priority_alert_service
+    from sports_hedge.api.paper import get_paper_operations_service, operations_priority_alerts
 
-    return get_paper_operations_service(watchlist, get_priority_alert_service())
+    return get_paper_operations_service(watchlist, operations_priority_alerts())
 
 
 def _open_iterative_trade(operations: Any, opportunity_id: str) -> Any | None:

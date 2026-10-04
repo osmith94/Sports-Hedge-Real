@@ -607,9 +607,16 @@ class PaperOperationsService:
         execution_runtime: ExecutionRuntime | None = None,
     ) -> None:
         self.watchlist = watchlist
-        self.alerts = alerts or PriorityAlertService()
         self.simulator = simulator or PaperFillSimulator()
         self.settings = settings or get_settings()
+        # Priority alerts stay paper-only. REAL mode may run with no alert
+        # service. Do not invent a no-op stand-in or a second readiness flag.
+        if alerts is not None:
+            self.alerts = alerts
+        elif self.settings.sports_hedge_mode == "paper":
+            self.alerts = PriorityAlertService(settings=self.settings)
+        else:
+            self.alerts = None
         self.catalogue = catalogue
         self.ledger = ledger
         if ledger is not None:
@@ -772,7 +779,8 @@ class PaperOperationsService:
             decision = attach_ftts_ordinary_depth(decision)
             if decision.depth_scan is not None and decision.depth_scan.solution.is_arbitrage:
                 candidate = _candidate_from_decision(decision, opportunity_id)
-                self.alerts.ingest(candidate)
+                if self.alerts is not None:
+                    self.alerts.ingest(candidate)
             if self._should_autofill(autofill=autofill, provenance=provenance):
                 current_watch = self.watchlist.repository.get(opportunity_id)
                 if (
@@ -3618,9 +3626,10 @@ class PaperOperationsService:
         )
         self._entry_rejections.pop(opportunity_id, None)
         alert = None
-        existing_id = self.alerts._by_opportunity.get(opportunity_id)
-        if existing_id:
-            alert = self.alerts.get_alert(existing_id)
+        if self.alerts is not None:
+            existing_id = self.alerts._by_opportunity.get(opportunity_id)
+            if existing_id:
+                alert = self.alerts.get_alert(existing_id)
         postings = self.journal.postings(opportunity_id=opportunity_id)
         native_totals = _native_totals(postings)
         steps = _trace_steps(
