@@ -39,7 +39,11 @@ from sports_hedge.domain.models import MarketSide, VenueName
 from sports_hedge.execution.models import VenueOrderRequest, VenueOrderResult, VenueOrderStatus
 from sports_hedge.execution.package import execution_armed
 from sports_hedge.execution.translate import TranslationError, matchbook_limit_odds, matchbook_stake
-from sports_hedge.venues.matchbook import MATCHBOOK_SESSION_PATH
+from sports_hedge.venues.matchbook import (
+    MATCHBOOK_SESSION_PATH,
+    MatchbookAuthError,
+    matchbook_login_failure_from_response,
+)
 
 SUBMIT_PATH = "/edge/rest/v2/offers"
 # Official Get Balance. Schema: id, balance, exposure, commission-reserve, free-funds.
@@ -109,7 +113,7 @@ class MatchbookHttpExecutionTransport:
             return _result(request, status=VenueOrderStatus.FAILED, at=now)
         try:
             await self._login()
-        except httpx.HTTPError:
+        except (httpx.HTTPError, MatchbookAuthError):
             return _result(request, status=VenueOrderStatus.FAILED, at=self._clock())
         self._unknown_submit.add(request.client_order_id)
         try:
@@ -162,7 +166,7 @@ class MatchbookHttpExecutionTransport:
         try:
             await self._login()
             response = await self._client.delete(SUBMIT_PATH, params={"offer-ids": offer_id})
-        except httpx.HTTPError:
+        except (httpx.HTTPError, MatchbookAuthError):
             return _result(
                 request,
                 status=VenueOrderStatus.FAILED,
@@ -190,7 +194,7 @@ class MatchbookHttpExecutionTransport:
         try:
             await self._login()
             response = await self._client.get(f"{SUBMIT_PATH}/{offer_id}")
-        except httpx.HTTPError:
+        except (httpx.HTTPError, MatchbookAuthError):
             return _result(
                 request,
                 status=VenueOrderStatus.FAILED,
@@ -257,6 +261,13 @@ class MatchbookHttpExecutionTransport:
         if mfa:
             payload["mfa-code"] = mfa
         response = await self._client.post(MATCHBOOK_SESSION_PATH, json=payload)
+        failure = matchbook_login_failure_from_response(
+            response,
+            secrets=self._login_secrets(),
+            wall_clock=self._clock(),
+        )
+        if failure is not None:
+            raise failure
         if response.status_code >= 400:
             raise httpx.HTTPError("Matchbook execution login failed")
         try:
@@ -272,6 +283,18 @@ class MatchbookHttpExecutionTransport:
             raise httpx.HTTPError("Matchbook execution login returned no token")
         self._session_token = token
         self._client.headers["session-token"] = token
+
+    def _login_secrets(self) -> tuple[str, ...]:
+        return tuple(
+            value
+            for value in (
+                self._settings.matchbook_username,
+                self._settings.matchbook_password,
+                self._settings.matchbook_mfa_code,
+                self._session_token,
+            )
+            if value
+        )
 
     async def account_snapshot(self) -> dict[str, Any]:
         """Read-only login and balance. Does not call dispatch, cancel, or offers.
@@ -294,6 +317,14 @@ class MatchbookHttpExecutionTransport:
             )
         try:
             await self._login()
+        except MatchbookAuthError as exc:
+            return snapshot_from_balance_body(
+                None,
+                configured_currency=configured,
+                authenticated=False,
+                observed=False,
+                authentication_detail=str(exc),
+            )
         except httpx.HTTPError:
             return snapshot_from_balance_body(
                 None,

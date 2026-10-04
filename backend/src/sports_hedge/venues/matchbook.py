@@ -161,6 +161,77 @@ class MatchbookAuthFaultError(MatchbookAuthError):
         return cls(status_code=response.status_code, codes=codes, messages=messages)
 
 
+class MatchbookPermissionError(MatchbookAuthError):
+    """Login forbidden (HTTP 403). Permission denied; not latched as an auth fault."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 403,
+        codes: tuple[str, ...] = (),
+        messages: tuple[str, ...] = (),
+    ) -> None:
+        self.status_code = int(status_code)
+        self.codes = tuple(code for code in codes if code)
+        self.messages = tuple(message for message in messages if message)
+        super().__init__(self._operator_detail())
+
+    def _operator_detail(self) -> str:
+        parts = [f"Matchbook authentication forbidden (HTTP {self.status_code})"]
+        if self.codes:
+            parts.append("codes " + ", ".join(self.codes))
+        if self.messages:
+            parts.append(self.messages[0])
+        parts.append("account/API permission or verification may be required")
+        return "; ".join(parts)
+
+    @classmethod
+    def from_response(
+        cls,
+        response: httpx.Response,
+        *,
+        secrets: tuple[str, ...] = (),
+    ) -> MatchbookPermissionError:
+        codes, messages = parse_matchbook_login_error_metadata(response, secrets=secrets)
+        return cls(status_code=response.status_code, codes=codes, messages=messages)
+
+
+def matchbook_login_failure_from_response(
+    response: httpx.Response,
+    *,
+    secrets: tuple[str, ...] = (),
+    login_cooldown: ProviderCooldown | None = None,
+    wall_clock: datetime | None = None,
+) -> MatchbookAuthError | None:
+    """Return a sanitized login auth error for HTTP >= 400, or None if status < 400."""
+
+    if response.status_code < 400:
+        return None
+    if login_cooldown is not None:
+        retry_after = login_cooldown.observe_status(
+            response.status_code,
+            response.headers,
+            now=wall_clock,
+        )
+        if retry_after is not None:
+            return MatchbookRateLimitedError(retry_after)
+    elif response.status_code == 429:
+        from sports_hedge.venues.rate_limit import RateLimitPolicy, retry_after_seconds
+
+        when = wall_clock if wall_clock is not None else datetime.now(UTC)
+        wait = retry_after_seconds(
+            response.headers,
+            now=when,
+            policy=RateLimitPolicy(provider="Matchbook"),
+        )
+        return MatchbookRateLimitedError(wait)
+    if response.status_code == 400:
+        return MatchbookAuthFaultError.from_response(response, secrets=secrets)
+    if response.status_code == 403:
+        return MatchbookPermissionError.from_response(response, secrets=secrets)
+    return None
+
+
 class MatchbookDiscoveryError(RuntimeError):
     """Raised when football discovery cannot proceed without guessing."""
 
@@ -266,22 +337,17 @@ class MatchbookClient(ReadOnlyVenue):
             json=payload,
             headers={"Content-Type": "application/json"},
         )
-        retry_after = self._login_cooldown.observe_status(
-            response.status_code,
-            response.headers,
-            now=self._clock(),
+        failure = matchbook_login_failure_from_response(
+            response,
+            secrets=self._login_secrets(),
+            login_cooldown=self._login_cooldown,
+            wall_clock=self._clock(),
         )
-        if retry_after is not None:
+        if failure is not None:
             self._clear_session_token()
-            raise MatchbookRateLimitedError(retry_after)
-        if response.status_code == 400:
-            self._clear_session_token()
-            fault = MatchbookAuthFaultError.from_response(
-                response,
-                secrets=self._login_secrets(),
-            )
-            self._auth_fault = fault
-            raise fault
+            if isinstance(failure, MatchbookAuthFaultError):
+                self._auth_fault = failure
+            raise failure
         response.raise_for_status()
 
         body = response.json()

@@ -43,6 +43,7 @@ def snapshot_from_balance_body(
     configured_currency: str,
     authenticated: bool,
     observed: bool,
+    authentication_detail: str | None = None,
 ) -> dict[str, Any]:
     """Sanitized balance facts. Never includes the session token or account id."""
 
@@ -69,6 +70,8 @@ def snapshot_from_balance_body(
     }
     if free_funds is not None:
         snapshot["free_funds"] = format(free_funds, "f")
+    if isinstance(authentication_detail, str) and authentication_detail.strip():
+        snapshot["authentication_detail"] = authentication_detail.strip()
     return snapshot
 
 
@@ -123,6 +126,9 @@ async def collect_matchbook_preflight(
     free_funds = snapshot.get("free_funds") if isinstance(snapshot, dict) else None
     if isinstance(free_funds, str) and free_funds:
         report["free_funds"] = free_funds
+    auth_detail = snapshot.get("authentication_detail") if isinstance(snapshot, dict) else None
+    if isinstance(auth_detail, str) and auth_detail.strip():
+        report["authentication_detail"] = auth_detail.strip()
     return report
 
 
@@ -130,8 +136,13 @@ def format_matchbook_preflight(report: dict[str, Any]) -> str:
     account_lines = [
         "Account:",
         f"  authenticated read: {'PASS' if report['authenticated_read'] else 'FAIL'}",
-        f"  balance readable: {_yes_no(bool(report['balance_readable']))}",
     ]
+    auth_detail = report.get("authentication_detail")
+    if isinstance(auth_detail, str) and auth_detail.strip():
+        account_lines.append(f"  authentication detail: {auth_detail.strip()}")
+    account_lines.append(
+        f"  balance readable: {_yes_no(bool(report['balance_readable']))}",
+    )
     if report.get("balance_observed"):
         currency = report.get("currency")
         if isinstance(currency, str) and currency:
