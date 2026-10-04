@@ -70,10 +70,37 @@ def _request(venue: VenueName, **overrides: object) -> VenueOrderRequest:
         "client_order_id": "mb-order-1" if venue is VenueName.MATCHBOOK else KALSHI_ID,
     }
     values.update(overrides)
+    if venue is VenueName.MATCHBOOK:
+        side = values.get("side", MarketSide.BACK)
+        requested_price = Decimal(str(values["requested_price"]))
+        requested_size = Decimal(str(values["requested_size"]))
+        values.setdefault("price2_snapshot_id", "exec:wave2:request")
+        values.setdefault(
+            "frozen_order_type",
+            "back" if side is MarketSide.BACK else "lay",
+        )
+        values.setdefault(
+            "frozen_limit_price",
+            matchbook_limit_odds(requested_price, side=side),
+        )
+        values.setdefault("frozen_amount", matchbook_stake(requested_size))
     return VenueOrderRequest(**values)  # type: ignore[arg-type]
 
 
 def _plan(*legs: PaperOpportunityLeg) -> PaperFillPlan:
+    frozen_orders = [
+        {
+            "venue": "matchbook",
+            "native_event_id": leg.source_event_id,
+            "native_market_id": leg.source_market_id,
+            "native_runner_id": leg.source_runner_id,
+            "native_side": "back",
+            "ladder_odds": str(matchbook_limit_odds(leg.displayed_odds, side=MarketSide.BACK)),
+            "native_stake": str(matchbook_stake(leg.requested_stake)),
+        }
+        for leg in legs
+        if leg.venue is VenueName.MATCHBOOK
+    ]
     return PaperFillPlan(
         opportunity_id="opp-1",
         canonical_event_id="evt",
@@ -87,7 +114,13 @@ def _plan(*legs: PaperOpportunityLeg) -> PaperFillPlan:
             solver_model="simple_complete_set",
         ),
         execution_authoritative=True,
-        execution_snapshot_json='{"accepted":true}',
+        execution_snapshot_json=json.dumps(
+            {
+                "snapshot_id": "exec:wave2:1",
+                "accepted": True,
+                "frozen_orders": frozen_orders,
+            }
+        ),
     )
 
 
