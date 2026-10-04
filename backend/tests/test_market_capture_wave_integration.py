@@ -349,8 +349,8 @@ def test_incomplete_post_kickoff_refresh_keeps_in_play_and_hot_priority() -> Non
     assert engine.due_items(PriceEnginePriority.HOT, now=later)
 
 
-def test_mlb_paper_admission_still_reprices_and_stays_off_live_execution() -> None:
-    """Case D: MLB PAPER pairs enter the funnel; live execution stays disabled."""
+def test_mlb_registered_admission_reprices_without_enabling_execution() -> None:
+    """Case D: MLB registered pairs enter the funnel. Execution stays disabled."""
 
     kalshi, polymarket, matchbook = _moneyline_markets()
     assert registered_canonical_key(kalshi, matchbook) == CANONICAL_MLB_GAME_WINNER

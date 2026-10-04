@@ -44,7 +44,7 @@ Data honesty:
 - live / historical / modelled / fixture boundaries checked
 
 Safety:
-- paper-only boundary checked
+- execution stays disabled unless mode is real and execution is explicitly enabled; paper wording is not the catalogue veto
 
 Economic correctness:
 - approved market catalogue / settlement / fees / FX / liquidity checks reviewed where applicable
@@ -62,7 +62,7 @@ A PR should be sent back when it:
 - hides low sample/confidence or regime changes;
 - replaces provenance/audit history with destructive updates;
 - makes fixture/demo data look live;
-- introduces real execution into Phase 1;
+- enables venue execution or places an order without the existing real-mode gates;
 - materially violates another core tenet without explicit approval.
 
 For any change touching market recognition, equivalence, matcher rules, market-family coverage or solver eligibility, the handoff must additionally state:

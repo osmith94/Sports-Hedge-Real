@@ -1,8 +1,8 @@
 """Fixture and UNIVERSE coverage rows from the Issue #316 registry.
 
-Diagnostics only. Paper-mode solver admission remains
-`catalogue_allows_solver` (APPROVED_EQUIVALENT or PAPER_ASSUMED_EQUIVALENT).
-Live execution stays independently proven APPROVED_EQUIVALENT only.
+Diagnostics only. Solver admission remains `catalogue_allows_solver`
+(APPROVED_EQUIVALENT or the stored PAPER_ASSUMED_EQUIVALENT label).
+Catalogue live eligibility follows the same registered admission.
 """
 
 from __future__ import annotations

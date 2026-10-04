@@ -1,17 +1,18 @@
-"""Shared HOT/UNIVERSE catalogue gate for solver/paper admission.
+"""Shared HOT/UNIVERSE catalogue gate for registered admission.
 
-Runtime PAPER comparison has exactly one authority: the Approved Match
-Register. No register entry means no runtime match and no paper solver
-admission, even when a legacy settlement fingerprint is independently
-complete. Independently proven APPROVED_EQUIVALENT remains offline
-census/onboarding knowledge until that venue archetype is registered.
+Runtime comparison has exactly one authority: the Approved Match Register.
+No register entry means no runtime match and no solver admission, even when
+a settlement fingerprint is independently complete. Independently proven
+APPROVED_EQUIVALENT remains offline census/onboarding knowledge until that
+venue archetype is registered.
 
-Registered PAPER_ASSUMED_EQUIVALENT / APPROVED_EQUIVALENT rows carry
-settlement_assumption=regulation_time. That historical paper label does not
+Registered rows may carry settlement_assumption=regulation_time and the
+stored label PAPER_ASSUMED_EQUIVALENT. That historical paper label does not
 by itself reject Real execution of an already-admitted relationship.
 
 REVIEW_REQUIRED, UNSUPPORTED, parameter mismatch and known contradiction
 cannot reach the solver. This module is scan-lane independent.
+``paper_mode_admitted`` mirrors ``execution_eligible`` for older callers.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def assess_catalogue_admission(
             paper_mode_admitted=False,
             live_execution_eligible=False,
         )
-    if assessment.paper_mode_admitted and registered_structural_match(left, right):
+    if assessment.execution_eligible and registered_structural_match(left, right):
         return CatalogueAdmission(
             allowed=True,
             assessment=assessment,

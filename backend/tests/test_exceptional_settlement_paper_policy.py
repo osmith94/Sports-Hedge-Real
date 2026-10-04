@@ -182,7 +182,8 @@ def test_nfl_exceptional_lifecycle_does_not_block_paper_audit() -> None:
     assert nfl_automatic_settlement_lifecycle_blocker(object(), "postponed") is None
     reasons = nfl_paper_audit_reasons()
     assert NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT not in reasons
-    assert "nfl_paper_not_live_execution_equivalent" in reasons
+    assert "nfl_paper_not_live_execution_equivalent" not in reasons
+    assert "settlement_assumption=normal_full_game_completion" in reasons
 
 
 def test_mlb_approved_families_are_not_blocked_by_settlement_equivalence() -> None:

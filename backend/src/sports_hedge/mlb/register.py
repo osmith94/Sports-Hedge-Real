@@ -2,7 +2,7 @@
 
 Game Winner and exact Total Runs x.5 are the only families that receive a key.
 Run line, first-five, inning, props, series, and futures do not. The owner
-approved PAPER venue-pair comparison for those structural keys on 2026-09-26.
+approved venue-pair comparison for those structural keys on 2026-09-26.
 Fixture identity, team identity, line, and outcome-shape gates are unchanged.
 """
 
@@ -21,9 +21,11 @@ from sports_hedge.mlb.constants import CANONICAL_MLB_GAME_WINNER, CANONICAL_MLB_
 from sports_hedge.mlb.detect import is_mlb_canonical_event, is_mlb_market_family
 from sports_hedge.mlb.markets import is_exact_half_line
 
-MLB_PAPER_VENUES = frozenset(
+MLB_REGISTERED_VENUES = frozenset(
     {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
 )
+# LEGACY name. Same venue set; not a paper-only restriction.
+MLB_PAPER_VENUES = MLB_REGISTERED_VENUES
 GAME_WINNER_OUTCOMES = frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY})
 TOTAL_OUTCOMES = frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER})
 
@@ -70,12 +72,12 @@ def mlb_canonical_key_for_market(market: CanonicalMarket) -> str | None:
 
 
 def mlb_approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> bool:
-    """Only cross-venue pairs among the three owner-approved PAPER venues."""
+    """Only cross-venue pairs among the three registered MLB venues."""
 
     if left.source_venue == right.source_venue:
         return False
     venues = {left.source_venue, right.source_venue}
-    return venues <= MLB_PAPER_VENUES
+    return venues <= MLB_REGISTERED_VENUES
 
 
 def mlb_registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:

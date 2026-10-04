@@ -1,13 +1,14 @@
 """Deterministic Tenet 20 classification via the Approved Match Register.
 
-After fixture identity, Matchbook↔Kalshi rows that resolve to one register
-canonical key (MATCH_RESULT_FT / BTTS_FT / TOTAL_GOALS_FT:{line} / FTTS_FT)
-are PAPER_ASSUMED_EQUIVALENT, or APPROVED_EQUIVALENT when independently
-proven. Extra-time / penalties / to-qualify contracts are a different native
-archetype and are not registered. Independently proven unregistered pairs
-may still classify APPROVED_EQUIVALENT for offline census/onboarding, but
-they are not runtime-matched or paper-admitted. Numeric mapping confidence
-and mapping review are not admission. Never live-execution eligible.
+After fixture identity, rows that resolve to one register canonical key are
+PAPER_ASSUMED_EQUIVALENT (the stored registered-equivalent label) or
+APPROVED_EQUIVALENT when independently proven. Extra-time / penalties /
+to-qualify contracts are a different native archetype and are not registered.
+Independently proven unregistered pairs may still classify
+APPROVED_EQUIVALENT for offline census/onboarding, but they are not
+runtime-matched. Numeric mapping confidence and mapping review are not
+admission. Catalogue execution eligibility follows registration; it does not
+place a venue order.
 """
 
 from __future__ import annotations
@@ -44,9 +45,10 @@ from sports_hedge.matching.markets import MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import (
     allow_unknown_settlement_for_ordinary_1x2,
 )
-from sports_hedge.matching.paper_assumed import (
+from sports_hedge.matching.assumed_settlement import (
     FAIR_PRICE_PAPER_ADMITTED_REASON,
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
     both_independently_proven_regulation,
 )
 from sports_hedge.normalization.venues import (
@@ -62,7 +64,11 @@ CATALOGUE_SHARED_BY = ("hot", "universe")
 
 
 class CataloguePairAssessment(BaseModel):
-    """Pairwise catalogue verdict. Scan-lane independent. Paper-only."""
+    """Pairwise catalogue verdict. Scan-lane independent.
+
+    ``paper_mode_admitted`` is a legacy alias of ``execution_eligible``.
+    Both are true only for a registered structural match that is not blocked.
+    """
 
     state: CatalogueApprovalState
     reason: str
@@ -276,7 +282,7 @@ def _economic_state(
             notes.append(FAIR_PRICE_PAPER_ADMITTED_REASON)
         if both_independently_proven_regulation(left, right):
             return CatalogueApprovalState.APPROVED_EQUIVALENT, "approved_equivalent", notes
-        notes.append("paper_assumed_equivalent_not_settlement_proven")
+        notes.append(REGISTERED_EQUIVALENT_SETTLEMENT_NOTE)
         return (
             CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
             "paper_assumed_equivalent",

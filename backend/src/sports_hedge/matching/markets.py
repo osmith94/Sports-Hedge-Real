@@ -26,7 +26,7 @@ from sports_hedge.matching.ordinary_1x2 import (
     kalshi_gamewin_scope_unavailable,
     ordinary_1x2_match_reasons,
 )
-from sports_hedge.matching.paper_assumed import (
+from sports_hedge.matching.assumed_settlement import (
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
     PAPER_ASSUMED_REASON,
     paper_assumed_match_reasons,

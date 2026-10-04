@@ -1,34 +1,49 @@
-# Core Tenet 02 — Paper Mode & Execution Boundaries
+# Core Tenet 02 — Mode and execution boundaries
 
 ## Principle
 
-Phase 1 is **read-only toward venues and paper-only for execution**.
+Sports Hedge Real has two operating modes.
 
-The system may discover, normalize, compare, simulate, reconcile and alert. It must not place, cancel or sign real wagers/orders.
+- `SPORTS_HEDGE_MODE=paper` simulates fills. It does not place venue orders.
+- `SPORTS_HEDGE_MODE=real` is the live-execution seam. It stays disarmed unless `SPORTS_HEDGE_EXECUTION_ENABLED=true`.
+
+The default configuration is paper mode with execution disabled.
+
+Catalogue admission is not a mode switch. A relationship admitted by the Approved Match Register is execution-eligible at the catalogue gate. A historical paper label on that relationship is not an independent veto. Venue orders still require all of:
+
+- mode `real`
+- execution explicitly enabled
+- exact native IDs
+- an accepted Price-2 / fill plan
+- venue transport readiness
+- fee, FX, depth, and risk evidence
+- duplicate protection and the existing fill-safety controls
+
+Unregistered, unsupported, parameter-mismatched, and contradictory relationships stay fail-closed.
+
+## Historical note
+
+The original Phase 1 product was read-only and paper-only, with no order placement. That history is why some stored labels still say `paper_assumed_equivalent`. Those labels remain readable. They do not describe the current catalogue gate.
 
 ## Non-negotiables
 
-```text
-SPORTS_HEDGE_MODE=paper
-SPORTS_HEDGE_EXECUTION_ENABLED=false
-```
-
-- Venue interfaces expose market-data capabilities only in Phase 1.
-- No `place_order`, `cancel_order`, wallet signing or trading-auth methods belong in Phase 1 venue contracts.
+- Do not enable execution as part of a wording or catalogue cleanup.
+- Do not add a venue write call to make a demo button work.
+- Do not treat a registered relationship as an order.
+- Do not bypass native IDs, settlement contradictions, or economic evidence.
+- UI must distinguish simulated paper fills from live execution.
 - No VPN/proxy/geolocation bypass or access-control circumvention.
-- Manual override workflows may prepare/recalculate tickets but stop before real venue execution.
-- Priority alerts do not weaken the paper-only boundary.
-- UI controls must visibly state PAPER MODE where an operator could reasonably confuse simulation with live execution.
 
 ## Violation examples
 
-- Adding a live Smarkets/Matchbook order-submit method to make a demo button work.
-- A `PLACE BET` button wired to a venue API.
+- Setting `SPORTS_HEDGE_EXECUTION_ENABLED` in order to finish a catalogue cleanup.
+- A `PLACE BET` button wired to a venue API without the real-mode gates.
+- Rejecting an Approved Match Register relationship only because a stored label says paper.
 - Treating a manually prepared Priority Arb ticket as executed.
 
 ## Review checks
 
-- Search the change for order placement/cancellation/signing capabilities.
-- Confirm capability flags still report execution disabled.
+- Search the change for order placement, cancellation, and signing.
+- Confirm the default configuration still reports execution disabled.
 - Confirm paper fill records are clearly simulated.
-- Confirm any manual workflow ends before a real venue call.
+- Confirm catalogue eligibility follows registration and still fail-closes unregistered or contradictory contracts.

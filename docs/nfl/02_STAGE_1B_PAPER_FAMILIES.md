@@ -25,11 +25,9 @@ Unsupported in this stage: integer spreads/totals; first half / second half / qu
 
 ## Equivalence
 
-Owner decision 2026-09-26: exceptional lifecycle differences are not a PAPER admission or automatic-settlement blocker. GAME_WINNER, exact `.5` spread, and exact `.5` total stay PAPER-admitted when fixture, family, line, and outcome space match.
+Owner decision 2026-09-26: exceptional lifecycle differences are not an admission or automatic-settlement blocker. GAME_WINNER, exact `.5` spread, and exact `.5` total stay registered when fixture, family, line, and outcome space match.
 
-New PAPER trades do not record `exceptional_settlement_mismatch_possible`. Historical rows that already stored that string remain readable.
-
-Live execution stays disabled.
+New trades do not record `exceptional_settlement_mismatch_possible` or `nfl_paper_not_live_execution_equivalent`. Historical rows that already stored those strings remain readable. The historical paper label is not a catalogue execution veto. Venue orders stay behind `SPORTS_HEDGE_MODE=real` and `SPORTS_HEDGE_EXECUTION_ENABLED`.
 
 Automatic PAPER settlement uses a graded result that determines the canonical outcome. A postponed or similar token in lifecycle history does not by itself block that result. A current cancelled/void status does not invent a winner (`provider_status_*`). A tied two-way score stays `canonical_outcome_not_determined`.
 

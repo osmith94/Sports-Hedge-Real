@@ -1,4 +1,9 @@
-"""PAPER-only NFL settlement caveat and automatic-settlement fail-closed rules."""
+"""NFL settlement assumption and automatic-settlement fail-closed rules.
+
+Registered NFL families use an economically incomplete fingerprint because
+extra-time inclusion is not independently proven. That assumption admits
+comparison. It does not veto catalogue live eligibility.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +25,12 @@ from sports_hedge.nfl.constants import (
     NFL_LIFECYCLE_AUDIT_KIND,
     NFL_NOT_LIVE_EXECUTION_REASON,
     NFL_PAPER_NORMAL_COMPLETION_REASON,
+    NFL_REGISTERED_SETTLEMENT_ASSUMPTION,
 )
 from sports_hedge.nfl.venue_mapping import NFL_VENUE_MAPPING_VERSION
 from sports_hedge.nfl.detect import is_nfl_canonical_event, is_nfl_market_family
 
+# LEGACY readable audit tokens. New rows use nfl_paper_audit_reasons().
 NFL_PAPER_AUDIT_REASONS: tuple[str, ...] = (
     NFL_PAPER_NORMAL_COMPLETION_REASON,
     NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT,
@@ -112,12 +119,11 @@ def nfl_paper_settlement(
     line=None,
     mapping_version: str | None = None,
 ) -> SettlementFingerprint:
-    """Fingerprint for owner-approved PAPER comparison of a completed NFL game.
+    """Fingerprint for registered comparison of a completed NFL game.
 
     Extra-time/OT inclusion is not independently proven on every venue. The
-    fingerprint stays economically incomplete so this path cannot be mistaken
-    for live-execution-grade APPROVED_EQUIVALENT. The register, not this
-    fingerprint, admits PAPER comparison.
+    fingerprint stays economically incomplete so this path is not
+    APPROVED_EQUIVALENT. The register, not this fingerprint, admits the pair.
 
     ``source_rule_version`` records the NFL venue truth-table version. It is
     provenance only and is not part of economic settlement identity.
@@ -138,13 +144,15 @@ def nfl_paper_settlement(
 
 
 def nfl_paper_audit_reasons() -> list[str]:
-    """New PAPER rows record the live-execution boundary only.
+    """New registered NFL rows record the settlement assumption.
 
-    Historical trades may still store ``exceptional_settlement_mismatch_possible``
-    and the normal-completion reason. Those strings stay readable.
+    Historical trades may still store ``exceptional_settlement_mismatch_possible``,
+    ``owner_approved_nfl_paper_normal_completion``, and
+    ``nfl_paper_not_live_execution_equivalent``. Those strings stay readable
+    and are not an independent Real execution veto.
     """
 
-    return [NFL_NOT_LIVE_EXECUTION_REASON]
+    return [NFL_REGISTERED_SETTLEMENT_ASSUMPTION]
 
 
 def is_nfl_paper_trade(trade) -> bool:

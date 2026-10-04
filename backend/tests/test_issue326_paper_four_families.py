@@ -3,7 +3,7 @@
 Owner clarification: once canonical fixture + canonical market identity match,
 MATCH_RESULT / BTTS / exact-line TOTAL / FTTS are owner-approved cross-venue
 equivalents in PAPER / READ-ONLY mode. Kalshi fair-price wording does not
-block PAPER admission. Live execution stays ineligible. No Polymarket
+block register admission. Catalogue eligibility follows registration. No Polymarket
 expansion. No timeout inflation.
 
 Deterministic fixture/demo providers. Not owner-live quotes.
