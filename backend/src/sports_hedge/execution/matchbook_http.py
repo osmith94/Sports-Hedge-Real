@@ -538,6 +538,7 @@ def _result(
     venue_order_id: str | None = None,
     native_filled: Decimal | None = None,
     native_remaining: Decimal | None = None,
+    note: str | None = None,
 ) -> VenueOrderResult:
     return VenueOrderResult(
         venue=request.venue,
@@ -552,6 +553,7 @@ def _result(
         updated_at=at,
         native_filled_quantity=native_filled,
         native_remaining_quantity=native_remaining,
+        note=note,
     )
 
 
