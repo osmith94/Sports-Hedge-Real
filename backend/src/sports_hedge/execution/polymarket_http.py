@@ -26,7 +26,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from typing import Any, Protocol
 
 from sports_hedge.config import Settings
@@ -37,6 +37,12 @@ from sports_hedge.execution.polymarket_geoblock import (
     PolymarketEligibility,
     fetch_geoblock,
 )
+from sports_hedge.execution.polymarket_buy_readiness import (
+    PLATFORM_WIDE_APPROVAL_DIAGNOSTIC,
+    platform_wide_approval_diagnostic,
+    probe_exchange_v3_collateral,
+    v2_buy_readiness,
+)
 from sports_hedge.execution.polymarket_sdk import NOT_READY, PolymarketClientError, open_polymarket_client
 from sports_hedge.execution.translate import (
     POLYMARKET_ORDER_TYPE,
@@ -46,7 +52,6 @@ from sports_hedge.execution.translate import (
     polymarket_native_order,
 )
 
-_BASE = Decimal(10) ** 6
 # Opening canary decision: a Polymarket SELL is share-denominated and is not
 # an approved cash-funded lay. Dispatch rejects it before any venue call.
 POLYMARKET_OPENING_LAY_NOT_APPROVED = "POLYMARKET_OPENING_LAY_NOT_APPROVED"
@@ -106,29 +111,19 @@ class SdkPolymarketBroker:
         return PolymarketConstraints(tick_size=tick, minimum_shares=minimum, token_id=token_id)
 
     def readiness(self, spend: Decimal) -> str | None:
-        """pUSD readiness for a BUY. This does not check a SELL.
+        """pUSD readiness for one opening BUY. ``spend`` is the translated stake.
 
-        ``get_balance_allowance`` is called only with ``asset_type="COLLATERAL"``.
-        polymarket-client 0.12.0 types that argument as a string literal.
-        ``AssetType`` is not an enum, so ``AssetType.COLLATERAL`` raises
-        ``AttributeError``. ``get_trading_approvals_state`` is the general
-        approval flag. Neither call reads ``CONDITIONAL`` or ``CONDITIONAL-V2``
-        balance or allowance.
-        A share-denominated SELL needs that conditional-token check. Opening
-        LAY/SELL is rejected before this method runs.
+        The gate is collateral balance and the collateral allowance of the
+        client's exchange_v3 spender. ``get_trading_approvals_state`` is not
+        consulted. ``get_balance_allowance`` is called only with
+        ``asset_type="COLLATERAL"``. polymarket-client 0.12.0 types that
+        argument as a string literal. ``AssetType`` is not an enum, so
+        ``AssetType.COLLATERAL`` raises ``AttributeError``. This method does
+        not read ``CONDITIONAL`` or ``CONDITIONAL-V2`` balance or allowance.
+        Opening LAY/SELL is rejected before this method runs.
         """
 
-        client = self._open()
-        state = client.get_trading_approvals_state()
-        if not state.is_fully_approved:
-            return f"{NOT_READY}: trading allowance is not approved"
-        balance = client.get_balance_allowance(asset_type="COLLATERAL")
-        required = int((spend * _BASE).to_integral_value(rounding=ROUND_DOWN))
-        if balance.balance < required:
-            return f"{NOT_READY}: collateral balance is below the order"
-        if not any(amount >= required for amount in balance.allowances.values()):
-            return f"{NOT_READY}: collateral allowance is below the order"
-        return None
+        return v2_buy_readiness(self._open(), spend)
 
     def post_fak(self, order: PolymarketNativeOrder) -> PolymarketSubmission:
         client = self._open()
@@ -169,40 +164,31 @@ class SdkPolymarketBroker:
         """Read-only account signals. Opening the client is separate from later reads.
 
         A balance or open-order failure leaves ``authenticated_read`` true.
-        Trading readiness stays false unless collateral balance and allowance
-        were both read. This method does not place or cancel an order.
+        ``trading_ready`` means collateral balance and the exchange_v3
+        collateral allowance were both read and are positive. Platform-wide
+        approval state is diagnostic only.
+        This method does not place, cancel, or approve an order.
         """
 
         client = self._open()
-        balance = None
-        balance_readable = False
-        try:
-            balance = client.get_balance_allowance(asset_type="COLLATERAL")
-            balance_readable = balance is not None
-        except Exception:  # noqa: BLE001 — balance failure must not invalidate the open client
-            balance_readable = False
-        trading_ready = False
-        try:
-            approvals = client.get_trading_approvals_state()
-            trading_ready = bool(
-                balance is not None
-                and approvals.is_fully_approved
-                and any(amount > 0 for amount in balance.allowances.values())
-            )
-        except Exception:  # noqa: BLE001 — approval failure stays on trading readiness
-            trading_ready = False
+        balance_readable, trading_ready, readiness_reason = probe_exchange_v3_collateral(client)
+        diagnostic = platform_wide_approval_diagnostic(client)
         open_orders_readable = False
         try:
             page = client.list_open_orders().first_page()
             open_orders_readable = page is not None
         except Exception:  # noqa: BLE001 — open-order failure stays on that signal
             open_orders_readable = False
-        return {
+        snapshot: dict[str, bool | str] = {
             "authenticated_read": True,
             "balance_readable": balance_readable,
             "trading_ready": trading_ready,
             "open_orders_readable": open_orders_readable,
+            PLATFORM_WIDE_APPROVAL_DIAGNOSTIC: diagnostic,
         }
+        if readiness_reason is not None:
+            snapshot["trading_readiness_reason"] = readiness_reason
+        return snapshot
 
     def _open(self) -> Any:
         if self._client is None:

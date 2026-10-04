@@ -77,6 +77,8 @@ class _Broker:
         self.posts = 0
         self.cancels = 0
         self.constraints_calls = 0
+        self.readiness_calls = 0
+        self.readiness_spend: Decimal | None = None
         self.raise_on_post: Exception | None = None
 
     def constraints(self, token_id: str) -> PolymarketConstraints:
@@ -84,7 +86,8 @@ class _Broker:
         return PolymarketConstraints(tick_size="0.01", minimum_shares=Decimal("5"), token_id=token_id)
 
     def readiness(self, spend: Decimal) -> str | None:
-        del spend
+        self.readiness_calls += 1
+        self.readiness_spend = spend
         return None
 
     def post_fak(self, order) -> PolymarketSubmission:
@@ -239,6 +242,7 @@ async def test_execution_disabled_does_not_write() -> None:
     assert result.filled_size == 0
     assert broker.posts == 0
     assert broker.constraints_calls == 0
+    assert broker.readiness_calls == 0
 
 
 async def test_exact_token_id_is_required() -> None:
@@ -256,6 +260,7 @@ async def test_polymarket_opening_lay_is_not_submitted() -> None:
     assert result.note == POLYMARKET_OPENING_LAY_NOT_APPROVED
     assert broker.posts == 0
     assert broker.constraints_calls == 0
+    assert broker.readiness_calls == 0
     assert broker.cancels == 0
 
 
@@ -610,7 +615,7 @@ def test_reserved_attempt_is_not_resubmitted(tmp_path: Path) -> None:
 
 
 class _CollateralClient:
-    """Read-only stand-in. Order methods fail the test if readiness or preflight submits."""
+    """Read-only stand-in. Order and approval methods fail the test if called."""
 
     def __init__(
         self,
@@ -620,14 +625,23 @@ class _CollateralClient:
         approved: bool = True,
         balance_error: Exception | None = None,
         orders_error: Exception | None = None,
+        approvals_error: Exception | None = None,
+        bind_exchange: bool = True,
     ) -> None:
         self.balance = balance
         self.allowances = {} if allowances is None else allowances
         self.approved = approved
         self.balance_error = balance_error
         self.orders_error = orders_error
+        self.approvals_error = approvals_error
         self.balance_calls: list[dict[str, object]] = []
+        self.approval_reads = 0
+        self.refused: list[str] = []
         self.closed = False
+        if bind_exchange:
+            from polymarket.environments import PRODUCTION
+
+            self.environment = PRODUCTION
 
     def get_balance_allowance(self, **kwargs: object) -> object:
         self.balance_calls.append(kwargs)
@@ -636,6 +650,9 @@ class _CollateralClient:
         return type("Balance", (), {"balance": self.balance, "allowances": self.allowances})()
 
     def get_trading_approvals_state(self) -> object:
+        self.approval_reads += 1
+        if self.approvals_error is not None:
+            raise self.approvals_error
         return type("Approvals", (), {"is_fully_approved": self.approved})()
 
     def list_open_orders(self) -> object:
@@ -647,23 +664,60 @@ class _CollateralClient:
         self.closed = True
 
     def create_market_order(self, **_kwargs: object) -> object:
-        raise AssertionError("order was signed")
+        self._refuse("create_market_order")
+
+    def place_market_order(self, **_kwargs: object) -> object:
+        self._refuse("place_market_order")
 
     def post_order(self, _signed: object) -> object:
-        raise AssertionError("order was submitted")
+        self._refuse("post_order")
 
     def cancel_order(self, **_kwargs: object) -> object:
-        raise AssertionError("order was cancelled")
+        self._refuse("cancel_order")
+
+    def approve_erc20(self, **_kwargs: object) -> object:
+        self._refuse("approve_erc20")
+
+    def approve_erc1155_for_all(self, **_kwargs: object) -> object:
+        self._refuse("approve_erc1155_for_all")
+
+    def setup_trading_approvals(self) -> object:
+        self._refuse("setup_trading_approvals")
+
+    def _ensure_wallet_ready(self) -> object:
+        self._refuse("_ensure_wallet_ready")
+
+    def _deploy_default_deposit_wallet(self) -> object:
+        self._refuse("_deploy_default_deposit_wallet")
+
+    def _refuse(self, name: str) -> None:
+        self.refused.append(name)
+        raise AssertionError(f"{name} was called")
 
 
 def _require_collateral_string(client: _CollateralClient) -> None:
     assert client.balance_calls == [{"asset_type": "COLLATERAL"}]
 
 
+def _exchange_v3() -> str:
+    from polymarket._internal.environment import PRODUCTION_CONFIG
+
+    return PRODUCTION_CONFIG.exchange_v3
+
+
+def _other_spender() -> str:
+    from polymarket._internal.environment import PRODUCTION_CONFIG
+
+    return PRODUCTION_CONFIG.perps_deposit_contract
+
+
 async def test_preflight_collateral_read_uses_the_sdk_string(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client = _CollateralClient(balance=2_000_000, allowances={"spender": 2_000_000})
+    client = _CollateralClient(
+        balance=2_000_000,
+        allowances={_exchange_v3(): 2_000_000, _other_spender(): 1},
+    )
 
     def _open(_settings: Settings, *, derive_credentials: bool) -> _CollateralClient:
         assert derive_credentials is False
@@ -731,8 +785,9 @@ async def test_preflight_open_order_failure_stays_distinct_and_fail_closed(
 ) -> None:
     client = _CollateralClient(
         balance=2_000_000,
-        allowances={"spender": 2_000_000},
+        allowances={_exchange_v3(): 2_000_000},
         orders_error=RuntimeError("open orders unavailable"),
+        approved=False,
     )
     monkeypatch.setattr(
         "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
@@ -750,7 +805,9 @@ async def test_preflight_open_order_failure_stays_distinct_and_fail_closed(
     assert report["trading_ready"] is True
     assert report["open_orders_readable"] is False
     assert report["transport_ready"] is False
+    assert report["platform_wide_approval_diagnostic_not_execution_readiness"] is False
     assert client.closed is True
+    assert client.refused == []
 
 
 def test_live_readiness_uses_collateral_string_and_passes() -> None:
@@ -759,11 +816,17 @@ def test_live_readiness_uses_collateral_string_and_passes() -> None:
     missing = "COLLATERAL"
     with pytest.raises(AttributeError):
         getattr(AssetType, missing)
-    client = _CollateralClient(balance=1_000_000, allowances={"spender": 1_000_000})
+    client = _CollateralClient(
+        balance=1_000_000,
+        allowances={_exchange_v3().lower(): 1_000_000, _other_spender(): 9_000_000},
+        approvals_error=AssertionError("broad approvals were consulted"),
+    )
     broker = SdkPolymarketBroker(Settings())
     broker._client = client
     assert broker.readiness(Decimal(1)) is None
     _require_collateral_string(client)
+    assert client.approval_reads == 0
+    assert client.refused == []
     assert broker.posts == 0
 
 
@@ -778,13 +841,132 @@ def test_live_readiness_insufficient_balance_fails_closed() -> None:
 
 
 def test_live_readiness_insufficient_allowance_fails_closed() -> None:
-    client = _CollateralClient(balance=5_000_000, allowances={"spender": 999_999})
+    client = _CollateralClient(
+        balance=5_000_000,
+        allowances={_exchange_v3(): 999_999, _other_spender(): 5_000_000},
+    )
     broker = SdkPolymarketBroker(Settings())
     broker._client = client
     block = broker.readiness(Decimal(1))
     assert block == "POLYMARKET_NOT_READY: collateral allowance is below the order"
     _require_collateral_string(client)
     assert broker.posts == 0
+
+
+def test_live_readiness_ignores_other_spenders_and_broad_approvals() -> None:
+    client = _CollateralClient(
+        balance=5_000_000,
+        allowances={_other_spender(): 5_000_000, "0x" + "11" * 20: 5_000_000},
+        approved=False,
+        approvals_error=AssertionError("broad approvals were consulted"),
+    )
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    block = broker.readiness(Decimal(1))
+    assert block == "POLYMARKET_NOT_READY: collateral allowance is below the order"
+    assert client.approval_reads == 0
+    assert client.refused == []
+
+
+def test_live_readiness_exact_exchange_v3_allowance_passes() -> None:
+    client = _CollateralClient(
+        balance=2_500_000,
+        allowances={_exchange_v3(): 2_500_000},
+        approved=False,
+    )
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    assert broker.readiness(Decimal("2.50")) is None
+    assert client.approval_reads == 0
+
+
+def test_unresolved_exchange_v3_fails_closed_before_balance() -> None:
+    client = _CollateralClient(
+        balance=5_000_000,
+        allowances={_other_spender(): 5_000_000},
+        bind_exchange=False,
+        approved=True,
+    )
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    block = broker.readiness(Decimal(1))
+    assert block == "POLYMARKET_NOT_READY: exchange_v3 spender cannot be resolved"
+    assert client.balance_calls == []
+    assert client.refused == []
+
+
+def test_blank_exchange_v3_fails_closed() -> None:
+    client = _CollateralClient(balance=5_000_000, allowances={_exchange_v3(): 5_000_000}, bind_exchange=False)
+    client._ctx = type("Ctx", (), {"environment_config": type("Cfg", (), {"exchange_v3": "  "})()})()
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    block = broker.readiness(Decimal(1))
+    assert block == "POLYMARKET_NOT_READY: exchange_v3 spender cannot be resolved"
+
+
+def test_account_snapshot_uses_exchange_v3_not_broad_approval() -> None:
+    from sports_hedge.execution.polymarket_buy_readiness import PLATFORM_WIDE_APPROVAL_DIAGNOSTIC
+
+    missing = _CollateralClient(
+        balance=2_000_000,
+        allowances={_other_spender(): 2_000_000},
+        approved=True,
+    )
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = missing
+    blocked = broker.account_snapshot()
+    assert blocked["authenticated_read"] is True
+    assert blocked["balance_readable"] is True
+    assert blocked["trading_ready"] is False
+    assert blocked["trading_readiness_reason"] == "exchange_v3 collateral allowance is not positive"
+    assert blocked[PLATFORM_WIDE_APPROVAL_DIAGNOSTIC] is True
+
+    ready = _CollateralClient(
+        balance=1,
+        allowances={_exchange_v3(): 1},
+        approved=False,
+    )
+    broker._client = ready
+    opened = broker.account_snapshot()
+    assert opened["balance_readable"] is True
+    assert opened["trading_ready"] is True
+    assert "trading_readiness_reason" not in opened
+    assert opened[PLATFORM_WIDE_APPROVAL_DIAGNOSTIC] is False
+    assert ready.refused == []
+
+    zero = _CollateralClient(
+        balance=0,
+        allowances={_exchange_v3(): 5_000_000},
+        approved=True,
+    )
+    broker._client = zero
+    empty = broker.account_snapshot()
+    assert empty["authenticated_read"] is True
+    assert empty["balance_readable"] is True
+    assert empty["trading_ready"] is False
+    assert empty["trading_readiness_reason"] == "collateral balance is not positive"
+
+
+def test_bound_environment_config_is_the_exchange_v3_authority() -> None:
+    """The spender is the client's bound config, not another high allowance."""
+
+    bound = "0x" + "ab" * 20
+    client = _CollateralClient(
+        balance=1_000_000,
+        allowances={bound: 1_000_000, _exchange_v3(): 1},
+        bind_exchange=True,
+    )
+    client._ctx = type(
+        "Ctx",
+        (),
+        {"environment_config": type("Cfg", (), {"exchange_v3": bound})()},
+    )()
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    assert broker.readiness(Decimal(1)) is None
+
+    client.allowances = {_exchange_v3(): 5_000_000, bound: 1}
+    assert broker.readiness(Decimal(1)) == "POLYMARKET_NOT_READY: collateral allowance is below the order"
 
 
 def test_account_snapshot_balance_failure_keeps_authenticated_read() -> None:
@@ -798,6 +980,174 @@ def test_account_snapshot_balance_failure_keeps_authenticated_read() -> None:
     assert snapshot["open_orders_readable"] is True
     _require_collateral_string(client)
     assert broker.posts == 0
+
+
+async def test_preflight_transport_ready_ignores_broad_approval_gaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sports_hedge.execution.polymarket_buy_readiness import PLATFORM_WIDE_APPROVAL_DIAGNOSTIC
+
+    client = _CollateralClient(
+        balance=2_000_000,
+        allowances={_exchange_v3(): 1, _other_spender(): 0},
+        approved=False,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
+        lambda _settings, *, derive_credentials: client,
+    )
+
+    async def _geo():
+        return parse_geoblock(_permitted())
+
+    report = await collect_polymarket_preflight(_wallet_settings(tmp_path), geoblock=_geo)
+    text = format_polymarket_preflight(report)
+    _require_collateral_string(client)
+    assert report["authenticated_read"] is True
+    assert report["balance_readable"] is True
+    assert report["trading_ready"] is True
+    assert report["trading_readiness_reason"] is None
+    assert report["open_orders_readable"] is True
+    assert report["transport_ready"] is True
+    assert report[PLATFORM_WIDE_APPROVAL_DIAGNOSTIC] is False
+    assert "trading allowance/readiness: READY" in text
+    assert "platform-wide approvals (diagnostic, not execution readiness): not fully approved" in text
+    assert "Execution transport:" in text
+    assert "ready: yes" in text
+    assert client.refused == []
+    assert client.closed is True
+
+
+async def test_zero_collateral_balance_is_not_generic_trading_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _CollateralClient(
+        balance=0,
+        allowances={_exchange_v3(): 5_000_000},
+        approved=True,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
+        lambda _settings, *, derive_credentials: client,
+    )
+
+    async def _geo():
+        return parse_geoblock(_permitted())
+
+    report = await collect_polymarket_preflight(_wallet_settings(tmp_path), geoblock=_geo)
+    text = format_polymarket_preflight(report)
+    assert report["authenticated_read"] is True
+    assert report["balance_readable"] is True
+    assert report["trading_ready"] is False
+    assert report["trading_readiness_reason"] == "collateral balance is not positive"
+    assert report["transport_ready"] is False
+    assert "ACTION REQUIRED: collateral balance is not positive" in text
+    assert "ready: no" in text
+    assert client.refused == []
+
+
+async def test_broad_approval_failure_does_not_veto_v2_buy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sports_hedge.execution.polymarket_buy_readiness import PLATFORM_WIDE_APPROVAL_DIAGNOSTIC
+
+    async def _geo():
+        return parse_geoblock(_permitted())
+
+    for approvals_error, approved, diagnostic in (
+        (RuntimeError("approvals unreadable"), True, "unavailable"),
+        (None, False, False),
+    ):
+        client = _CollateralClient(
+            balance=2_500_000,
+            allowances={_exchange_v3(): 2_500_000, _other_spender(): 0},
+            approved=approved,
+            approvals_error=approvals_error,
+        )
+
+        def _open(
+            _settings: Settings,
+            *,
+            derive_credentials: bool,
+            client: _CollateralClient = client,
+        ) -> _CollateralClient:
+            assert derive_credentials is False
+            return client
+
+        monkeypatch.setattr(
+            "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
+            _open,
+        )
+        broker = SdkPolymarketBroker(Settings())
+        broker._client = client
+        assert broker.readiness(Decimal("2.50")) is None
+        assert client.approval_reads == 0
+        snapshot = broker.account_snapshot()
+        assert snapshot["balance_readable"] is True
+        assert snapshot["trading_ready"] is True
+        assert snapshot[PLATFORM_WIDE_APPROVAL_DIAGNOSTIC] == diagnostic
+        report = await collect_polymarket_preflight(_wallet_settings(tmp_path), geoblock=_geo)
+        assert report["trading_ready"] is True
+        assert report["transport_ready"] is True
+        assert report[PLATFORM_WIDE_APPROVAL_DIAGNOSTIC] == diagnostic
+        assert client.refused == []
+
+
+async def test_preflight_names_a_missing_exchange_v3_allowance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sports_hedge.execution.polymarket_buy_readiness import PLATFORM_WIDE_APPROVAL_DIAGNOSTIC
+
+    client = _CollateralClient(
+        balance=2_000_000,
+        allowances={_other_spender(): 9_000_000},
+        approved=True,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
+        lambda _settings, *, derive_credentials: client,
+    )
+
+    async def _geo():
+        return parse_geoblock(_permitted())
+
+    report = await collect_polymarket_preflight(_wallet_settings(tmp_path), geoblock=_geo)
+    text = format_polymarket_preflight(report)
+    assert report["balance_readable"] is True
+    assert report["trading_ready"] is False
+    assert report["trading_readiness_reason"] == "exchange_v3 collateral allowance is not positive"
+    assert report["transport_ready"] is False
+    assert report[PLATFORM_WIDE_APPROVAL_DIAGNOSTIC] is True
+    assert "ACTION REQUIRED: exchange_v3 collateral allowance is not positive" in text
+    assert "ready: no" in text
+    assert client.refused == []
+
+
+async def test_dispatch_readiness_uses_translated_native_stake() -> None:
+    broker = _Broker()
+
+    def _readiness(spend: Decimal) -> str:
+        broker.readiness_calls += 1
+        broker.readiness_spend = spend
+        return "POLYMARKET_NOT_READY: stop"
+
+    broker.readiness = _readiness  # type: ignore[method-assign]
+    transport, _used = _transport(broker)
+    result = await transport.dispatch(_request(stake="2.509", odds="2"))
+    native = polymarket_native_order(
+        native_runner_id=TOKEN,
+        native_market_id="condition-1",
+        side=MarketSide.BACK,
+        decimal_odds=Decimal("2"),
+        requested_stake=Decimal("2.509"),
+        tick_size="0.01",
+        minimum_shares=Decimal("5"),
+    )
+    assert native.stake == Decimal("2.50")
+    assert broker.readiness_calls == 1
+    assert broker.readiness_spend == native.stake
+    assert broker.posts == 0
+    assert result.note == "POLYMARKET_NOT_READY: stop"
 
 
 async def test_preflight_is_read_only() -> None:
