@@ -874,14 +874,9 @@ def _row_preserving_relationship(
         return incoming
     if inventory_is_comparable_opportunity(incoming.comparison_status):
         return incoming
-    if incoming.comparison_status in {
-        InventoryComparisonStatus.MISSING_COSTS,
-        InventoryComparisonStatus.MISSING_FX,
-        InventoryComparisonStatus.STALE,
-        InventoryComparisonStatus.VENUE_ONLY,
-    }:
-        return incoming.model_copy(update={"comparison_status": previous.row.comparison_status})
-    return incoming
+    # Pricing may refresh quotes. It must not revoke a proved relationship
+    # because this sport's row came back venue-only, unsupported, or other.
+    return incoming.model_copy(update={"comparison_status": previous.row.comparison_status})
 
 
 def _slot_generation_id(

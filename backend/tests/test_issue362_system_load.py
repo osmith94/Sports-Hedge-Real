@@ -101,6 +101,9 @@ def test_system_load_uses_existing_public_status_fields_only() -> None:
     assert load.matchbook.inflight == 2
     assert load.matchbook.limit == 4
     assert load.matchbook.waiting == 0
+    assert load.polymarket.inflight == 0
+    assert load.polymarket.limit == 8
+    assert load.polymarket.waiting == 0
     assert load.kalshi.inflight == 1
     assert load.kalshi.limit == 4
     assert load.universe.evaluated == 24
@@ -119,6 +122,22 @@ def test_system_load_uses_existing_public_status_fields_only() -> None:
     assert "unsafe" not in dumped.casefold()
     assert "health_score" not in dumped
     assert system_load_payload_bytes(load) < SYSTEM_LOAD_JSON_BUDGET_BYTES
+
+
+def test_polymarket_slot_uses_provider_access_and_disabled_kalshi_is_off() -> None:
+    load = system_load_from_status(
+        _status(
+            venue_participation={
+                "hot": [VenueName.MATCHBOOK, VenueName.POLYMARKET],
+                "universe": [VenueName.MATCHBOOK, VenueName.POLYMARKET],
+                "source": "operator",
+            }
+        )
+    )
+    assert load.polymarket.participating is True
+    assert load.polymarket.limit == 8
+    assert load.kalshi.participating is False
+    assert load.matchbook.participating is True
 
 
 def test_catalogue_items_count_hot_plus_background_not_fixtures() -> None:
@@ -265,6 +284,7 @@ def test_live_refresh_status_endpoint_includes_compact_system_load() -> None:
         "hot",
         "background",
         "matchbook",
+        "polymarket",
         "kalshi",
         "universe",
         "catalogue_items",

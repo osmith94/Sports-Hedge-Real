@@ -264,7 +264,11 @@ describe("dual cadence operator copy", () => {
     assert.match(bar, /AUTO PAPER CAPTURE ON/);
     assert.match(bar, /paper_autofill_enabled/);
     assert.match(scan, /AUTO PAPER CAPTURE ON/);
-    assert.match(layout, /PAPER MODE · NO EXECUTION/);
+    assert.match(layout, /RuntimeModeClock/);
+    const runtime = readFileSync(join(frontendRoot, "lib/runtime-mode.ts"), "utf8");
+    assert.match(runtime, /PAPER MODE · \$\{execution\}/);
+    assert.match(runtime, /REAL MODE · \$\{execution\}/);
+    assert.match(runtime, /RUNTIME STATUS UNKNOWN/);
   });
 
   it("distinguishes HOT worker alive with empty scope from never scheduled", () => {

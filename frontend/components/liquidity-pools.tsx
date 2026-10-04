@@ -13,6 +13,7 @@ import {
   savePaperTreasuryPools,
 } from "../lib/api";
 import { money } from "../lib/format";
+import { useRuntimeMode } from "./runtime-mode-provider";
 
 const VENUE_LABEL: Record<string, string> = {
   matchbook: "Matchbook",
@@ -115,6 +116,7 @@ export function LiquidityPools({
   compact?: boolean;
 }) {
   const router = useRouter();
+  const runtime = useRuntimeMode();
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -217,7 +219,9 @@ export function LiquidityPools({
     <section className="panel">
       <div className="panel-header">
         <div>
-          <div className="panel-title">Paper Treasury</div>
+          <div className="panel-title">
+            {runtime.simulationSection ? "Paper Treasury · simulation only" : "Paper Treasury"}
+          </div>
           <div className="panel-meta">
             Hypothetical native standing capital. Matchbook GBP, Polymarket USD and Kalshi USD stay separate.
             {` ${fxNote}.`}
