@@ -237,7 +237,12 @@ def merge_current_market_slots(
             continue
         merged[key] = CurrentMarketSlot(
             key=key,
-            row=_row_preserving_relationship(\n                previous,\n                row,\n                discovery=discovery,\n                pricing_refresh=pricing_refresh,\n            ),
+            row=_row_preserving_relationship(
+                previous,
+                row,
+                discovery=discovery,
+                pricing_refresh=pricing_refresh,
+            ),
             scan_lane=lane,
             last_scanned_at=scanned,
             paper_market_ids=paper_market_ids,
