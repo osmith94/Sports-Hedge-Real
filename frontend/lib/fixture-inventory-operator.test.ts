@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { PreparablePaperOpportunity, Venue, VenueMarketFacts, VenueQuoteFact } from "./api";
 import {
+  compactFeeLabel,
   compactQuoteLines,
   compactVenueMeta,
   failingVenueChecks,
+  provenanceLines,
   settlementLabel,
 } from "./fixture-inventory-display";
 import {
@@ -321,7 +323,7 @@ describe("pair truth and incompatible venues", () => {
 describe("compact economics and rejected-vs-qualified coloring", () => {
   it("shows compact net/trigger/status and does not paint rejected economics green", () => {
     const view = inventoryCardViewModel(matchResultPartial);
-    expect(view.economics?.text).toBe("Net -1.94% | Trigger 1.00% | Rejected");
+    expect(view.economics?.text).toBe("Net -1.94% | Min net arb 1.00% | Rejected");
     expect(view.economics?.tone).toBe("rejected");
     expect(toneClass(view.economics!.tone)).toBe("is-rejected");
     expect(toneClass(view.economics!.tone)).not.toBe("is-eligible");
@@ -329,7 +331,7 @@ describe("compact economics and rejected-vs-qualified coloring", () => {
 
   it("paints qualified economics eligible/green", () => {
     const view = inventoryCardViewModel(qualified, preparable);
-    expect(view.economics?.text).toBe("Net 1.20% | Trigger 1.00% | Paper eligible");
+    expect(view.economics?.text).toBe("Net +1.20% | Min net arb 1.00% | Paper eligible");
     expect(view.economics?.tone).toBe("eligible");
     expect(toneClass(view.economics!.tone)).toBe("is-eligible");
   });
@@ -358,8 +360,29 @@ describe("compact economics and rejected-vs-qualified coloring", () => {
       }),
     );
     expect(view.decision.label).toBe("Rejected");
-    expect(view.economics?.text).toContain("Net 0.43%");
+    expect(view.economics?.text).toContain("Net +0.43%");
+    expect(view.economics?.text).toContain("Min net arb 1.00%");
     expect(view.economics?.tone).not.toBe("eligible");
+  });
+
+  it("does not present the minimum threshold as the arb when net edge is absent", () => {
+    const view = inventoryCardViewModel(
+      row({
+        comparison_status: "paper_assumed_equivalent",
+        entered_solver: true,
+        solver_is_arbitrage: false,
+        current_net_edge: null,
+        trigger_net_edge: 0.005,
+        reason: "missing_fx",
+        matchbook: facts("matchbook", homeDrawAway),
+        polymarket: facts("polymarket", yesNo),
+      }),
+    );
+    expect(view.economics?.text).toContain("Net edge unavailable");
+    expect(view.economics?.text).toContain("Min net arb 0.50%");
+    expect(view.economics?.text).not.toContain("Trigger 0.50%");
+    expect(view.economics?.text).not.toMatch(/^0\.50%/);
+    expect(view.economics?.text?.startsWith("Net edge unavailable")).toBe(true);
   });
 });
 
@@ -394,11 +417,34 @@ describe("compact venue mini-cards", () => {
     expect(settlementLabel(paper).toLowerCase()).not.toContain("never live-execution");
     expect(settlementLabel(paper)).not.toContain("incomplete/unknown");
     expect(failingVenueChecks(paper).join(" ")).not.toContain("incomplete/unknown");
+    expect(failingVenueChecks(paper).join(" ")).not.toContain("Registered equivalent");
     const unknown = facts("kalshi", yesNo, {
       settlement_complete: false,
       settlement_status: "incomplete",
     });
     expect(failingVenueChecks(unknown)).toContain("Settlement fingerprint incomplete/unknown");
+  });
+
+  it("does not render a Polymarket formula coefficient as a flat percent", () => {
+    const formula = facts("polymarket", yesNo, {
+      fee_status: "known",
+      fee_basis: "formula",
+      fee_rate: 0.05,
+      fee_formula_name: "polymarket_taker_fee",
+      fee_label: "market-specific taker formula (rate 0.05)",
+      settlement_status: "paper_assumed",
+      settlement_complete: false,
+      fx_status: "known",
+    });
+    expect(compactFeeLabel(formula)).toBe("PM taker formula");
+    expect(compactFeeLabel(formula)).not.toContain("5%");
+    expect(compactVenueMeta(formula)).toContain("PM taker formula");
+    expect(compactVenueMeta(formula)).not.toContain("Fee 5%");
+    expect(compactVenueMeta(formula)).not.toContain("FX missing");
+    expect(failingVenueChecks(formula).join(" ")).not.toContain("Settlement fingerprint incomplete");
+    expect(provenanceLines(formula).join(" ")).toContain("Rate coefficient 0.05");
+    const commission = facts("matchbook", homeDrawAway, { fee_rate: 0.02 });
+    expect(compactFeeLabel(commission)).toBe("Fee 2%");
   });
 });
 

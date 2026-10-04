@@ -309,6 +309,7 @@ class PriceEngineProjectionEvent:
     reset_generation: int = 0
     polymarket_obs: VenueMarketObservation | None = None
     source_decisions: tuple[tuple[str, str, PaperScanDecision], ...] = ()
+    fx_snapshots: tuple[FxRateSnapshot, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -3355,6 +3356,10 @@ class CataloguePriceEngine:
             (left_id, right_id, item.model_copy(deep=True))
             for left_id, right_id, item in source_decisions
         )
+        bound_fx = self._lane_fx_kwargs().get("fx_snapshots")
+        copied_fx = None
+        if bound_fx is not None:
+            copied_fx = tuple(item.model_copy(deep=True) for item in bound_fx)
         event = PriceEngineProjectionEvent(
             identity=runtime.identity.model_copy(deep=True),
             priority=runtime.priority,
@@ -3363,6 +3368,7 @@ class CataloguePriceEngine:
             polymarket_obs=None if polymarket_obs is None else polymarket_obs.model_copy(deep=True),
             decision=None if decision is None else decision.model_copy(deep=True),
             source_decisions=copied_sources,
+            fx_snapshots=copied_fx,
             reset_generation=(
                 0 if self.fixture_state is None else self.fixture_state.reset_generation
             ),
@@ -3469,7 +3475,7 @@ class CataloguePriceEngine:
             decisions_by_source_ids=source_decisions,
             decisions_by_pair=pair_decisions,
             venue_costs=self.venue_costs or None,
-            fx_snapshots=self._lane_fx_kwargs().get("fx_snapshots"),
+            fx_snapshots=None if event.fx_snapshots is None else list(event.fx_snapshots),
             cost_resolver=None if self.paper_scan is None else getattr(self.paper_scan, "cost_resolver", None),
         )
         if (
@@ -4710,14 +4716,7 @@ def _canonical_matchbook_market(identity: DerivedPriceEngineItem) -> CanonicalMa
         family=family,
         period=FootballPeriod.FULL_TIME,
         line=line,
-        settlement=SettlementFingerprint(
-            scope=SettlementScope.UNKNOWN,
-            period=FootballPeriod.FULL_TIME,
-            line=line,
-            push_possible=False,
-            penalties_included=False,
-            extra_time_included=None,
-        ),
+        settlement=_reconstructed_catalogue_settlement(identity, line=line),
         runners=runners,
     )
 
@@ -4764,15 +4763,40 @@ def _canonical_polymarket_market(identity: DerivedPriceEngineItem) -> CanonicalM
         family=family,
         period=FootballPeriod.FULL_TIME,
         line=line,
-        settlement=SettlementFingerprint(
-            scope=SettlementScope.UNKNOWN,
-            period=FootballPeriod.FULL_TIME,
-            line=line,
-            push_possible=False,
-            penalties_included=False,
-            extra_time_included=None,
-        ),
+        settlement=_reconstructed_catalogue_settlement(identity, line=line),
         runners=runners,
+    )
+
+
+def _reconstructed_catalogue_settlement(
+    identity: DerivedPriceEngineItem,
+    *,
+    line: Decimal | None,
+) -> SettlementFingerprint:
+    """Catalogue identity is the settlement authority for a registered row.
+
+    The reconstructed fingerprint stays economically incomplete, so it cannot
+    upgrade the pair to independently proven regulation. Football carries the
+    registered-equivalent note so inventory does not invent a second
+    incomplete-settlement veto. NFL and MLB keep their existing incomplete
+    sport fingerprints.
+    """
+
+    from sports_hedge.matching.assumed_settlement import REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+    from sports_hedge.mlb.constants import MLB_SPORT
+    from sports_hedge.nfl.constants import NFL_SPORT
+
+    reason = None
+    if _sport_for_identity(identity) not in {NFL_SPORT, MLB_SPORT}:
+        reason = REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+    return SettlementFingerprint(
+        scope=SettlementScope.UNKNOWN,
+        period=FootballPeriod.FULL_TIME,
+        line=line,
+        push_possible=False,
+        penalties_included=False,
+        extra_time_included=None,
+        unknown_reason=reason,
     )
 
 

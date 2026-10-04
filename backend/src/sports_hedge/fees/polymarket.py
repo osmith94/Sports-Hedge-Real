@@ -83,14 +83,18 @@ def resolve_polymarket_fee_metadata(
 
 
 def extract_polymarket_fee_metadata(payload: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Normalize Gamma/CLOB/SDK fee fields without guessing applicability."""
+    """Normalize Gamma/CLOB/SDK fee fields without guessing applicability.
+
+    Assembled match-result wrappers carry fee fields only on
+    ``grouped_payloads``. Those children are the persisted evidence. Disagreeing
+    child schedules fail closed instead of picking one.
+    """
 
     raw = dict(payload or {})
-    if not market_payload_has_fee_evidence(raw) and isinstance(raw.get("grouped_payloads"), list):
-        for item in raw["grouped_payloads"]:
-            if market_payload_has_fee_evidence(item):
-                raw = dict(item)
-                break
+    if not _direct_fee_evidence(raw):
+        grouped = _grouped_fee_metadata(raw)
+        if grouped is not None:
+            return grouped
     trading = raw.get("trading") if isinstance(raw.get("trading"), dict) else {}
     fees_enabled = _bool_or_none(
         _first_value(trading, "feesEnabled", "fees_enabled", default=_first_value(raw, "feesEnabled", "fees_enabled"))
@@ -295,6 +299,50 @@ def _unknown(
 
 def _mapping_has_fee_keys(payload: Mapping[str, Any]) -> bool:
     return any(key in payload and payload[key] not in (None, "") for key in _FEE_EVIDENCE_KEYS)
+
+
+def _direct_fee_evidence(payload: Mapping[str, Any]) -> bool:
+    """Fee fields on this object, not merely on grouped children."""
+
+    if _mapping_has_fee_keys(payload):
+        return True
+    trading = payload.get("trading")
+    return isinstance(trading, Mapping) and _mapping_has_fee_keys(trading)
+
+
+def _fee_schedule_identity(meta: Mapping[str, Any]) -> tuple[Any, ...]:
+    schedule = meta.get("fee_schedule") if isinstance(meta.get("fee_schedule"), Mapping) else {}
+    return (
+        meta.get("fees_enabled"),
+        schedule.get("rate"),
+        schedule.get("exponent"),
+        schedule.get("taker_only"),
+        meta.get("legacy_fee_rate"),
+    )
+
+
+def _grouped_fee_metadata(raw: Mapping[str, Any]) -> dict[str, Any] | None:
+    grouped = raw.get("grouped_payloads")
+    if not isinstance(grouped, list):
+        return None
+    metas: list[dict[str, Any]] = []
+    for item in grouped:
+        if isinstance(item, Mapping) and market_payload_has_fee_evidence(item):
+            metas.append(extract_polymarket_fee_metadata(item))
+    if not metas:
+        return None
+    parent_id = _market_id(raw)
+    if len({_fee_schedule_identity(item) for item in metas}) != 1:
+        return {
+            "fees_enabled": None,
+            "fee_schedule": None,
+            "legacy_fee_rate": None,
+            "source_market_id": parent_id,
+        }
+    chosen = dict(metas[0])
+    if parent_id:
+        chosen["source_market_id"] = parent_id
+    return chosen
 
 
 def _market_id(payload: Mapping[str, Any]) -> str | None:

@@ -14,6 +14,7 @@ from sports_hedge.fees.cost import CostKnownStatus, FeeBasis, MarketAction
 from sports_hedge.fees.effective import apply_venue_costs
 from sports_hedge.fees.polymarket import (
     POLYMARKET_TAKER_FORMULA,
+    apply_polymarket_taker,
     extract_polymarket_fee_metadata,
     polymarket_cost_from_market,
 )
@@ -118,6 +119,81 @@ def test_enabled_without_rate_fails_closed() -> None:
         captured_at=AS_OF,
     )
     assert not snapshot.is_economically_known()
+
+
+def test_rate_coefficient_is_not_a_flat_five_percent_haircut() -> None:
+    snapshot = polymarket_cost_from_market(
+        {
+            "id": "pm-05",
+            "feesEnabled": True,
+            "feeSchedule": {"rate": "0.05", "exponent": 1, "takerOnly": True},
+        },
+        captured_at=AS_OF,
+    )
+    assert snapshot.fee_basis is FeeBasis.FORMULA
+    fee, net = apply_polymarket_taker(
+        snapshot, gross_decimal_odds=Decimal("2"), stake=Decimal("50")
+    )
+    # 100 shares at 50¢: C × 0.05 × (0.5 × 0.5) = 1.25, not stake × 5% = 2.50.
+    assert fee == Decimal("1.25")
+    assert fee != Decimal("50") * Decimal("0.05")
+    assert net == Decimal("98.75")
+    economics = apply_venue_costs(
+        snapshot, gross_decimal_odds=Decimal("2"), stake=Decimal("50"), require_gbp=False
+    )
+    assert economics.venue_fee == fee
+
+
+def test_grouped_children_share_one_formula_schedule() -> None:
+    child = {
+        "feesEnabled": True,
+        "feeSchedule": {"rate": "0.05", "exponent": 1, "takerOnly": True},
+    }
+    meta = extract_polymarket_fee_metadata(
+        {
+            "id": "pm-assembled-1x2",
+            "question": "Match result",
+            "assembled_match_result": True,
+            "grouped_payloads": [
+                {"id": "pm-home", **child},
+                {"id": "pm-draw", **child},
+                {"id": "pm-away", **child},
+            ],
+        }
+    )
+    assert meta["fees_enabled"] is True
+    assert meta["source_market_id"] == "pm-assembled-1x2"
+    assert meta["fee_schedule"]["rate"] == "0.05"
+    assert meta["fee_schedule"]["exponent"] == "1"
+    snapshot = polymarket_cost_from_market(meta, captured_at=AS_OF)
+    assert snapshot.is_economically_known()
+    assert snapshot.fee_basis is FeeBasis.FORMULA
+    assert snapshot.formula_parameters["rate"] == Decimal("0.05")
+
+
+def test_disagreeing_grouped_fee_schedules_fail_closed() -> None:
+    meta = extract_polymarket_fee_metadata(
+        {
+            "id": "pm-conflict",
+            "grouped_payloads": [
+                {
+                    "id": "a",
+                    "feesEnabled": True,
+                    "feeSchedule": {"rate": "0.05", "exponent": 1, "takerOnly": True},
+                },
+                {
+                    "id": "b",
+                    "feesEnabled": True,
+                    "feeSchedule": {"rate": "0.03", "exponent": 1, "takerOnly": True},
+                },
+            ],
+        }
+    )
+    assert meta["fees_enabled"] is None
+    assert meta["fee_schedule"] is None
+    snapshot = polymarket_cost_from_market(meta, captured_at=AS_OF, source_market_id="pm-conflict")
+    assert not snapshot.is_economically_known()
+    assert snapshot.fee_basis is not FeeBasis.NONE_CONFIRMED
 
 
 def test_extract_preserves_market_id_for_provenance() -> None:
