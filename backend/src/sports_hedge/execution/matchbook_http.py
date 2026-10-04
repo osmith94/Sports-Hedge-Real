@@ -42,6 +42,9 @@ from sports_hedge.execution.translate import TranslationError, matchbook_limit_o
 from sports_hedge.venues.matchbook import MATCHBOOK_SESSION_PATH
 
 SUBMIT_PATH = "/edge/rest/v2/offers"
+# Official Get Balance. Schema: id, balance, exposure, commission-reserve, free-funds.
+# No currency property is documented on this payload.
+BALANCE_PATH = "/edge/rest/account/balance"
 
 
 class MatchbookHttpExecutionTransport:
@@ -269,6 +272,72 @@ class MatchbookHttpExecutionTransport:
             raise httpx.HTTPError("Matchbook execution login returned no token")
         self._session_token = token
         self._client.headers["session-token"] = token
+
+    async def account_snapshot(self) -> dict[str, Any]:
+        """Read-only login and balance. Does not call dispatch, cancel, or offers.
+
+        Authentication is ``_login`` — the same session authority ``dispatch``
+        and ``cancel`` use. Spendable cash is ``free-funds`` from
+        ``GET /edge/rest/account/balance``. The session token and account id
+        are not copied into the result.
+        """
+
+        from sports_hedge.execution.matchbook_preflight import snapshot_from_balance_body
+
+        configured = self._settings.matchbook_currency
+        if not _execution_credentials_present(self._settings):
+            return snapshot_from_balance_body(
+                None,
+                configured_currency=configured,
+                authenticated=False,
+                observed=False,
+            )
+        try:
+            await self._login()
+        except httpx.HTTPError:
+            return snapshot_from_balance_body(
+                None,
+                configured_currency=configured,
+                authenticated=False,
+                observed=False,
+            )
+        try:
+            response = await self._client.get(BALANCE_PATH)
+        except httpx.HTTPError:
+            return snapshot_from_balance_body(
+                None,
+                configured_currency=configured,
+                authenticated=True,
+                observed=False,
+            )
+        if response.status_code != 200:
+            return snapshot_from_balance_body(
+                None,
+                configured_currency=configured,
+                authenticated=True,
+                observed=False,
+            )
+        try:
+            body = response.json()
+        except json.JSONDecodeError:
+            return snapshot_from_balance_body(
+                None,
+                configured_currency=configured,
+                authenticated=True,
+                observed=False,
+            )
+        return snapshot_from_balance_body(
+            body,
+            configured_currency=configured,
+            authenticated=True,
+            observed=True,
+        )
+
+
+def _execution_credentials_present(settings: Settings) -> bool:
+    username = (settings.matchbook_username or "").strip()
+    password = settings.matchbook_password or ""
+    return bool(username and password)
 
 
 def _from_offer(
