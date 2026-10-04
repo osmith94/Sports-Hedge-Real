@@ -84,21 +84,25 @@ def build_background_price_engine_cycle_report(
     *,
     started_at: datetime,
     completed_at: datetime,
+    enabled_venues: list[Any] | tuple[Any, ...] | None = None,
 ) -> CollectionReport:
     """Wrap an already-produced BACKGROUND price-engine result for cycle history.
 
     Telemetry only: no discovery, no extra provider call, no fabricated work.
-    Counts come from the slice result that already ran.
+    Counts come from the slice result that already ran. ``enabled_venues`` is
+    the operator participation that the slice actually used. When omitted, the
+    historical Matchbook+Kalshi label remains so older callers stay stable.
     """
 
     decisions = list(getattr(result, "decisions", []) or [])
     counts = price_engine_slice_count_fields(result)
     qualifying = sum(1 for decision in decisions if decision_is_solver_arbitrage(decision))
+    venues = list(_PRICE_ENGINE_VENUES if enabled_venues is None else enabled_venues)
     return CollectionReport(
         started_at=started_at,
         completed_at=completed_at,
-        matching_venues=list(_PRICE_ENGINE_VENUES),
-        enabled_venues=list(_PRICE_ENGINE_VENUES),
+        matching_venues=venues,
+        enabled_venues=venues,
         paper_decisions=decisions,
         issues=list(getattr(result, "issues", []) or []),
         scan_lane=BACKGROUND_CYCLE_LANE,
