@@ -313,8 +313,24 @@ async def _price(
     matchbook_payloads: dict[str, dict[str, Any]],
     polymarket_books: dict[str, dict[str, Any]],
     enabled: tuple[VenueName, ...] = ENABLED,
+    include_fx: bool = True,
 ) -> dict[str, Any]:
-    service, repository = _scan_service()
+    if include_fx:
+        service, repository = _scan_service()
+    else:
+        repository = SqliteMarketIntelligenceRepository()
+        service = PaperScanService(
+            MarketIntelligenceService(repository),
+            settings=Settings(
+                min_net_edge=0,
+                max_slippage_bps=0,
+                fx_spread_bps=0,
+                max_execution_risk=100,
+            ),
+            fx_service=None,
+            cost_resolver=VenueCostResolver(),
+            clock=lambda: NOW,
+        )
     matchbook = RecordingMatchbook(matchbook_payloads)
     polymarket = RecordingPolymarket(polymarket_books)
     kalshi = RecordingKalshi()

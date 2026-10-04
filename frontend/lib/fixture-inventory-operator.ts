@@ -297,6 +297,13 @@ function marketTitle(row: KalshiFixtureMarketInventoryRow): string {
   return parts.join(" · ");
 }
 
+function signedNetPercent(value: string | number | null | undefined): string {
+  const parsed = number(value);
+  const text = percent(value);
+  if (parsed !== null && parsed > 0) return `+${text}`;
+  return text;
+}
+
 function compactEconomics(
   row: KalshiFixtureMarketInventoryRow,
   decision: OperatorDecision,
@@ -305,8 +312,9 @@ function compactEconomics(
     row.entered_solver || row.current_net_edge != null || row.trigger_net_edge != null;
   if (!hasEconomics) return null;
   const parts: string[] = [];
-  if (row.current_net_edge != null) parts.push(`Net ${percent(row.current_net_edge)}`);
-  if (row.trigger_net_edge != null) parts.push(`Trigger ${percent(row.trigger_net_edge)}`);
+  if (row.current_net_edge != null) parts.push(`Net ${signedNetPercent(row.current_net_edge)}`);
+  else parts.push("Net edge unavailable");
+  if (row.trigger_net_edge != null) parts.push(`Min net arb ${percent(row.trigger_net_edge)}`);
   parts.push(decision.label);
   const net = number(row.current_net_edge);
   let tone: DecisionTone = decision.tone;

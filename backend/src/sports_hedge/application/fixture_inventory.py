@@ -658,12 +658,15 @@ def _paired_row(
     )
 
     def facts_for(item: InventoryMarket) -> VenueMarketFacts:
-        return _facts_from_inventory(
-            item,
-            venue_costs=venue_costs,
-            fx_snapshots=fx_snapshots,
-            cost_resolver=cost_resolver,
-            decision=decision,
+        return _consume_registered_settlement_authority(
+            _facts_from_inventory(
+                item,
+                venue_costs=venue_costs,
+                fx_snapshots=fx_snapshots,
+                cost_resolver=cost_resolver,
+                decision=decision,
+            ),
+            comparison_status=status,
         )
 
     return FixtureMarketInventoryRow(
@@ -875,6 +878,34 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
     return InventoryComparisonStatus.MATCHED_EQUIVALENT
 
 
+def _consume_registered_settlement_authority(
+    facts: VenueMarketFacts,
+    *,
+    comparison_status: InventoryComparisonStatus,
+) -> VenueMarketFacts:
+    """Registered equivalence is the settlement authority for the pair.
+
+    A reconstructed venue fingerprint that is still incomplete does not get a
+    second veto once the catalogue relationship is paper-assumed equivalent.
+    An economically complete fingerprint stays complete. This does not invent
+    independent regulation proof.
+    """
+
+    if comparison_status is not InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT:
+        return facts
+    if facts.settlement_status in {"paper_assumed", "complete"} or facts.settlement_complete is True:
+        return facts
+    from sports_hedge.matching.assumed_settlement import REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+
+    return facts.model_copy(
+        update={
+            "settlement_status": "paper_assumed",
+            "settlement_provenance": facts.settlement_provenance
+            or REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
+        }
+    )
+
+
 def _settlement_inventory_fields(canonical: CanonicalMarket | None) -> dict[str, str | None]:
     """Distinguish an assumed sport settlement from an unknown fingerprint.
 
@@ -903,6 +934,16 @@ def _settlement_inventory_fields(canonical: CanonicalMarket | None) -> dict[str,
             "settlement_provenance": (
                 canonical.settlement.unknown_reason or MLB_SETTLEMENT_NOT_EXECUTABLE
             ),
+        }
+    from sports_hedge.matching.assumed_settlement import REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+
+    if (
+        not canonical.settlement.is_economically_complete()
+        and canonical.settlement.unknown_reason == REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+    ):
+        return {
+            "settlement_status": "paper_assumed",
+            "settlement_provenance": REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
         }
     if canonical.settlement.is_economically_complete():
         return {
