@@ -39,6 +39,8 @@ from sports_hedge.venues.matchbook import (
     MATCHBOOK_SESSION_PATH,
     MatchbookAuthFaultError,
     MatchbookClient,
+    MatchbookPermissionError,
+    matchbook_login_failure_from_response,
     parse_matchbook_login_error_metadata,
     reset_shared_matchbook_client,
     set_shared_matchbook_client,
@@ -355,6 +357,54 @@ async def test_400_payload_secrets_are_not_surfaced_in_fault_or_health() -> None
     assert PASSWORD not in blob
     assert "LOGIN_INVALID" in str(fault.value)
     assert session_posts == ["POST"]
+
+
+@pytest.mark.asyncio
+async def test_login_forbidden_403_is_sanitized_and_not_latched() -> None:
+    session_posts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == MATCHBOOK_SESSION_PATH:
+            session_posts.append(request.method)
+            return httpx.Response(
+                403,
+                json={
+                    "errors": [
+                        {
+                            "codes": ["API_ACCESS_DENIED"],
+                            "messages": [f"{PASSWORD} denied for this resource"],
+                        }
+                    ],
+                    "session-token": "must-not-print",
+                },
+            )
+        return httpx.Response(404)
+
+    venue, http = await _client_for(handler)
+    async with http:
+        with pytest.raises(MatchbookPermissionError) as first:
+            await venue.login()
+        with pytest.raises(MatchbookPermissionError) as second:
+            await venue.login()
+    assert session_posts == ["POST", "POST"]
+    assert venue._auth_fault is None
+    assert "HTTP 403" in str(first.value)
+    assert "API_ACCESS_DENIED" in str(first.value)
+    assert "[redacted]" in str(first.value)
+    assert "must-not-print" not in str(first.value)
+    _secret_free(str(first.value))
+    _secret_free(str(second.value))
+
+
+def test_matchbook_login_failure_from_response_maps_403() -> None:
+    response = httpx.Response(
+        403,
+        json={"errors": [{"codes": ["FORBIDDEN"], "messages": ["Access denied"]}]},
+    )
+    failure = matchbook_login_failure_from_response(response)
+    assert isinstance(failure, MatchbookPermissionError)
+    assert "HTTP 403" in str(failure)
+    assert "FORBIDDEN" in str(failure)
 
 
 def test_parse_matchbook_login_error_metadata_ignores_non_error_fields() -> None:

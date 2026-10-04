@@ -218,8 +218,83 @@ async def test_login_failure_is_not_ready() -> None:
     assert report["balance_readable"] is False
     assert report["transport_ready"] is False
     assert "authenticated read: FAIL" in text
+    assert "authentication detail:" not in text
     assert "currency:" not in text
     assert "spendable balance" not in text
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_login_forbidden_403_shows_sanitized_detail_and_stays_not_ready() -> None:
+    raw_body = (
+        '{"errors":[{"codes":["API_ACCESS_DENIED"],"messages":["'
+        + PASSWORD
+        + ' cannot access this API resource"]}],"session-token":"'
+        + SESSION
+        + '"}'
+    )
+    report, text, seen = await _run(
+        _settings(),
+        lambda seen: _handler(seen, login_status=403, login_content=raw_body.encode()),
+    )
+    assert report["authenticated_read"] is False
+    assert report["transport_ready"] is False
+    detail = report.get("authentication_detail")
+    assert isinstance(detail, str)
+    assert "HTTP 403" in detail
+    assert "authentication forbidden" in detail.lower()
+    assert "API_ACCESS_DENIED" in detail
+    assert "[redacted]" in detail
+    assert PASSWORD not in detail
+    assert SESSION not in detail
+    assert raw_body not in text
+    assert "authentication detail:" in text
+    assert detail in text
+    assert "authenticated read: FAIL" in text
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_login_rejected_400_uses_auth_fault_detail_without_changing_readiness() -> None:
+    seen: list[httpx.Request] = []
+    settings = _settings()
+    transport = MatchbookHttpExecutionTransport(
+        settings,
+        client=_client(
+            _handler(
+                seen,
+                login_status=400,
+                login_body={
+                    "errors": [
+                        {
+                            "codes": ["LOGIN_INVALID"],
+                            "messages": ["Incorrect username or password"],
+                        }
+                    ]
+                },
+            )
+        ),
+    )
+
+    async def account() -> dict[str, object]:
+        return await transport.account_snapshot()
+
+    try:
+        report = await collect_matchbook_preflight(settings, account=account)
+    finally:
+        await transport.aclose()
+    text = format_matchbook_preflight(report)
+    _assert_read_only(seen)
+    assert PASSWORD not in text
+    assert USERNAME not in text
+    assert report["authenticated_read"] is False
+    assert report["transport_ready"] is False
+    detail = report.get("authentication_detail")
+    assert isinstance(detail, str)
+    assert "HTTP 400" in detail
+    assert "LOGIN_INVALID" in detail
+    assert "latched" in detail
+    assert "authentication detail:" in text
     assert len(seen) == 1
 
 
