@@ -342,7 +342,7 @@ try {
 }
 
 Write-Host "REAL MODE"
-Write-Host "LIVE MARKET SCANNING ENABLED"
+Write-Host "REAL SCANNER LOOP ENABLED"
 Write-Host "LIVE ORDER EXECUTION DISABLED"
 Write-Host "Sports Hedge Real is running."
 Write-Host "Operator console: $ConsoleUrl"
