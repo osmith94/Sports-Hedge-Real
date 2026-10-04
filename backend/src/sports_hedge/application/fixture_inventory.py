@@ -159,6 +159,7 @@ class FixtureMarketInventoryRow(BaseModel):
     comparison_status: InventoryComparisonStatus
     reason: str | None = None
     rejection_reasons: list[str] = Field(default_factory=list)
+    pricing_diagnostics: list[str] = Field(default_factory=list)
     match_reasons: list[str] = Field(default_factory=list)
     entered_solver: bool = False
     solver_model: str | None = None
@@ -196,6 +197,11 @@ class InventoryMarket(BaseModel):
     observation: VenueMarketObservation | None = None
     normalize_error: str | None = None
     durable_kalshi_fee: dict[str, Any] | None = None
+    durable_polymarket_fee: dict[str, Any] | None = None
+
+
+EXECUTABLE_PRICE_NOT_REFRESHED = "executable_price_not_refreshed"
+PM_FEE_SNAPSHOT_UNKNOWN = "pm_fee_snapshot_unknown"
 
 
 def solver_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
@@ -836,11 +842,15 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
         return InventoryComparisonStatus.OTHER
     if reason in {"paper_assumed_equivalent", "paper_assumed_not_live_execution_eligible"}:
         return InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
-    if reason.startswith("missing_venue_cost") or reason in {
-        "missing_costs",
-        "legacy_fee_snapshot_not_cost_truth",
-        UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
-    }:
+    if (
+        reason.startswith("missing_venue_cost")
+        or reason.startswith("unknown_required_venue_cost")
+        or reason in {
+            "missing_costs",
+            "legacy_fee_snapshot_not_cost_truth",
+            UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
+        }
+    ):
         return InventoryComparisonStatus.MISSING_COSTS
     if reason.startswith("missing_fx") or reason.startswith("missing_fx_rate"):
         return InventoryComparisonStatus.MISSING_FX
@@ -945,6 +955,99 @@ def apply_durable_kalshi_fee_evidence(
             item.durable_kalshi_fee = snapshots[0]
 
 
+def apply_durable_polymarket_fee_evidence(
+    items: list[InventoryMarket],
+    *,
+    catalogue_store: Any,
+    canonical_event_id: str,
+) -> None:
+    """Copy a persisted Polymarket fee snapshot onto rows that have no quote.
+
+    Observation ``polymarket_fee`` still wins when HOT/BACKGROUND has priced
+    the row. Unknown snapshots stay unknown. Nothing here defaults a missing
+    fee to zero.
+    """
+
+    if catalogue_store is None or not canonical_event_id:
+        return
+    rows = catalogue_store.list_rows_for_event(canonical_event_id)
+    for item in items:
+        if item.venue is not VenueName.POLYMARKET:
+            continue
+        metadata = item.observation.metadata if item.observation is not None else {}
+        if isinstance(metadata, dict) and isinstance(metadata.get("polymarket_fee"), dict):
+            continue
+        snapshots: list[dict[str, Any]] = []
+        for row in rows:
+            if not _catalogue_row_covers_polymarket_item(row, item):
+                continue
+            snapshot_id = getattr(row, "polymarket_fee_snapshot_id", None)
+            if not snapshot_id:
+                continue
+            snapshot = catalogue_store.get_polymarket_fee_snapshot(str(snapshot_id))
+            if snapshot is None:
+                continue
+            payload = snapshot.observation_metadata()
+            if isinstance(payload, dict):
+                snapshots.append(payload)
+        identities = {str(payload.get("source_market_id") or "") + "|" + str(payload.get("fees_enabled")) for payload in snapshots}
+        if len(snapshots) == 1 or (snapshots and len(identities) == 1):
+            item.durable_polymarket_fee = snapshots[0]
+
+
+def _catalogue_row_covers_polymarket_item(row: Any, item: InventoryMarket) -> bool:
+    event_id = str(getattr(row, "polymarket_event_id", "") or "")
+    market_id = str(getattr(row, "polymarket_market_id", "") or "")
+    if event_id and item.source_event_id and item.source_event_id != event_id:
+        return False
+    if market_id and item.source_market_id and item.source_market_id != market_id:
+        return False
+    family = str(getattr(row, "family", "") or "")
+    if item.canonical is not None and family and item.canonical.family.value != family:
+        return False
+    row_line = getattr(row, "line", None)
+    if item.canonical is not None and item.canonical.line is not None and row_line not in (None, ""):
+        try:
+            if Decimal(str(row_line)) != item.canonical.line:
+                return False
+        except (ArithmeticError, ValueError):
+            return False
+    return bool(market_id or getattr(row, "polymarket_fee_snapshot_id", None))
+
+
+def annotate_unpriced_registered_rows(
+    rows: list[FixtureMarketInventoryRow],
+) -> list[FixtureMarketInventoryRow]:
+    """Name why a registered equivalent still has no executable price.
+
+    Does not change comparison identity and is not an execution gate.
+    """
+
+    for row in rows:
+        if not inventory_is_comparable_opportunity(row.comparison_status):
+            continue
+        diagnostics: list[str] = []
+        present = [facts for facts in (row.matchbook, row.polymarket, row.kalshi) if facts is not None]
+        if len(present) >= 2 and all(_facts_lack_executable_price(facts) for facts in present):
+            diagnostics.append(EXECUTABLE_PRICE_NOT_REFRESHED)
+        polymarket = row.polymarket
+        if polymarket is not None and polymarket.fee_status in {None, "missing", "unknown"}:
+            diagnostics.append(PM_FEE_SNAPSHOT_UNKNOWN)
+        # Pricing-state diagnostics are read-model facts, not matcher,
+        # equivalence, or solver rejection reasons. Keep canonical comparison
+        # reasons identical across UNIVERSE and HOT.
+        for code in diagnostics:
+            if code not in row.pricing_diagnostics:
+                row.pricing_diagnostics.append(code)
+    return rows
+
+
+def _facts_lack_executable_price(facts: VenueMarketFacts) -> bool:
+    if not facts.best_backs:
+        return True
+    return all(quote.decimal_odds is None for quote in facts.best_backs)
+
+
 def _catalogue_row_covers_kalshi_item(row: Any, item: InventoryMarket) -> bool:
     event_ticker = str(getattr(row, "kalshi_event_ticker", "") or "")
     if event_ticker and item.source_event_id and item.source_event_id != event_ticker:
@@ -1016,6 +1119,12 @@ def _facts_from_inventory(
             snap = observation.metadata.get(fee_key)
             if isinstance(snap, dict):
                 fee_snapshot = snap
+    if fee_snapshot is None and item.venue is VenueName.POLYMARKET:
+        if isinstance(item.durable_polymarket_fee, dict):
+            fee_snapshot = item.durable_polymarket_fee
+    if fee_snapshot is None and item.venue is VenueName.KALSHI:
+        if isinstance(item.durable_kalshi_fee, dict):
+            fee_snapshot = item.durable_kalshi_fee
     return VenueMarketFacts(
         venue=item.venue,
         source_event_id=item.source_event_id,
@@ -1138,6 +1247,12 @@ def _resolve_inventory_cost(
     if item.venue is VenueName.POLYMARKET:
         metadata = observation.metadata if observation is not None else {}
         fee_meta = metadata.get("polymarket_fee") if isinstance(metadata, dict) else None
+        if not isinstance(fee_meta, dict):
+            fee_meta = (
+                item.durable_polymarket_fee
+                if isinstance(item.durable_polymarket_fee, dict)
+                else None
+            )
         if isinstance(fee_meta, dict):
             snapshot = polymarket_cost_from_market(
                 fee_meta,

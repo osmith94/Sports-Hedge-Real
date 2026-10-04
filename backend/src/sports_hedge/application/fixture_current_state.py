@@ -1626,8 +1626,12 @@ class FixtureCurrentStateStore:
                 record.leftover_this_pass = True
             return
         if observation.pricing_refresh and observation.scan_lane is not ScanLane.HOT:
-            # BACKGROUND pricing refreshes economics only. Do not replace the
-            # UNIVERSE discovery observation or its generation provenance.
+            # BACKGROUND pricing refreshes economics only. An existing UNIVERSE
+            # discovery observation and its generation provenance stay in place.
+            # A first price with no lane observation still installs one, so
+            # detail() can classify the fixture instead of evicting an empty lifecycle.
+            if record.universe is None and record.hot is None:
+                record.set_lane(observation)
             record.merge_markets(observation)
             record.leftover_this_pass = False
             return

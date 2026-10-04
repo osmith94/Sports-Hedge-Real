@@ -2650,6 +2650,7 @@ class LiveRefreshCoordinator:
         engine.fixture_state = self._fixture_state
         selected = self.effective_universe_scope().selected_set()
         engine.set_operator_scope(selected, exempt_event_ids=self._open_paper_event_ids())
+        engine.set_enabled_venues(self.pending_venues_for(ScanLane.HOT))
         result = await engine.run_slice(priority, slice_wall_seconds=slice_wall_seconds)
         if priority is PriceEnginePriority.BACKGROUND:
             with self._state_lock:

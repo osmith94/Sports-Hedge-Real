@@ -175,6 +175,14 @@ from sports_hedge.venues.rate_limit import ProviderRateLimitedError
 
 PRICE_ENGINE_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 PRICE_ENGINE_ITEM_TIMEOUT_REASON = "order_book_timeout after 8s"
+PM_TOKEN_BOOK_TIMEOUT_REASON = f"pm_token_book_timeout {PRICE_ENGINE_ITEM_TIMEOUT_REASON}"
+MB_MARKET_PAYLOAD_MISSING = "mb_market_payload_missing"
+OBSERVATION_BUILD_FAILED = "observation_build_failed"
+INSUFFICIENT_TWO_VENUE_ECONOMICS = "insufficient_two_venue_economics"
+INSUFFICIENT_ENABLED_VENUES = "insufficient_enabled_venues"
+EXACT_IDENTITY_INCOMPLETE = "exact_identity_incomplete"
+MISSING_POLYMARKET_CLOB_TOKEN = "missing_polymarket_clob_token"
+FABRICATED_POLYMARKET_CLOB_TOKEN = "fabricated_polymarket_clob_token"
 CATALOGUE_REVALIDATION_REASON = HOT_REVALIDATION_NEEDED_REASON
 NOT_STARTED_THIS_CADENCE = "not_started_this_cadence"
 PROVIDER_CAPACITY_SATURATED = HEALTH_CAPACITY_SATURATED
@@ -295,10 +303,12 @@ class PriceEngineProjectionEvent:
 
     identity: DerivedPriceEngineItem
     priority: PriceEnginePriority
-    matchbook_obs: VenueMarketObservation
-    kalshi_obs: VenueMarketObservation
+    matchbook_obs: VenueMarketObservation | None
+    kalshi_obs: VenueMarketObservation | None
     decision: PaperScanDecision | None
     reset_generation: int = 0
+    polymarket_obs: VenueMarketObservation | None = None
+    source_decisions: tuple[tuple[str, str, PaperScanDecision], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -492,6 +502,10 @@ class CataloguePriceEngine:
             PriceEnginePriority.BACKGROUND.value: 24,
         }
         self._membership_observed = False
+        # None means every catalogue venue may be priced. An explicit set is
+        # the operator HOT participation list: a disabled venue is not fetched,
+        # not waited on, and not preferred over an enabled pair.
+        self._enabled_venues: frozenset[VenueName] | None = None
 
     def now(self) -> datetime:
         return self._clock()
@@ -516,6 +530,27 @@ class CataloguePriceEngine:
             None if selected_codes is None else frozenset(str(code) for code in selected_codes)
         )
         self._exempt_event_ids = frozenset(str(item) for item in (exempt_event_ids or ()))
+
+    def set_enabled_venues(
+        self,
+        venues: list[VenueName] | tuple[VenueName, ...] | frozenset[VenueName] | None,
+    ) -> None:
+        """Operator venue participation for this engine.
+
+        ``None`` keeps every venue eligible, which is the unit-test default.
+        A list is the HOT participation set used by live HOT and BACKGROUND
+        pricing. Kalshi being absent from that set must not block Matchbook
+        and Polymarket.
+        """
+
+        if venues is None:
+            self._enabled_venues = None
+            return
+        self._enabled_venues = frozenset(VenueName(item) for item in venues)
+
+    def _venue_participates(self, venue: VenueName) -> bool:
+        enabled = self._enabled_venues
+        return enabled is None or venue in enabled
 
     def items(self) -> list[PriceEngineRuntimeItem]:
         return list(self._items.values())
@@ -827,7 +862,8 @@ class CataloguePriceEngine:
         return tuple(
             venue
             for venue in ready
-            if not venue_blocked_for_identity(
+            if self._venue_participates(venue)
+            and not venue_blocked_for_identity(
                 self.viability_cache,
                 runtime.identity.canonical_event_id,
                 venue,
@@ -908,20 +944,11 @@ class CataloguePriceEngine:
 
     def _saved_calls_for(self, runtime: PriceEngineRuntimeItem) -> int:
         identity = runtime.identity
-        matchbook_ready = bool(identity.matchbook_event_id and identity.matchbook_market_id)
-        kalshi_ready = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
-        pm_tokens = executable_polymarket_token_ids(
-            list(identity.polymarket_token_ids),
-            event_id=identity.polymarket_event_id,
-            market_id=identity.polymarket_market_id,
-            condition_id=identity.polymarket_condition_id,
-            required_outcomes=list(identity.required_outcomes)
-            or required_outcomes_for_key(identity.register_canonical_key),
-        )
+        flags = self._exact_id_readiness(identity)
         return _expected_provider_calls(
-            matchbook_ready=matchbook_ready,
-            kalshi_tickers=_kalshi_tickers(identity) if kalshi_ready else [],
-            polymarket_tokens=pm_tokens if pm_tokens else [],
+            matchbook_ready=flags.matchbook_ready,
+            kalshi_tickers=_kalshi_tickers(identity) if flags.kalshi_ready else [],
+            polymarket_tokens=flags.pm_tokens if flags.polymarket_ready else [],
         )
 
     def _record_item_deadline_miss(self, runtime: PriceEngineRuntimeItem) -> None:
@@ -1391,6 +1418,81 @@ class CataloguePriceEngine:
             )
         return lane
 
+    def _exact_id_readiness(self, identity: DerivedPriceEngineItem) -> ExactIdPricingPrep:
+        """Participating venues whose persisted IDs are executable. No provider calls."""
+
+        matchbook_identity = bool(identity.matchbook_event_id and identity.matchbook_market_id)
+        kalshi_identity = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
+        pm_tokens = executable_polymarket_token_ids(
+            list(identity.polymarket_token_ids),
+            event_id=identity.polymarket_event_id,
+            market_id=identity.polymarket_market_id,
+            condition_id=identity.polymarket_condition_id,
+            required_outcomes=list(identity.required_outcomes)
+            or required_outcomes_for_key(identity.register_canonical_key),
+        )
+        return ExactIdPricingPrep(
+            lane="",
+            active_lane=False,
+            matchbook_ready=self._venue_participates(VenueName.MATCHBOOK) and matchbook_identity,
+            kalshi_ready=self._venue_participates(VenueName.KALSHI) and kalshi_identity,
+            polymarket_ready=self._venue_participates(VenueName.POLYMARKET) and bool(pm_tokens),
+            pm_tokens=list(pm_tokens),
+            skip_bound=False,
+        )
+
+    def _pair_gate_reason(self, identity: DerivedPriceEngineItem, flags: ExactIdPricingPrep) -> str | None:
+        """Why this row cannot price, or None when two participating venues are ready.
+
+        A disabled venue is not a missing identity. A Polymarket row with a
+        fabricated or incomplete CLOB token reports that gap even when Kalshi
+        is the historical third venue.
+        """
+
+        matchbook_ready = flags.matchbook_ready
+        kalshi_ready = flags.kalshi_ready
+        polymarket_ready = flags.polymarket_ready
+        if sum((matchbook_ready, kalshi_ready, polymarket_ready)) >= 2:
+            return None
+        pm_gap = _polymarket_identity_gap(identity)
+        pm_present = _polymarket_has_any_identity(identity)
+        if (
+            self._venue_participates(VenueName.MATCHBOOK)
+            and not matchbook_ready
+            and _matchbook_has_any_identity(identity)
+        ):
+            return "missing_matchbook_identity"
+        if (
+            self._venue_participates(VenueName.POLYMARKET)
+            and pm_present
+            and not polymarket_ready
+        ):
+            return pm_gap or MISSING_POLYMARKET_CLOB_TOKEN
+        if (
+            self._venue_participates(VenueName.KALSHI)
+            and not kalshi_ready
+            and _kalshi_has_any_identity(identity)
+        ):
+            return "missing_kalshi_identity"
+        if not matchbook_ready and not (kalshi_ready and polymarket_ready):
+            if self._venue_participates(VenueName.MATCHBOOK) and not _matchbook_has_any_identity(
+                identity
+            ):
+                if not (kalshi_ready or polymarket_ready):
+                    return "missing_matchbook_identity"
+            if not self._venue_participates(VenueName.MATCHBOOK):
+                return INSUFFICIENT_ENABLED_VENUES
+            return "missing_matchbook_identity"
+        if not kalshi_ready and not (matchbook_ready and polymarket_ready):
+            if not self._venue_participates(VenueName.KALSHI):
+                return INSUFFICIENT_ENABLED_VENUES
+            return "missing_kalshi_identity"
+        if not polymarket_ready and not (matchbook_ready and kalshi_ready):
+            if not self._venue_participates(VenueName.POLYMARKET):
+                return INSUFFICIENT_ENABLED_VENUES
+            return pm_gap or "missing_polymarket_identity"
+        return INSUFFICIENT_ENABLED_VENUES
+
     def _prepare_exact_id_pricing(
         self,
         runtime: PriceEngineRuntimeItem,
@@ -1401,23 +1503,14 @@ class CataloguePriceEngine:
         """Validate exact catalogue IDs and viability. Does not call providers."""
 
         identity = runtime.identity
-        matchbook_ready = bool(identity.matchbook_event_id and identity.matchbook_market_id)
-        kalshi_ready = bool(identity.kalshi_event_ticker and _kalshi_tickers(identity))
-        pm_tokens = executable_polymarket_token_ids(
-            list(identity.polymarket_token_ids),
-            event_id=identity.polymarket_event_id,
-            market_id=identity.polymarket_market_id,
-            condition_id=identity.polymarket_condition_id,
-            required_outcomes=list(identity.required_outcomes)
-            or required_outcomes_for_key(identity.register_canonical_key),
-        )
-        polymarket_ready = bool(pm_tokens)
-        if not matchbook_ready and not (kalshi_ready and polymarket_ready):
-            return self._request_revalidation(runtime, "missing_matchbook_identity")
-        if not kalshi_ready and not (matchbook_ready and polymarket_ready):
-            return self._request_revalidation(runtime, "missing_kalshi_identity")
-        if not polymarket_ready and not (matchbook_ready and kalshi_ready):
-            return self._request_revalidation(runtime, "missing_polymarket_identity")
+        flags = self._exact_id_readiness(identity)
+        matchbook_ready = flags.matchbook_ready
+        kalshi_ready = flags.kalshi_ready
+        polymarket_ready = flags.polymarket_ready
+        pm_tokens = flags.pm_tokens
+        gate = self._pair_gate_reason(identity, flags)
+        if gate is not None:
+            return self._request_revalidation(runtime, gate)
 
         active_lane = str(lane).strip().casefold() == PRICE_ENGINE_ACTIVE_TRADE_LANE
         viability = assess_identity_viability(
@@ -1475,6 +1568,13 @@ class CataloguePriceEngine:
                     active_trade_lane=prep.active_lane,
                 ).viable_venue_count
             return self._finalize_provider_status(runtime, matchbook_payload)
+        if (
+            str(identity.register_canonical_key or "").startswith("NFL_")
+            and _matchbook_line_contradiction(identity, matchbook_payload.payload)
+        ):
+            # The native handicap is not the registered line. Stop before
+            # Kalshi or Polymarket reads and do not price it as equivalent.
+            return self._request_revalidation(runtime, "line_mismatch")
         known_implied = merge_known_implied(
             self._implied_from_matchbook(identity, matchbook_payload)
         )
@@ -1699,14 +1799,16 @@ class CataloguePriceEngine:
                     str(identity.matchbook_market_id),
                     reason="market_terminal",
                 )
-            else:
-                self.viability_cache.mark_market_unavailable(
-                    identity.canonical_event_id,
-                    VenueName.MATCHBOOK,
-                    str(identity.matchbook_market_id),
-                    reason="market_payload_missing",
+                return self._request_revalidation(
+                    runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone"
                 )
-            return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:gone")
+            self.viability_cache.mark_market_unavailable(
+                identity.canonical_event_id,
+                VenueName.MATCHBOOK,
+                str(identity.matchbook_market_id),
+                reason="market_payload_missing",
+            )
+            return self._request_revalidation(runtime, MB_MARKET_PAYLOAD_MISSING)
         if str(market.get("id") or "") != str(identity.matchbook_market_id):
             return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:identity")
         self.viability_cache.clear_market(
@@ -1830,12 +1932,12 @@ class CataloguePriceEngine:
             if status is not None:
                 if status is PriceEngineItemStatus.RETRY_WAIT:
                     runtime.last_error_stage = "order_book"
-                    runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
+                    runtime.last_error_detail = PM_TOKEN_BOOK_TIMEOUT_REASON
                 return status
             if payload is None:
                 runtime.last_error_stage = "order_book"
-                runtime.last_error_detail = PRICE_ENGINE_ITEM_TIMEOUT_REASON
-                return self._schedule_retry(runtime, PRICE_ENGINE_ITEM_TIMEOUT_REASON)
+                runtime.last_error_detail = PM_TOKEN_BOOK_TIMEOUT_REASON
+                return self._schedule_retry(runtime, PM_TOKEN_BOOK_TIMEOUT_REASON)
             books[token] = RetrievedVenuePayload(payload=payload, retrieved_at=self.now())
             self.viability_cache.clear_provider_issue(VenueName.POLYMARKET)
         return books
@@ -1948,9 +2050,18 @@ class CataloguePriceEngine:
             matchbook_obs = self._build_matchbook_obs(identity, matchbook, evaluated_at)
             kalshi_obs = self._build_kalshi_obs(identity, kalshi_books, evaluated_at)
             polymarket_obs = self._build_polymarket_obs(identity, polymarket_books, evaluated_at)
-        except Exception:
+        except Exception as exc:
+            detail = str(exc).splitlines()[0][:160]
+            result.issues.append(
+                CollectorIssue(
+                    stage="build_observation",
+                    source_id=identity.catalogue_row_id,
+                    detail=f"{OBSERVATION_BUILD_FAILED}:{type(exc).__name__}:{detail}",
+                )
+            )
             return
         scan_kwargs = self._scan_kwargs(identity)
+        source_decisions: list[tuple[str, str, PaperScanDecision]] = []
         for left, right in (
             (matchbook_obs, polymarket_obs),
             (polymarket_obs, kalshi_obs),
@@ -1960,9 +2071,28 @@ class CataloguePriceEngine:
             except Exception:
                 continue
             result.decisions.append(decision)
+            left_market = getattr(left, "market", None)
+            right_market = getattr(right, "market", None)
+            left_id = getattr(left_market, "source_market_id", None)
+            right_id = getattr(right_market, "source_market_id", None)
+            if left_id and right_id:
+                source_decisions.append((str(left_id), str(right_id), decision))
             if _decision_is_interesting(decision):
                 self._maybe_promote(runtime, decision, result)
             await self._handoff_item_decision(runtime, decision, result)
+        if (
+            isinstance(matchbook_obs, VenueMarketObservation)
+            and isinstance(kalshi_obs, VenueMarketObservation)
+            and isinstance(polymarket_obs, VenueMarketObservation)
+        ):
+            self._schedule_projection(
+                runtime,
+                matchbook_obs=matchbook_obs,
+                kalshi_obs=kalshi_obs,
+                polymarket_obs=polymarket_obs,
+                decision=source_decisions[0][2] if source_decisions else None,
+                source_decisions=tuple(source_decisions),
+            )
 
     async def _evaluate_flexible_pairs(
         self,
@@ -1990,31 +2120,54 @@ class CataloguePriceEngine:
                     identity, polymarket_books, evaluated_at
                 )
         except Exception as exc:
-            return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:{exc}")
+            detail = str(exc).splitlines()[0][:160]
+            return self._request_revalidation(
+                runtime, f"{OBSERVATION_BUILD_FAILED}:{type(exc).__name__}:{detail}"
+            )
         if len(observations) < 2 or self.paper_scan is None:
-            return self._request_revalidation(runtime, f"{CATALOGUE_REVALIDATION_REASON}:incomplete_pair")
+            return self._request_revalidation(runtime, INSUFFICIENT_TWO_VENUE_ECONOMICS)
         scan_kwargs = self._scan_kwargs(identity)
         venues = list(observations)
         decision = None
+        source_decisions: list[tuple[str, str, PaperScanDecision]] = []
         for index, left_venue in enumerate(venues):
             for right_venue in venues[index + 1 :]:
+                left_obs = observations[left_venue]
+                right_obs = observations[right_venue]
                 try:
                     decision = self.paper_scan.scan_pair(
-                        observations[left_venue],
-                        observations[right_venue],
+                        left_obs,
+                        right_obs,
                         **scan_kwargs,
                     )
                 except Exception as exc:
                     runtime.last_error_stage = "build_observation"
-                    runtime.last_error_detail = str(exc)
+                    runtime.last_error_detail = f"{OBSERVATION_BUILD_FAILED}:{exc}"
                     continue
                 result.decisions.append(decision)
+                source_decisions.append(
+                    (
+                        str(left_obs.market.source_market_id),
+                        str(right_obs.market.source_market_id),
+                        decision,
+                    )
+                )
                 await self._handoff_item_decision(runtime, decision, result)
         if not result.decisions:
-            return self._schedule_retry(runtime, runtime.last_error_detail or "order_book_unavailable")
+            return self._schedule_retry(
+                runtime, runtime.last_error_detail or INSUFFICIENT_TWO_VENUE_ECONOMICS
+            )
         if runtime.pricing_slice_priority is None:
             runtime.pricing_slice_priority = runtime.priority
         self._maybe_promote(runtime, decision, result)
+        self._schedule_projection(
+            runtime,
+            matchbook_obs=observations.get(VenueName.MATCHBOOK),
+            kalshi_obs=observations.get(VenueName.KALSHI),
+            polymarket_obs=observations.get(VenueName.POLYMARKET),
+            decision=decision,
+            source_decisions=tuple(source_decisions),
+        )
         runtime.last_priced_at = evaluated_at
         runtime.retry_attempt = 0
         runtime.next_retry_at = None
@@ -2033,6 +2186,8 @@ class CataloguePriceEngine:
         if settings is not None:
             operator = effective_operator_scanner_settings(settings)
             scan_kwargs["minimum_net_edge"] = operator.min_net_edge
+            scan_kwargs["market_scope"] = catalogue_market_scope(identity)
+            scan_kwargs["outright_min_net_edge"] = operator.outright_min_net_edge
             scan_kwargs["maximum_execution_risk"] = operator.max_execution_risk
             scan_kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
         return scan_kwargs
@@ -2056,6 +2211,8 @@ class CataloguePriceEngine:
 
             if not matchbook_payload_matches_nfl_family(matchbook.payload, family):
                 raise ValueError("nfl_matchbook_identity_changed")
+            if _matchbook_line_contradiction(identity, matchbook.payload):
+                raise ValueError("line_mismatch")
             market = _canonical_matchbook_market(identity)
             if market is None:
                 raise ValueError("nfl_matchbook_identity")
@@ -2990,18 +3147,28 @@ class CataloguePriceEngine:
         self,
         runtime: PriceEngineRuntimeItem,
         *,
-        matchbook_obs: VenueMarketObservation,
-        kalshi_obs: VenueMarketObservation,
-        decision: PaperScanDecision | None,
+        matchbook_obs: VenueMarketObservation | None = None,
+        kalshi_obs: VenueMarketObservation | None = None,
+        polymarket_obs: VenueMarketObservation | None = None,
+        decision: PaperScanDecision | None = None,
+        source_decisions: tuple[tuple[str, str, PaperScanDecision], ...] = (),
     ) -> None:
         """UI/current-state projection is a consumer. It must not delay the next item."""
 
+        if matchbook_obs is None and kalshi_obs is None and polymarket_obs is None:
+            return
+        copied_sources = tuple(
+            (left_id, right_id, item.model_copy(deep=True))
+            for left_id, right_id, item in source_decisions
+        )
         event = PriceEngineProjectionEvent(
             identity=runtime.identity.model_copy(deep=True),
             priority=runtime.priority,
-            matchbook_obs=matchbook_obs.model_copy(deep=True),
-            kalshi_obs=kalshi_obs.model_copy(deep=True),
+            matchbook_obs=None if matchbook_obs is None else matchbook_obs.model_copy(deep=True),
+            kalshi_obs=None if kalshi_obs is None else kalshi_obs.model_copy(deep=True),
+            polymarket_obs=None if polymarket_obs is None else polymarket_obs.model_copy(deep=True),
             decision=None if decision is None else decision.model_copy(deep=True),
+            source_decisions=copied_sources,
             reset_generation=(
                 0 if self.fixture_state is None else self.fixture_state.reset_generation
             ),
@@ -3016,10 +3183,19 @@ class CataloguePriceEngine:
         identity = event.identity
         matchbook_obs = event.matchbook_obs
         kalshi_obs = event.kalshi_obs
+        polymarket_obs = event.polymarket_obs
+        present = [
+            obs
+            for obs in (matchbook_obs, polymarket_obs, kalshi_obs)
+            if obs is not None
+        ]
+        if len(present) < 1:
+            return
         decision = event.decision
-        observed_at = matchbook_obs.observed_at
+        observed_at = present[0].observed_at
+        enabled = [obs.venue for obs in present]
         fixture = DiscoveredFixture(
-            source=VenueName.MATCHBOOK,
+            source=VenueName.MATCHBOOK if matchbook_obs is not None else present[0].venue,
             source_event_id=str(identity.matchbook_event_id or identity.canonical_event_id),
             canonical_event_id=identity.canonical_event_id,
             home_team=identity.home_canonical or "Home",
@@ -3029,8 +3205,9 @@ class CataloguePriceEngine:
             kickoff_utc=identity.kickoff_utc or observed_at,
             last_seen_at=observed_at,
             last_scanned_at=observed_at,
-            matchbook_matched=True,
-            kalshi_matched=True,
+            matchbook_matched=matchbook_obs is not None,
+            kalshi_matched=kalshi_obs is not None,
+            polymarket_matched=polymarket_obs is not None,
             market_evaluation_state=MarketEvaluationState.EVALUATED.value,
             opportunity_state="matched",
             scan_lane=(
@@ -3051,39 +3228,70 @@ class CataloguePriceEngine:
                 edge = decision_net_edge(decision)
                 if edge is not None and edge > 0:
                     fixture.opportunity_state = "near"
-        mb_inv = _inventory_from_observation(matchbook_obs)
-        k_inv = _inventory_from_observation(kalshi_obs)
-        pair_key = (
-            matchbook_obs.market.source_venue.value,
-            matchbook_obs.market.source_market_id,
-            kalshi_obs.market.source_venue.value,
-            kalshi_obs.market.source_market_id,
-        )
+        source_decisions = {
+            (left_id, right_id): item for left_id, right_id, item in event.source_decisions
+        }
+        if decision is not None and not source_decisions and matchbook_obs is not None and kalshi_obs is not None:
+            source_decisions[
+                (matchbook_obs.market.source_market_id, kalshi_obs.market.source_market_id)
+            ] = decision
+        elif (
+            decision is not None
+            and not source_decisions
+            and matchbook_obs is not None
+            and polymarket_obs is not None
+        ):
+            source_decisions[
+                (
+                    matchbook_obs.market.source_market_id,
+                    polymarket_obs.market.source_market_id,
+                )
+            ] = decision
+        pair_decisions: dict[tuple[str, str, str, str], PaperScanDecision] = {}
+        observations_by_id = {
+            obs.market.source_market_id: obs for obs in present
+        }
+        for (left_id, right_id), item in source_decisions.items():
+            left_obs = observations_by_id.get(left_id)
+            right_obs = observations_by_id.get(right_id)
+            if left_obs is None or right_obs is None:
+                continue
+            pair_decisions[
+                (
+                    left_obs.venue.value,
+                    left_id,
+                    right_obs.venue.value,
+                    right_id,
+                )
+            ] = item
+        mb_inv = None if matchbook_obs is None else _inventory_from_observation(matchbook_obs)
+        pm_inv = None if polymarket_obs is None else _inventory_from_observation(polymarket_obs)
+        k_inv = None if kalshi_obs is None else _inventory_from_observation(kalshi_obs)
         rows = assemble_fixture_inventory(
-            [mb_inv],
-            [],
-            kalshi_markets=[k_inv],
+            [] if mb_inv is None else [mb_inv],
+            [] if pm_inv is None else [pm_inv],
+            kalshi_markets=[] if k_inv is None else [k_inv],
             matcher=None if self.paper_scan is None else getattr(self.paper_scan, "market_matcher", None),
-            decisions_by_source_ids=(
-                {}
-                if decision is None
-                else {
-                    (
-                        matchbook_obs.market.source_market_id,
-                        kalshi_obs.market.source_market_id,
-                    ): decision
-                }
-            ),
-            decisions_by_pair={} if decision is None else {pair_key: decision},
+            decisions_by_source_ids=source_decisions,
+            decisions_by_pair=pair_decisions,
             venue_costs=self.venue_costs or None,
             fx_snapshots=self._lane_fx_kwargs().get("fx_snapshots"),
             cost_resolver=None if self.paper_scan is None else getattr(self.paper_scan, "cost_resolver", None),
         )
+        if (
+            kalshi_obs is not None
+            and polymarket_obs is not None
+            and not any(row.matchbook is not None and row.kalshi is not None for row in rows)
+        ):
+            # Do not replace an already published Matchbook+Kalshi row with a
+            # Polymarket observation that failed to stay on the same identity.
+            return
         rows = _overlay_decision_inventory(
             rows,
             identity=identity,
             matchbook_obs=matchbook_obs,
             kalshi_obs=kalshi_obs,
+            polymarket_obs=polymarket_obs,
             decision=decision,
         )
         from sports_hedge.catalogue.coverage_rows import fixture_catalogue_coverage
@@ -3094,8 +3302,9 @@ class CataloguePriceEngine:
             prior_markets = list(prior.markets)
         fixture.catalogue_coverage = fixture_catalogue_coverage(
             [*prior_markets, *rows],
-            matchbook_matched=True,
-            kalshi_matched=True,
+            matchbook_matched=matchbook_obs is not None,
+            kalshi_matched=kalshi_obs is not None,
+            polymarket_matched=polymarket_obs is not None,
             sport=fixture.sport,
         )
         if decision is not None:
@@ -3105,8 +3314,8 @@ class CataloguePriceEngine:
         report = CollectionReport(
             started_at=observed_at,
             completed_at=observed_at,
-            matching_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
-            enabled_venues=[VenueName.MATCHBOOK, VenueName.KALSHI],
+            matching_venues=list(enabled),
+            enabled_venues=list(enabled),
             paper_decisions=decisions,
             discovered_fixtures=[fixture],
             fixture_markets={identity.canonical_event_id: rows},
@@ -4010,6 +4219,109 @@ def _required_tickers(identity: DerivedPriceEngineItem) -> list[str]:
     return tickers or _kalshi_tickers(identity)
 
 
+def _matchbook_has_any_identity(identity: DerivedPriceEngineItem) -> bool:
+    return bool(identity.matchbook_event_id or identity.matchbook_market_id)
+
+
+def _kalshi_has_any_identity(identity: DerivedPriceEngineItem) -> bool:
+    return bool(
+        identity.kalshi_event_ticker
+        or identity.kalshi_market_tickers
+        or identity.kalshi_outcome_ids
+    )
+
+
+def _polymarket_has_any_identity(identity: DerivedPriceEngineItem) -> bool:
+    return bool(
+        str(identity.polymarket_event_id or "").strip()
+        or str(identity.polymarket_market_id or "").strip()
+        or list(identity.polymarket_token_ids or [])
+    )
+
+
+def _polymarket_identity_gap(identity: DerivedPriceEngineItem) -> str:
+    """Explicit Polymarket identity diagnostic. Does not invent a token."""
+
+    from sports_hedge.nfl.normalize import is_fabricated_polymarket_clob_token
+
+    event = str(identity.polymarket_event_id or "").strip()
+    market = str(identity.polymarket_market_id or "").strip()
+    condition = str(identity.polymarket_condition_id or "").strip()
+    tokens = list(identity.polymarket_token_ids or [])
+    if not event or not market:
+        if event or market or tokens:
+            return EXACT_IDENTITY_INCOMPLETE
+        return "missing_polymarket_identity"
+    if not tokens:
+        return MISSING_POLYMARKET_CLOB_TOKEN
+    for item in tokens:
+        native = str(getattr(item, "native_id", "") or "").strip()
+        if not native:
+            return MISSING_POLYMARKET_CLOB_TOKEN
+        if is_fabricated_polymarket_clob_token(
+            native, condition_id=condition, market_id=market
+        ):
+            return FABRICATED_POLYMARKET_CLOB_TOKEN
+    executable = executable_polymarket_token_ids(
+        tokens,
+        event_id=event,
+        market_id=market,
+        condition_id=condition or None,
+        required_outcomes=list(identity.required_outcomes)
+        or required_outcomes_for_key(identity.register_canonical_key),
+    )
+    if not executable:
+        return EXACT_IDENTITY_INCOMPLETE
+    return "missing_polymarket_identity"
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _matchbook_line_contradiction(
+    identity: DerivedPriceEngineItem, payload: Mapping[str, Any]
+) -> bool:
+    """True when the live Matchbook handicap is not the persisted exact line.
+
+    Catalogue line stays the identity. A different native handicap must not be
+    priced as that registered market.
+    """
+
+    expected_text = str(identity.line or "").strip()
+    runner_lines: list[Decimal] = []
+    for runner in payload.get("runners") or []:
+        if not isinstance(runner, dict):
+            continue
+        parsed = _decimal_or_none(runner.get("handicap"))
+        if parsed is not None:
+            runner_lines.append(parsed)
+    market_line = _decimal_or_none(payload.get("handicap"))
+    if not expected_text:
+        nonzero = [item for item in runner_lines if item != 0]
+        return market_line not in (None, Decimal("0")) or bool(nonzero)
+    try:
+        expected = Decimal(expected_text)
+    except (InvalidOperation, ValueError):
+        return True
+    lines = list(runner_lines)
+    if market_line is not None:
+        lines.append(market_line)
+    if not lines:
+        return True
+    if any(abs(item) != abs(expected) for item in lines):
+        return True
+    return expected not in lines and -expected not in lines and market_line not in {
+        expected,
+        abs(expected),
+    }
+
+
 def _synthetic_matchbook_event(identity: DerivedPriceEngineItem) -> dict[str, Any]:
     """Rebuild the Matchbook event the normaliser needs to keep sport identity.
 
@@ -4393,13 +4705,17 @@ def _overlay_decision_inventory(
     rows: list[FixtureMarketInventoryRow],
     *,
     identity: DerivedPriceEngineItem,
-    matchbook_obs: VenueMarketObservation,
-    kalshi_obs: VenueMarketObservation,
+    matchbook_obs: VenueMarketObservation | None,
+    kalshi_obs: VenueMarketObservation | None,
     decision: PaperScanDecision | None,
+    polymarket_obs: VenueMarketObservation | None = None,
 ) -> list[FixtureMarketInventoryRow]:
     """Keep Issue #200 promotion truth even when greedy pairing is incomplete."""
 
-    if decision is None:
+    if decision is None or matchbook_obs is None:
+        return rows
+    other = kalshi_obs if kalshi_obs is not None else polymarket_obs
+    if other is None:
         return rows
     edge = decision_net_edge(decision)
     is_arb = decision_is_solver_arbitrage(decision)
@@ -4407,12 +4723,15 @@ def _overlay_decision_inventory(
         if not is_arb:
             return rows
         edge = Decimal("0.01")
+    require_kalshi = kalshi_obs is not None and polymarket_obs is None
+    require_polymarket = polymarket_obs is not None and kalshi_obs is None
     comparable = [
         row
         for row in rows
         if inventory_is_comparable_opportunity(row.comparison_status)
         and row.matchbook is not None
-        and row.kalshi is not None
+        and (row.kalshi is not None if require_kalshi else True)
+        and (row.polymarket is not None if require_polymarket else True)
     ]
     if comparable:
         for row in comparable:
@@ -4422,16 +4741,32 @@ def _overlay_decision_inventory(
             row.entered_solver = True
             if row.matchbook is not None and row.matchbook.quote_age_ms is None:
                 row.matchbook.quote_age_ms = matchbook_obs.quote_age_ms or 0
-            if row.kalshi is not None and row.kalshi.quote_age_ms is None:
+            if row.kalshi is not None and kalshi_obs is not None and row.kalshi.quote_age_ms is None:
                 row.kalshi.quote_age_ms = kalshi_obs.quote_age_ms or 0
+            if (
+                row.polymarket is not None
+                and polymarket_obs is not None
+                and row.polymarket.quote_age_ms is None
+            ):
+                row.polymarket.quote_age_ms = polymarket_obs.quote_age_ms or 0
         return rows
-    return [*rows, _decision_inventory_row(identity, matchbook_obs, kalshi_obs, decision, edge, is_arb)]
+    return [
+        *rows,
+        _decision_inventory_row(
+            identity,
+            matchbook_obs,
+            other,
+            decision,
+            edge,
+            is_arb,
+        ),
+    ]
 
 
 def _decision_inventory_row(
     identity: DerivedPriceEngineItem,
     matchbook_obs: VenueMarketObservation,
-    kalshi_obs: VenueMarketObservation,
+    other_obs: VenueMarketObservation,
     decision: PaperScanDecision,
     edge: Decimal,
     is_arb: bool,
@@ -4473,7 +4808,8 @@ def _decision_inventory_row(
         trigger_net_edge=decision.minimum_net_edge,
         solver_is_arbitrage=is_arb or edge > 0,
         matchbook=_facts(matchbook_obs),
-        kalshi=_facts(kalshi_obs),
+        polymarket=_facts(other_obs) if other_obs.venue is VenueName.POLYMARKET else None,
+        kalshi=_facts(other_obs) if other_obs.venue is VenueName.KALSHI else None,
         last_scanned_at=matchbook_obs.observed_at,
     )
 

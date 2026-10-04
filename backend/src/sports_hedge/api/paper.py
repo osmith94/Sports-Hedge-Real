@@ -2003,6 +2003,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 result,
                 started_at=started,
                 completed_at=finished,
+                enabled_venues=list(coordinator.pending_venues_for(ScanLane.HOT)),
             ),
             audit=audit,
         )
@@ -2015,7 +2016,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
             coordinator.note_hot_scheduler_idle(idle_reason)
             return
         hot_wall = float(settings.paper_scan_hot_cycle_timeout_seconds)
-        price_engine_venues = [VenueName.MATCHBOOK, VenueName.KALSHI]
+        pending_hot = set(coordinator.pending_venues_for(ScanLane.HOT))
+        price_engine_venues = [
+            venue
+            for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI)
+            if venue in pending_hot
+        ]
 
         async def hot_runner() -> CollectionReport:
             started = coordinator.now()

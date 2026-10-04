@@ -53,6 +53,8 @@ from sports_hedge.application.fixture_inventory import (
     FixtureMarketInventoryRow,
     InventoryMarket,
     apply_durable_kalshi_fee_evidence,
+    apply_durable_polymarket_fee_evidence,
+    annotate_unpriced_registered_rows,
     assemble_fixture_inventory,
     inventory_is_comparable_opportunity,
     inventory_summary,
@@ -3700,6 +3702,23 @@ class ReadOnlyCrossVenueCollector:
 
         return self._op_request_lane == ScanLane.UNIVERSE.value
 
+    def _apply_durable_venue_fee_evidence(
+        self,
+        items: list[InventoryMarket],
+        *,
+        canonical_event_id: str,
+    ) -> None:
+        apply_durable_kalshi_fee_evidence(
+            items,
+            catalogue_store=self.catalogue_store,
+            canonical_event_id=canonical_event_id,
+        )
+        apply_durable_polymarket_fee_evidence(
+            items,
+            catalogue_store=self.catalogue_store,
+            canonical_event_id=canonical_event_id,
+        )
+
     async def _scan_cluster(
         self,
         cluster: FixtureCluster,
@@ -4098,9 +4117,8 @@ class ReadOnlyCrossVenueCollector:
             + len(polymarket_inventory)
             + len(kalshi_inventory),
         ):
-            apply_durable_kalshi_fee_evidence(
+            self._apply_durable_venue_fee_evidence(
                 [*matchbook_inventory, *polymarket_inventory, *kalshi_inventory],
-                catalogue_store=self.catalogue_store,
                 canonical_event_id=fixture.canonical_event_id,
             )
             inventory_rows = assemble_fixture_inventory(
@@ -4114,6 +4132,8 @@ class ReadOnlyCrossVenueCollector:
                 fx_snapshots=scan_kwargs.get("fx_snapshots"),
                 cost_resolver=self.paper_scan.cost_resolver,
             )
+            if self._universe_defers_executable_pricing():
+                inventory_rows = annotate_unpriced_registered_rows(inventory_rows)
         discovered_count, equivalent_count, _observed_edge = inventory_summary(inventory_rows)
         fixture.discovered_market_count = discovered_count
         fixture.matched_market_count = matched_market_pairs
@@ -4640,6 +4660,10 @@ class ReadOnlyCrossVenueCollector:
         matchbook_inv = [item for item in inventories if item.venue is VenueName.MATCHBOOK]
         polymarket_inv = [item for item in inventories if item.venue is VenueName.POLYMARKET]
         kalshi_inv = [item for item in inventories if item.venue is VenueName.KALSHI]
+        self._apply_durable_venue_fee_evidence(
+            [*matchbook_inv, *polymarket_inv, *kalshi_inv],
+            canonical_event_id=str(getattr(fixture, "canonical_event_id", "") or ""),
+        )
         rows = assemble_fixture_inventory(
             matchbook_inv,
             polymarket_inv,
