@@ -24,6 +24,9 @@ async def collect_polymarket_preflight(
     eligibility = await (geoblock or (lambda: fetch_geoblock(settings.polymarket_geoblock_url)))()
     wallet = wallet_config(settings)
     creds = configured_api_creds(settings) or cached_api_creds(settings)
+    # Cached L2 credentials are valid when they parse. A later balance or
+    # open-order failure must not flip this back to invalid.
+    l2_auth_valid = creds is not None
     authenticated = False
     balance_readable = False
     trading_ready = False
@@ -31,7 +34,7 @@ async def collect_polymarket_preflight(
     if account is not None:
         try:
             snapshot = account()
-        except Exception:
+        except Exception:  # noqa: BLE001 — one probe failure must not hide the other signals
             snapshot = {}
         authenticated = bool(snapshot.get("authenticated_read"))
         balance_readable = bool(snapshot.get("balance_readable"))
@@ -41,22 +44,41 @@ async def collect_polymarket_preflight(
         client = None
         try:
             client = open_polymarket_client(settings, derive_credentials=False)
-            from polymarket.models.clob import AssetType
-
-            balance = client.get_balance_allowance(asset_type=AssetType.COLLATERAL)
-            approvals = client.get_trading_approvals_state()
-            page = client.list_open_orders().first_page()
             authenticated = True
-            balance_readable = balance is not None
-            trading_ready = bool(approvals.is_fully_approved) and any(
-                amount > 0 for amount in balance.allowances.values()
-            )
-            open_orders_readable = page is not None
-        except Exception:
+        except Exception:  # noqa: BLE001 — client open is its own signal
             authenticated = False
-        finally:
-            if client is not None:
+            l2_auth_valid = False
+        if client is not None:
+            balance = None
+            try:
+                balance = client.get_balance_allowance(asset_type="COLLATERAL")
+                balance_readable = balance is not None
+            except Exception:  # noqa: BLE001 — balance failure must not invalidate L2 auth
+                balance_readable = False
+            try:
+                approvals = client.get_trading_approvals_state()
+                trading_ready = bool(
+                    balance is not None
+                    and approvals.is_fully_approved
+                    and any(amount > 0 for amount in balance.allowances.values())
+                )
+            except Exception:  # noqa: BLE001 — approval failure stays on trading readiness
+                trading_ready = False
+            try:
+                page = client.list_open_orders().first_page()
+                open_orders_readable = page is not None
+            except Exception:  # noqa: BLE001 — open-order failure stays on that signal
+                open_orders_readable = False
+            finally:
                 client.close()
+    transport_ready = (
+        wallet is not None
+        and creds is not None
+        and authenticated
+        and balance_readable
+        and trading_ready
+        and open_orders_readable
+    )
     return {
         "mode": settings.sports_hedge_mode,
         "execution_enabled": settings.sports_hedge_execution_enabled is True,
@@ -64,11 +86,12 @@ async def collect_polymarket_preflight(
         "private_key_configured": wallet is not None,
         "wallet_valid": wallet is not None,
         "l2_configured": creds is not None,
+        "l2_auth_valid": l2_auth_valid,
         "authenticated_read": authenticated,
         "balance_readable": balance_readable,
         "trading_ready": trading_ready,
         "open_orders_readable": open_orders_readable,
-        "transport_ready": wallet is not None and creds is not None and authenticated and trading_ready,
+        "transport_ready": transport_ready,
     }
 
 
@@ -90,7 +113,7 @@ def format_polymarket_preflight(report: dict[str, Any]) -> str:
         "Credentials:",
         f"  private key configured: {_yes_no(report['private_key_configured'])}",
         f"  wallet/signing configuration valid: {_yes_no(report['wallet_valid'])}",
-        f"  L2 auth valid: {_yes_no(report['authenticated_read'])}",
+        f"  L2 auth valid: {_yes_no(report['l2_auth_valid'])}",
         "",
         "Account:",
         f"  authenticated read: {'PASS' if report['authenticated_read'] else 'FAIL'}",

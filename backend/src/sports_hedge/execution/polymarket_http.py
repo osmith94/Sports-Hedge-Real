@@ -108,9 +108,12 @@ class SdkPolymarketBroker:
     def readiness(self, spend: Decimal) -> str | None:
         """pUSD readiness for a BUY. This does not check a SELL.
 
-        ``get_balance_allowance`` is called only for ``AssetType.COLLATERAL``.
-        ``get_trading_approvals_state`` is the general approval flag. Neither
-        call reads ``CONDITIONAL`` or ``CONDITIONAL-V2`` balance or allowance.
+        ``get_balance_allowance`` is called only with ``asset_type="COLLATERAL"``.
+        polymarket-client 0.12.0 types that argument as a string literal.
+        ``AssetType`` is not an enum, so ``AssetType.COLLATERAL`` raises
+        ``AttributeError``. ``get_trading_approvals_state`` is the general
+        approval flag. Neither call reads ``CONDITIONAL`` or ``CONDITIONAL-V2``
+        balance or allowance.
         A share-denominated SELL needs that conditional-token check. Opening
         LAY/SELL is rejected before this method runs.
         """
@@ -119,9 +122,7 @@ class SdkPolymarketBroker:
         state = client.get_trading_approvals_state()
         if not state.is_fully_approved:
             return f"{NOT_READY}: trading allowance is not approved"
-        from polymarket.models.clob import AssetType
-
-        balance = client.get_balance_allowance(asset_type=AssetType.COLLATERAL)
+        balance = client.get_balance_allowance(asset_type="COLLATERAL")
         required = int((spend * _BASE).to_integral_value(rounding=ROUND_DOWN))
         if balance.balance < required:
             return f"{NOT_READY}: collateral balance is below the order"
@@ -165,18 +166,42 @@ class SdkPolymarketBroker:
         return "cancel_unproven"
 
     def account_snapshot(self) -> dict[str, bool | str]:
-        client = self._open()
-        from polymarket.models.clob import AssetType
+        """Read-only account signals. Opening the client is separate from later reads.
 
-        balance = client.get_balance_allowance(asset_type=AssetType.COLLATERAL)
-        approvals = client.get_trading_approvals_state()
-        page = client.list_open_orders().first_page()
-        ready = approvals.is_fully_approved and any(amount > 0 for amount in balance.allowances.values())
+        A balance or open-order failure leaves ``authenticated_read`` true.
+        Trading readiness stays false unless collateral balance and allowance
+        were both read. This method does not place or cancel an order.
+        """
+
+        client = self._open()
+        balance = None
+        balance_readable = False
+        try:
+            balance = client.get_balance_allowance(asset_type="COLLATERAL")
+            balance_readable = balance is not None
+        except Exception:  # noqa: BLE001 — balance failure must not invalidate the open client
+            balance_readable = False
+        trading_ready = False
+        try:
+            approvals = client.get_trading_approvals_state()
+            trading_ready = bool(
+                balance is not None
+                and approvals.is_fully_approved
+                and any(amount > 0 for amount in balance.allowances.values())
+            )
+        except Exception:  # noqa: BLE001 — approval failure stays on trading readiness
+            trading_ready = False
+        open_orders_readable = False
+        try:
+            page = client.list_open_orders().first_page()
+            open_orders_readable = page is not None
+        except Exception:  # noqa: BLE001 — open-order failure stays on that signal
+            open_orders_readable = False
         return {
             "authenticated_read": True,
-            "balance_readable": True,
-            "trading_ready": ready,
-            "open_orders_readable": page is not None,
+            "balance_readable": balance_readable,
+            "trading_ready": trading_ready,
+            "open_orders_readable": open_orders_readable,
         }
 
     def _open(self) -> Any:

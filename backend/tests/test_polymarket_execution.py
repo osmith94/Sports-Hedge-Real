@@ -609,6 +609,197 @@ def test_reserved_attempt_is_not_resubmitted(tmp_path: Path) -> None:
     assert broker.posts == 0
 
 
+class _CollateralClient:
+    """Read-only stand-in. Order methods fail the test if readiness or preflight submits."""
+
+    def __init__(
+        self,
+        *,
+        balance: int = 0,
+        allowances: dict[str, int] | None = None,
+        approved: bool = True,
+        balance_error: Exception | None = None,
+        orders_error: Exception | None = None,
+    ) -> None:
+        self.balance = balance
+        self.allowances = {} if allowances is None else allowances
+        self.approved = approved
+        self.balance_error = balance_error
+        self.orders_error = orders_error
+        self.balance_calls: list[dict[str, object]] = []
+        self.closed = False
+
+    def get_balance_allowance(self, **kwargs: object) -> object:
+        self.balance_calls.append(kwargs)
+        if self.balance_error is not None:
+            raise self.balance_error
+        return type("Balance", (), {"balance": self.balance, "allowances": self.allowances})()
+
+    def get_trading_approvals_state(self) -> object:
+        return type("Approvals", (), {"is_fully_approved": self.approved})()
+
+    def list_open_orders(self) -> object:
+        if self.orders_error is not None:
+            raise self.orders_error
+        return type("Pager", (), {"first_page": lambda self: object()})()
+
+    def close(self) -> None:
+        self.closed = True
+
+    def create_market_order(self, **_kwargs: object) -> object:
+        raise AssertionError("order was signed")
+
+    def post_order(self, _signed: object) -> object:
+        raise AssertionError("order was submitted")
+
+    def cancel_order(self, **_kwargs: object) -> object:
+        raise AssertionError("order was cancelled")
+
+
+def _require_collateral_string(client: _CollateralClient) -> None:
+    assert client.balance_calls == [{"asset_type": "COLLATERAL"}]
+
+
+async def test_preflight_collateral_read_uses_the_sdk_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _CollateralClient(balance=2_000_000, allowances={"spender": 2_000_000})
+
+    def _open(_settings: Settings, *, derive_credentials: bool) -> _CollateralClient:
+        assert derive_credentials is False
+        return client
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
+        _open,
+    )
+
+    async def _geo():
+        return parse_geoblock(_permitted())
+
+    report = await collect_polymarket_preflight(
+        _wallet_settings(tmp_path),
+        geoblock=_geo,
+    )
+    text = format_polymarket_preflight(report)
+    _require_collateral_string(client)
+    assert client.closed is True
+    assert report["l2_auth_valid"] is True
+    assert report["authenticated_read"] is True
+    assert report["balance_readable"] is True
+    assert report["trading_ready"] is True
+    assert report["open_orders_readable"] is True
+    assert report["transport_ready"] is True
+    assert "L2 auth valid: yes" in text
+    assert "authenticated read: PASS" in text
+    assert "LIVE ORDER SUBMISSION:" in text
+    assert "DISABLED" in text
+
+
+async def test_preflight_balance_failure_keeps_l2_credentials_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _CollateralClient(balance_error=AttributeError("AssetType.COLLATERAL"))
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
+        lambda _settings, *, derive_credentials: client,
+    )
+
+    async def _geo():
+        return parse_geoblock(_permitted())
+
+    report = await collect_polymarket_preflight(_wallet_settings(tmp_path), geoblock=_geo)
+    text = format_polymarket_preflight(report)
+    _require_collateral_string(client)
+    assert client.closed is True
+    assert report["l2_configured"] is True
+    assert report["l2_auth_valid"] is True
+    assert report["authenticated_read"] is True
+    assert report["balance_readable"] is False
+    assert report["trading_ready"] is False
+    assert report["open_orders_readable"] is True
+    assert report["transport_ready"] is False
+    assert "L2 auth valid: yes" in text
+    assert "authenticated read: PASS" in text
+    assert "balance readable: no" in text
+    assert "ready: no" in text
+
+
+async def test_preflight_open_order_failure_stays_distinct_and_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _CollateralClient(
+        balance=2_000_000,
+        allowances={"spender": 2_000_000},
+        orders_error=RuntimeError("open orders unavailable"),
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_preflight.open_polymarket_client",
+        lambda _settings, *, derive_credentials: client,
+    )
+
+    async def _geo():
+        return parse_geoblock(_permitted())
+
+    report = await collect_polymarket_preflight(_wallet_settings(tmp_path), geoblock=_geo)
+    _require_collateral_string(client)
+    assert report["authenticated_read"] is True
+    assert report["l2_auth_valid"] is True
+    assert report["balance_readable"] is True
+    assert report["trading_ready"] is True
+    assert report["open_orders_readable"] is False
+    assert report["transport_ready"] is False
+    assert client.closed is True
+
+
+def test_live_readiness_uses_collateral_string_and_passes() -> None:
+    from polymarket.models.clob import AssetType
+
+    missing = "COLLATERAL"
+    with pytest.raises(AttributeError):
+        getattr(AssetType, missing)
+    client = _CollateralClient(balance=1_000_000, allowances={"spender": 1_000_000})
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    assert broker.readiness(Decimal(1)) is None
+    _require_collateral_string(client)
+    assert broker.posts == 0
+
+
+def test_live_readiness_insufficient_balance_fails_closed() -> None:
+    client = _CollateralClient(balance=999_999, allowances={"spender": 5_000_000})
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    block = broker.readiness(Decimal(1))
+    assert block == "POLYMARKET_NOT_READY: collateral balance is below the order"
+    _require_collateral_string(client)
+    assert broker.posts == 0
+
+
+def test_live_readiness_insufficient_allowance_fails_closed() -> None:
+    client = _CollateralClient(balance=5_000_000, allowances={"spender": 999_999})
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    block = broker.readiness(Decimal(1))
+    assert block == "POLYMARKET_NOT_READY: collateral allowance is below the order"
+    _require_collateral_string(client)
+    assert broker.posts == 0
+
+
+def test_account_snapshot_balance_failure_keeps_authenticated_read() -> None:
+    client = _CollateralClient(balance_error=RuntimeError("balance unreadable"))
+    broker = SdkPolymarketBroker(Settings())
+    broker._client = client
+    snapshot = broker.account_snapshot()
+    assert snapshot["authenticated_read"] is True
+    assert snapshot["balance_readable"] is False
+    assert snapshot["trading_ready"] is False
+    assert snapshot["open_orders_readable"] is True
+    _require_collateral_string(client)
+    assert broker.posts == 0
+
+
 async def test_preflight_is_read_only() -> None:
     broker = _Broker()
 
