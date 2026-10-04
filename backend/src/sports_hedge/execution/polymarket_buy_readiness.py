@@ -86,6 +86,28 @@ def read_collateral_balance(client: Any) -> Any:
     return client.get_balance_allowance(asset_type="COLLATERAL")
 
 
+def read_collateral_evidence(client: object) -> tuple[Decimal | None, Decimal | None, str | None]:
+    """One collateral read. Returns pUSD spendable, pUSD allowance, and a reason.
+
+    ``None`` spendable or allowance means the figure was not proven. This does
+    not compare an order. Price-2 compares the approved stake locally.
+    """
+
+    spender = resolve_exchange_v3_spender(client)
+    if spender is None:
+        return None, None, EXCHANGE_V3_UNRESOLVED
+    try:
+        balance = read_collateral_balance(client)
+        held_balance = int(balance.balance)
+    except Exception:  # noqa: BLE001 — an unreadable balance is unproven capital
+        return None, None, "collateral balance could not be read"
+    held = matched_collateral_allowance(getattr(balance, "allowances", None), spender)
+    spendable = Decimal(held_balance) / _BASE
+    if held is None:
+        return spendable, None, EXCHANGE_V3_ALLOWANCE_BELOW_ORDER
+    return spendable, Decimal(held) / _BASE, None
+
+
 def v2_buy_readiness(client: object, spend: Decimal) -> str | None:
     """Order-specific V2 BUY gate. None means this stake can be funded.
 

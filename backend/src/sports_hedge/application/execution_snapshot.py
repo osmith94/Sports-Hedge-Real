@@ -136,6 +136,47 @@ class ExecutionTiming:
     quote_age_ms: tuple[tuple[str, int | None], ...] = ()
 
 
+@dataclass(frozen=True)
+class FrozenNativeOrder:
+    """Venue-native order frozen at Price-2. Execution submits these values.
+
+    Local translation already happened. A later dispatch must not re-read the
+    book, the account, or the fee/FX context to rebuild this order.
+    """
+
+    venue: str
+    native_event_id: str
+    native_market_id: str
+    native_runner_id: str
+    side: str
+    currency: str
+    approved_decimal_odds: str
+    approved_stake: str
+    order_type: str | None = None
+    tick_size: str | None = None
+    minimum_order_size: str | None = None
+    limit_price: str | None = None
+    native_amount: str | None = None
+    native_shares: str | None = None
+    ladder_odds: str | None = None
+    native_stake: str | None = None
+    native_side: str | None = None
+
+
+@dataclass(frozen=True)
+class VenueReadinessEvidence:
+    """Live spendable capital Price-2 used. Not a paper-treasury balance."""
+
+    venue: str
+    currency: str
+    proven: bool
+    spendable: str | None
+    allowance: str | None
+    required_stake: str | None
+    source: str
+    reason: str | None = None
+
+
 @dataclass
 class ExecutionSnapshot:
     """One complete-set execution reprice, accepted only when skew and economics pass."""
@@ -163,6 +204,8 @@ class ExecutionSnapshot:
     capital_constraint: ExecutionCapitalEvidence | None = None
     timing: ExecutionTiming | None = None
     execution_cycle: int = 0
+    frozen_orders: tuple[FrozenNativeOrder, ...] = ()
+    venue_readiness: tuple[VenueReadinessEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.snapshot_id:
@@ -244,6 +287,8 @@ class ExecutionSnapshot:
             "fx_rates": [_fx_json(item) for item in self.fx_rates],
             "capital_constraint": _capital_json(self.capital_constraint),
             "timing": _timing_json(self.timing),
+            "frozen_orders": [_frozen_order_json(item) for item in self.frozen_orders],
+            "venue_readiness": [_readiness_json(item) for item in self.venue_readiness],
             "retrievals": [
                 {
                     "venue": item.venue,
@@ -566,6 +611,41 @@ def _capital_json(item: ExecutionCapitalEvidence | None) -> dict[str, Any] | Non
         "opportunity_deployed_gbp": item.opportunity_deployed_gbp,
         "opportunity_room_gbp": item.opportunity_room_gbp,
         "max_one_time_gbp": item.max_one_time_gbp,
+    }
+
+
+def _frozen_order_json(item: FrozenNativeOrder) -> dict[str, Any]:
+    return {
+        "venue": item.venue,
+        "native_event_id": item.native_event_id,
+        "native_market_id": item.native_market_id,
+        "native_runner_id": item.native_runner_id,
+        "side": item.side,
+        "currency": item.currency,
+        "approved_decimal_odds": item.approved_decimal_odds,
+        "approved_stake": item.approved_stake,
+        "order_type": item.order_type,
+        "tick_size": item.tick_size,
+        "minimum_order_size": item.minimum_order_size,
+        "limit_price": item.limit_price,
+        "native_amount": item.native_amount,
+        "native_shares": item.native_shares,
+        "ladder_odds": item.ladder_odds,
+        "native_stake": item.native_stake,
+        "native_side": item.native_side,
+    }
+
+
+def _readiness_json(item: VenueReadinessEvidence) -> dict[str, Any]:
+    return {
+        "venue": item.venue,
+        "currency": item.currency,
+        "proven": item.proven,
+        "spendable": item.spendable,
+        "allowance": item.allowance,
+        "required_stake": item.required_stake,
+        "source": item.source,
+        "reason": item.reason,
     }
 
 
