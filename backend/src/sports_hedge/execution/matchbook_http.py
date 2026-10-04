@@ -96,17 +96,20 @@ class MatchbookHttpExecutionTransport:
         if request.client_order_id in self._unknown_submit:
             return _result(request, status=VenueOrderStatus.FAILED, at=now, filled_size=None)
         try:
-            if request.frozen_limit_price is not None and request.frozen_amount is not None:
-                odds = request.frozen_limit_price
-                stake = request.frozen_amount
-                if odds <= 1 or stake <= 0:
-                    raise TranslationError("frozen Matchbook order is not positive")
-            else:
-                odds = matchbook_limit_odds(request.requested_price, side=request.side)
-                stake = matchbook_stake(request.requested_size)
+            if request.frozen_limit_price is None or request.frozen_amount is None:
+                raise TranslationError("native Matchbook order was not frozen by Price-2")
+            odds = request.frozen_limit_price
+            stake = request.frozen_amount
+            if odds <= 1 or stake <= 0:
+                raise TranslationError("frozen Matchbook order is not positive")
             runner_id = int(request.native_runner_id)
         except (TranslationError, ValueError):
-            return _result(request, status=VenueOrderStatus.FAILED, at=now)
+            return _result(
+                request,
+                status=VenueOrderStatus.FAILED,
+                at=now,
+                note="native_order_not_frozen",
+            )
         if request.side is MarketSide.BACK:
             native_side = "back"
         elif request.side is MarketSide.LAY:
