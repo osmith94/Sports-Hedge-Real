@@ -39,6 +39,8 @@ from test_nfl_stage1b_paper_markets import (
 )
 
 from sports_hedge.accounting.revaluation import DailyFxRevaluationService
+from sports_hedge.api import main as main_api
+from sports_hedge.api import paper as paper_api
 from sports_hedge.application.catalogue_maintenance import pair_identity_from_markets
 from sports_hedge.application.fixture_current_state import FixtureCurrentStateStore
 from sports_hedge.application.paper_scan import PaperScanService
@@ -47,7 +49,7 @@ from sports_hedge.application.provider_access import (
     ProviderAccessLayer,
     reset_shared_provider_access,
 )
-from sports_hedge.config import Settings
+from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.resolver import VenueCostResolver
 from sports_hedge.fx.models import FxRateUnavailable, PublishedFxClose
@@ -427,6 +429,118 @@ async def test_bootstrapped_usd_fx_prices_football_and_nfl_without_another_fetch
     assert market.current_net_edge is not None
     assert market.entered_solver is True
     assert http.ecb_gets == 1
+    assert Settings().sports_hedge_execution_enabled is False
+
+
+def _patch_lifespan_edges(monkeypatch: pytest.MonkeyPatch, coordinator: object, schedule: object) -> None:
+    async def _aclose() -> None:
+        return None
+
+    monkeypatch.setattr(main_api, "get_live_refresh_coordinator", lambda: coordinator)
+    monkeypatch.setattr(main_api, "get_universe_checkpoint_store", lambda: object())
+    monkeypatch.setattr(main_api, "get_accounting_schedule", lambda: schedule)
+    monkeypatch.setattr(main_api, "aclose_shared_provider_runtime", _aclose)
+    monkeypatch.setattr(main_api, "aclose_shared_matchbook_client", _aclose)
+    monkeypatch.setattr(paper_api, "recover_orphaned_live_executions_at_startup", lambda: [])
+
+
+class _OrderCoordinator:
+    def __init__(self, events: list[str], fx_ready: dict[str, bool]) -> None:
+        self.events = events
+        self.fx_ready = fx_ready
+        self.ticks: list[object] = []
+
+    def bind_universe_checkpoint_store(self, store: object) -> None:
+        return None
+
+    def configure_from_settings(self) -> None:
+        return None
+
+    async def start_server_loop(self, tick: object) -> None:
+        assert self.fx_ready["attempt_complete"] is True
+        assert self.fx_ready["workers_started"] is False
+        self.ticks.append(tick)
+        self.fx_ready["workers_started"] = True
+        self.events.append("workers_start")
+
+    async def stop_server_loop(self) -> None:
+        self.events.append("workers_stop")
+
+
+async def _run_lifespan_order(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    http: FakeFxHttp,
+) -> tuple[list[str], object]:
+    service = _service()
+    schedule = _schedule(service, http, when=SUNDAY, enabled=False)
+    calls = _spy_revaluation(schedule)
+    events: list[str] = []
+    fx_ready = {"attempt_complete": False, "workers_started": False}
+    original_start = schedule.start
+    original_stop = schedule.stop
+
+    async def _start() -> None:
+        events.append("fx_start_entered")
+        assert fx_ready["workers_started"] is False
+        await original_start()
+        fx_ready["attempt_complete"] = True
+        events.append("fx_start_returned")
+
+    async def _stop() -> None:
+        events.append("fx_stop")
+        await original_stop()
+
+    schedule.start = _start  # type: ignore[method-assign]
+    schedule.stop = _stop  # type: ignore[method-assign]
+    coordinator = _OrderCoordinator(events, fx_ready)
+    monkeypatch.setenv("SPORTS_HEDGE_MODE", "real")
+    monkeypatch.setenv("SPORTS_HEDGE_EXECUTION_ENABLED", "false")
+    monkeypatch.setenv("ACCOUNTING_SCHEDULE_ENABLED", "false")
+    get_settings.cache_clear()
+    _patch_lifespan_edges(monkeypatch, coordinator, schedule)
+    try:
+        async with main_api.lifespan(main_api.app):
+            assert events == ["fx_start_entered", "fx_start_returned", "workers_start"]
+            assert fx_ready["workers_started"] is True
+            assert calls == []
+            assert schedule.enabled is False
+            assert get_settings().sports_hedge_execution_enabled is False
+            assert get_settings().accounting_schedule_enabled is False
+            assert get_settings().sports_hedge_mode == "real"
+        assert events[-2:] == ["workers_stop", "fx_stop"]
+    finally:
+        get_settings.cache_clear()
+    return events, service
+
+
+@pytest.mark.asyncio
+async def test_pricing_workers_start_only_after_scanner_fx_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http = FakeFxHttp(ecb_xml=FRIDAY_ECB_XML)
+    events, service = await _run_lifespan_order(monkeypatch, http=http)
+    assert http.ecb_gets == 1
+    snapshot = service.resolve_for_scanner("USD", as_of=SUNDAY)
+    assert snapshot.source == "ecb_eurofxref"
+    assert snapshot.source_date == FRIDAY
+    assert events.index("fx_start_returned") < events.index("workers_start")
+    assert events.index("workers_stop") < events.index("fx_stop")
+    assert Settings().sports_hedge_execution_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_failed_fx_bootstrap_still_gates_workers_until_the_attempt_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http = FakeFxHttp(ecb_xml=FRIDAY_ECB_XML, fail=True)
+    events, service = await _run_lifespan_order(monkeypatch, http=http)
+    assert http.timeouts
+    assert http.ecb_gets == 0
+    with pytest.raises(FxRateUnavailable, match="missing_fx_rate:USD"):
+        service.resolve_for_scanner("USD", as_of=SUNDAY)
+    assert events.index("fx_start_returned") < events.index("workers_start")
+    assert events.index("workers_stop") < events.index("fx_stop")
     assert Settings().sports_hedge_execution_enabled is False
 
 
