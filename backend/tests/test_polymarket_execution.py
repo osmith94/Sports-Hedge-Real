@@ -126,6 +126,29 @@ def _request(
     side: MarketSide = MarketSide.BACK,
     currency: str = "USD",
 ) -> VenueOrderRequest:
+    frozen: dict[str, object] = {"price2_snapshot_id": "exec:pm:1"}
+    if side is MarketSide.BACK:
+        try:
+            native = polymarket_native_order(
+                native_runner_id=runner,
+                native_market_id="condition-1",
+                side=side,
+                decimal_odds=Decimal(odds),
+                requested_stake=Decimal(stake),
+                tick_size="0.01",
+                minimum_shares=Decimal("1"),
+            )
+        except ValueError:
+            native = None
+        if native is not None:
+            frozen.update(
+                frozen_order_type=native.order_type,
+                frozen_limit_price=native.price,
+                frozen_amount=native.amount,
+                frozen_shares=native.shares,
+                frozen_tick_size=native.tick_size,
+                frozen_minimum_size=Decimal("1"),
+            )
     return VenueOrderRequest(
         venue=VenueName.POLYMARKET,
         trade_id="trade-1",
@@ -138,6 +161,7 @@ def _request(
         requested_price=Decimal(odds),
         requested_size=Decimal(stake),
         client_order_id="sh-" + "ab" * 16,
+        **frozen,
     )
 
 
@@ -145,19 +169,12 @@ def _transport(
     broker: _Broker | None = None,
     *,
     execution: bool = True,
-    eligibility: dict | None = None,
 ) -> tuple[PolymarketHttpExecutionTransport, _Broker]:
     used = broker or _Broker()
-    body = eligibility or {"blocked": False, "country": "AR", "region": "C"}
-
-    async def _geo():
-        return parse_geoblock(body)
-
     return (
         PolymarketHttpExecutionTransport(
             _settings(execution=execution),
             broker=used,
-            geoblock=_geo,
             clock=lambda: NOW,
         ),
         used,
@@ -511,27 +528,30 @@ async def test_resting_remainder_is_cancelled_without_upgrading_the_fill() -> No
     assert result.status is VenueOrderStatus.PARTIAL
 
 
-async def test_geoblock_blocks_and_failures_submit_nothing() -> None:
-    blocked, blocked_broker = _transport(eligibility={"blocked": True, "country": "GB", "region": ""})
-    blocked_result = await blocked.dispatch(_request())
-    assert blocked_result.filled_size == 0
-    assert blocked_result.note == "geoblock_blocked"
-    assert blocked_result.eligibility is not None
-    assert "ip" not in blocked_result.eligibility
-    assert blocked_broker.posts == 0
+async def test_dispatch_does_not_consult_geoblock(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("execution called geoblock")
 
-    unavailable, unavailable_broker = _transport(eligibility={"country": "GB"})
-    unavailable_result = await unavailable.dispatch(_request())
-    assert unavailable_result.filled_size == 0
-    assert unavailable_result.note == "geoblock_ambiguous"
-    assert unavailable_broker.posts == 0
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_geoblock.fetch_geoblock",
+        refuse,
+    )
+    transport, broker = _transport()
 
-    allowed, allowed_broker = _transport(eligibility=_permitted())
-    allowed_result = await allowed.dispatch(_request())
-    assert allowed_result.status is VenueOrderStatus.FILLED
-    assert allowed_broker.posts == 1
-    assert allowed_result.eligibility is not None
-    assert allowed_result.eligibility["country"] == "AR"
+    def refuse_constraints(_token_id: str) -> None:
+        raise AssertionError("execution read the order book")
+
+    def refuse_readiness(_spend: Decimal) -> None:
+        raise AssertionError("execution read balance or allowance")
+
+    broker.constraints = refuse_constraints  # type: ignore[method-assign]
+    broker.readiness = refuse_readiness  # type: ignore[method-assign]
+    result = await transport.dispatch(_request())
+    assert result.status is VenueOrderStatus.FILLED
+    assert result.eligibility is None
+    assert broker.posts == 1
+    assert broker.constraints_calls == 0
+    assert broker.readiness_calls == 0
 
 
 async def test_geoblock_http_failure_is_closed() -> None:
@@ -1123,31 +1143,20 @@ async def test_preflight_names_a_missing_exchange_v3_allowance(
     assert client.refused == []
 
 
-async def test_dispatch_readiness_uses_translated_native_stake() -> None:
+async def test_dispatch_posts_the_frozen_stake_without_a_balance_read() -> None:
     broker = _Broker()
 
     def _readiness(spend: Decimal) -> str:
-        broker.readiness_calls += 1
-        broker.readiness_spend = spend
-        return "POLYMARKET_NOT_READY: stop"
+        raise AssertionError(f"execution read readiness for {spend}")
 
     broker.readiness = _readiness  # type: ignore[method-assign]
     transport, _used = _transport(broker)
-    result = await transport.dispatch(_request(stake="2.509", odds="2"))
-    native = polymarket_native_order(
-        native_runner_id=TOKEN,
-        native_market_id="condition-1",
-        side=MarketSide.BACK,
-        decimal_odds=Decimal("2"),
-        requested_stake=Decimal("2.509"),
-        tick_size="0.01",
-        minimum_shares=Decimal("5"),
-    )
-    assert native.stake == Decimal("2.50")
-    assert broker.readiness_calls == 1
-    assert broker.readiness_spend == native.stake
-    assert broker.posts == 0
-    assert result.note == "POLYMARKET_NOT_READY: stop"
+    request = _request(stake="2.509", odds="2")
+    result = await transport.dispatch(request)
+    assert request.frozen_amount == Decimal("2.50")
+    assert broker.readiness_calls == 0
+    assert broker.posts == 1
+    assert result.status is VenueOrderStatus.FILLED
 
 
 async def test_preflight_is_read_only() -> None:
@@ -1198,6 +1207,50 @@ def _polymarket_leg() -> PaperOpportunityLeg:
     )
 
 
+def _frozen_snapshot(*legs: PaperOpportunityLeg) -> str:
+    orders: list[dict[str, object]] = []
+    for leg in legs:
+        if leg.venue is VenueName.POLYMARKET:
+            native = polymarket_native_order(
+                native_runner_id=leg.source_runner_id,
+                native_market_id=leg.source_market_id,
+                side=MarketSide.BACK,
+                decimal_odds=leg.displayed_odds,
+                requested_stake=leg.requested_stake,
+                tick_size="0.01",
+                minimum_shares=Decimal("1"),
+            )
+            orders.append(
+                {
+                    "venue": "polymarket",
+                    "native_runner_id": native.token_id,
+                    "order_type": native.order_type,
+                    "limit_price": format(native.price, "f"),
+                    "native_amount": format(native.amount, "f"),
+                    "native_shares": format(native.shares, "f"),
+                    "tick_size": native.tick_size,
+                    "minimum_order_size": "1",
+                }
+            )
+        elif leg.venue is VenueName.MATCHBOOK:
+            orders.append(
+                {
+                    "venue": "matchbook",
+                    "native_runner_id": leg.source_runner_id,
+                    "ladder_odds": format(
+                        matchbook_limit_odds(leg.displayed_odds, side=MarketSide.BACK),
+                        "f",
+                    ),
+                    "native_stake": format(matchbook_stake(leg.requested_stake), "f"),
+                    "native_side": "back",
+                }
+            )
+    return json.dumps(
+        {"snapshot_id": "exec:pm:1", "accepted": True, "frozen_orders": orders},
+        separators=(",", ":"),
+    )
+
+
 def _plan(*legs: PaperOpportunityLeg) -> PaperFillPlan:
     return PaperFillPlan(
         opportunity_id="watch:mkt",
@@ -1217,7 +1270,7 @@ def _plan(*legs: PaperOpportunityLeg) -> PaperFillPlan:
             scanned_at=NOW,
         ),
         execution_authoritative=True,
-        execution_snapshot_json=json.dumps({"snapshot_id": "exec:pm:1", "accepted": True}),
+        execution_snapshot_json=_frozen_snapshot(*legs),
         provenance="live_paper",
     )
 

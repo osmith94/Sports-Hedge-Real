@@ -63,6 +63,24 @@ def _leg(
 
 
 def _plan(*legs: PaperOpportunityLeg, accepted: bool = True, authoritative: bool = True) -> PaperFillPlan:
+    frozen_orders = [
+        {
+            "venue": "matchbook",
+            "native_event_id": leg.source_event_id,
+            "native_market_id": leg.source_market_id,
+            "native_runner_id": leg.source_runner_id,
+            "native_side": "back",
+            "ladder_odds": str(leg.displayed_odds),
+            "native_stake": str(leg.requested_stake),
+        }
+        for leg in legs
+        if leg.venue is VenueName.MATCHBOOK
+    ]
+    snapshot = {
+        "snapshot_id": "exec:test:1",
+        "accepted": accepted,
+        "frozen_orders": frozen_orders,
+    }
     return PaperFillPlan(
         opportunity_id="opp-live-1",
         canonical_event_id="evt-1",
@@ -76,11 +94,7 @@ def _plan(*legs: PaperOpportunityLeg, accepted: bool = True, authoritative: bool
             solver_model="simple_complete_set",
         ),
         execution_authoritative=authoritative,
-        execution_snapshot_json=(
-            '{"snapshot_id":"exec:test:1","accepted":true}'
-            if accepted
-            else '{"snapshot_id":"exec:test:1","accepted":false}'
-        ),
+        execution_snapshot_json=json.dumps(snapshot),
     )
 
 

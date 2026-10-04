@@ -91,6 +91,19 @@ def _plan(*legs: PaperOpportunityLeg, accepted: bool = True) -> PaperFillPlan:
         "snapshot_id": "exec:wave3:1",
         "accepted": accepted,
         "password": SECRET,
+        "frozen_orders": [
+            {
+                "venue": "matchbook",
+                "native_event_id": leg.source_event_id,
+                "native_market_id": leg.source_market_id,
+                "native_runner_id": leg.source_runner_id,
+                "native_side": "back",
+                "ladder_odds": str(leg.displayed_odds),
+                "native_stake": str(leg.requested_stake),
+            }
+            for leg in legs
+            if leg.venue is VenueName.MATCHBOOK
+        ],
     }
     return PaperFillPlan(
         opportunity_id=f"watch:{MARKET}",
