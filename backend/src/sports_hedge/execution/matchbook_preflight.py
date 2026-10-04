@@ -161,7 +161,7 @@ def format_matchbook_preflight(report: dict[str, Any]) -> str:
         f"  ready: {_yes_no(bool(report['transport_ready']))}",
         "",
         "LIVE ORDER SUBMISSION:",
-        "  DISABLED",
+        "  ENABLED" if report["execution_enabled"] else "  DISABLED",
     ]
     return "\n".join(lines)
 

@@ -117,8 +117,10 @@ async def _run(settings: Settings, handler) -> tuple[dict[str, object], str, lis
     _assert_read_only(seen)
     _assert_secrets_absent(text)
     _assert_secrets_absent(json.dumps(report))
-    assert text.endswith("LIVE ORDER SUBMISSION:\n  DISABLED")
-    assert "Execution enabled: false" in text or settings.sports_hedge_execution_enabled is True
+    submission = "ENABLED" if report["execution_enabled"] else "DISABLED"
+    assert text.endswith(f"LIVE ORDER SUBMISSION:\n  {submission}")
+    enabled = "true" if report["execution_enabled"] else "false"
+    assert f"Execution enabled: {enabled}" in text
     return report, text, seen
 
 
@@ -195,8 +197,11 @@ async def test_execution_enabled_still_does_not_submit_an_offer() -> None:
     assert report["execution_enabled"] is True
     assert report["transport_ready"] is True
     assert "Execution enabled: true" in text
-    assert "LIVE ORDER SUBMISSION:\n  DISABLED" in text
-    assert [request.method for request in seen] == ["POST", "GET"]
+    assert "LIVE ORDER SUBMISSION:\n  ENABLED" in text
+    assert [(request.method, request.url.path) for request in seen] == [
+        ("POST", "/bpapi/rest/security/session"),
+        ("GET", "/edge/rest/account/balance"),
+    ]
 
 
 @pytest.mark.asyncio
