@@ -179,6 +179,8 @@ if (-not (Test-Path $NodeModules)) {
 # Real dry-run environment. Execution stays off. Scanner loop stays on.
 # Do not inject trading, wallet, or execution secrets. Do not enable autofill,
 # auto-unwind, settlement, or the accounting schedule.
+# ACCOUNTING_SCHEDULE_ENABLED=false keeps GL revaluation off. Scanner ECB
+# USD→GBP bootstrap does not depend on that flag.
 $env:SPORTS_HEDGE_MODE = "real"
 $env:SPORTS_HEDGE_EXECUTION_ENABLED = "false"
 $env:PAPER_LIVE_REFRESH_ENABLED = "true"

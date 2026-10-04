@@ -53,6 +53,8 @@ async def lifespan(_app: FastAPI):
             recover_orphaned_live_executions_at_startup()
             schedule = get_accounting_schedule()
             await coordinator.start_server_loop(server_owned_refresh_tick)
+            # start() always bootstraps scanner ECB FX. Journal revaluation
+            # runs only when accounting_schedule_enabled is true.
             await schedule.start()
             try:
                 yield
