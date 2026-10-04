@@ -140,7 +140,7 @@ def test_real_and_demo_pid_and_log_namespaces_are_separate() -> None:
 def test_real_startup_wording_and_process_shape() -> None:
     script = _read(REAL_START)
     assert "REAL MODE" in script
-    assert "LIVE MARKET SCANNING ENABLED" in script
+    assert "REAL SCANNER LOOP ENABLED" in script
     assert "LIVE ORDER EXECUTION DISABLED" in script
     assert "Sports Hedge paper demo is running." not in script
     assert "PAPER MODE." not in script
