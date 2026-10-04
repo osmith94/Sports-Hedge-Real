@@ -31,6 +31,7 @@ The original Phase 1 product was read-only and paper-only, with no order placeme
 - Do not add a venue write call to make a demo button work.
 - Do not treat a registered relationship as an order.
 - Do not bypass native IDs, settlement contradictions, or economic evidence.
+- Polymarket BUY readiness, tracked separately from this cleanup, asks only whether the exact BUY can execute: sufficient collateral and sufficient allowance for the actual required exchange_v3 spender. A generic platform-wide `is_fully_approved` flag must not veto that BUY because unrelated perps or auto-redeem permissions are missing. See `docs/POLYMARKET_BUY_READINESS.md`.
 - UI must distinguish simulated paper fills from live execution.
 - No VPN/proxy/geolocation bypass or access-control circumvention.
 

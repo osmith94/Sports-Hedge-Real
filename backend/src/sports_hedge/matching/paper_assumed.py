@@ -1,9 +1,13 @@
 """LEGACY import path for registered settlement-assumption helpers.
 
 New code should import ``sports_hedge.matching.assumed_settlement``.
-This module remains so existing tests and callers keep resolving.
+``PAPER_NONBLOCKING_REJECTION_REASONS`` is the persisted-read label set from
+``catalogue.legacy_paper_labels``. Live decisions do not filter on it.
 """
 
+from sports_hedge.matching.legacy_rejection_labels import (
+    PAPER_NONBLOCKING_REJECTION_REASONS,
+)
 from sports_hedge.matching.assumed_settlement import (
     BTTS_OUTCOMES,
     FAIR_PRICE_PAPER_ADMITTED_REASON,
@@ -13,7 +17,6 @@ from sports_hedge.matching.assumed_settlement import (
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
     PAPER_ASSUMED_AUDIT_REASONS,
     PAPER_ASSUMED_REASON,
-    PAPER_NONBLOCKING_REJECTION_REASONS,
     REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
     TOTAL_OUTCOMES,
     allow_unknown_settlement_for_paper_assumed,

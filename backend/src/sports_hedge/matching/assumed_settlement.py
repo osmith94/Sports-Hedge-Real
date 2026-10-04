@@ -71,8 +71,8 @@ PAPER_ASSUMED_AUDIT_REASONS = (
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
     REGISTER_ADMITTED_REASON,
 )
-# Historical audit tokens. Readers still ignore them. New matches must not emit
-# the ``*_not_live_execution*`` strings; see catalogue.legacy_paper_labels.
+# Historical audit tokens. New matches must not emit the
+# ``*_not_live_execution*`` strings. See catalogue.legacy_paper_labels.
 LEGACY_NOT_LIVE_EXECUTION_REASONS = frozenset(
     {
         "paper_assumed_not_live_execution_eligible",
@@ -84,20 +84,6 @@ LEGACY_NOT_LIVE_EXECUTION_REASONS = frozenset(
     }
 )
 REGISTERED_EQUIVALENT_SETTLEMENT_NOTE = "registered_equivalent_settlement_not_independently_proven"
-PAPER_NONBLOCKING_REJECTION_REASONS = frozenset(
-    {
-        PAPER_ASSUMED_REASON,
-        "paper_assumed_equivalent_not_settlement_proven",
-        REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
-        "mlb_settlement_equivalence_not_proven",
-        "owner_approved_nfl_paper_normal_completion",
-        "owner_approved_nba_paper_normal_completion",
-        "exceptional_settlement_mismatch_possible",
-        "settlement_assumption=normal_full_game_completion",
-        "settlement_assumption=regulation_time",
-        *LEGACY_NOT_LIVE_EXECUTION_REASONS,
-    }
-)
 
 _PROVEN_CONTRADICTION_TOKENS = (
     "extra time",

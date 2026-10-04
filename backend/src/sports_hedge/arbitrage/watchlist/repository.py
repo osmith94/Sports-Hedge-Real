@@ -929,7 +929,7 @@ def _opportunity_from_row(row: sqlite3.Row) -> NearOpportunity:
         expected_lock_minutes=_decimal(row["expected_lock_minutes"]),
         first_seen_at=datetime.fromisoformat(row["first_seen_at"]),
         last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
-        rejection_reasons=list(json.loads(row["rejection_reasons_json"])),
+        rejection_reasons=_persisted_rejections(row["rejection_reasons_json"]),
         insufficiency_reasons=list(json.loads(row["insufficiency_reasons_json"])),
         fixture_discovery_source=_venue(_row_get(row, "fixture_discovery_source")),
         fixture_status=_row_get(row, "fixture_status"),
@@ -1116,6 +1116,14 @@ def _json_list(value: str | None) -> list[str]:
     if not isinstance(parsed, list):
         return []
     return [str(item) for item in parsed]
+
+
+def _persisted_rejections(value: str | None) -> list[str]:
+    """Legacy read boundary for historical diagnostic labels stored as rejections."""
+
+    from sports_hedge.catalogue.legacy_paper_labels import persisted_rejection_reasons
+
+    return persisted_rejection_reasons(_json_list(value))
 
 
 def _mapping_provenance(value: str | None):

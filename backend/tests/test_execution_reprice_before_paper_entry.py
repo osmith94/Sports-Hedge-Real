@@ -94,8 +94,11 @@ def test_only_known_stale_quote_may_request_execution_reprice() -> None:
     fresh = _decision(eligible_for_paper_simulation=True, rejection_reasons=[])
     assert execution_reprice_permitted(fresh) is True
 
+    # A diagnostic settlement label is a real rejection if a caller still
+    # places it on a live decision. New scans do not emit it, so they do not
+    # need a non-blocking exception list.
     assumed = _decision(rejection_reasons=["stale_quote", "paper_assumed_equivalent"])
-    assert execution_reprice_permitted(assumed) is True
+    assert execution_reprice_permitted(assumed) is False
 
     blocked = {
         "missing_costs": ["stale_quote", "missing_venue_cost:kalshi"],

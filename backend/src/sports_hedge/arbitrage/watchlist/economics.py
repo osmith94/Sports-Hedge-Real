@@ -15,7 +15,6 @@ from sports_hedge.arbitrage.watchlist.models import (
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
-from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 
 EDGE_QUANT = Decimal("0.00000001")
 PP_QUANT = Decimal("0.0001")
@@ -337,16 +336,13 @@ def classify_status(
     if "execution_risk_above_threshold" in reasons:
         return OpportunityStatus.REJECTED, _dedupe(reasons)
 
-    # Paper-admission audit labels (paper_assumed_equivalent, etc.) do not
-    # block LIVE_PAPER capture. They must not leftover-REJECT a scan-eligible
-    # Matchbook/Kalshi decision before persist_triggered_chain runs.
     # Quote age is recorded on the observation and gated at paper entry; it
-    # must not overwrite economic/radar status.
+    # must not overwrite economic/radar status. Settlement-assumption labels
+    # are not rejection reasons on a newly evaluated pair.
     leftover = [
         reason
         for reason in reasons
         if reason not in NEAR_ELIGIBLE_REASONS
-        and reason not in PAPER_NONBLOCKING_REJECTION_REASONS
         and reason not in FRESHNESS_NONBLOCKING_REASONS
     ]
     if leftover:

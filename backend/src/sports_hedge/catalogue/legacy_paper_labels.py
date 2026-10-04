@@ -16,6 +16,11 @@ New runtime audit text must not emit ``*_not_live_execution*`` reasons.
 
 from __future__ import annotations
 
+from sports_hedge.matching.legacy_rejection_labels import (
+    LEGACY_DIAGNOSTIC_REJECTION_LABELS as LEGACY_DIAGNOSTIC_REJECTION_LABELS,
+    persisted_rejection_reasons as persisted_rejection_reasons,
+)
+
 LEGACY_STORED_REGISTERED_EQUIVALENT = "paper_assumed_equivalent"
 SEMANTIC_REGISTERED_EQUIVALENT = "registered_equivalent"
 
@@ -49,9 +54,27 @@ def semantic_admission_label(stored: str) -> str:
     return text
 
 
+# Historical strings that older scans stored inside rejection_reasons.
+# The set and the read helper live in matching.legacy_rejection_labels so
+# this catalogue module is not imported while matching is still loading.
+# Both names are re-exported above.
+
+
 def legacy_label_blocks_real_execution(value: str) -> bool:
     """Historical paper wording never independently vetoes Real catalogue eligibility."""
 
     if not is_legacy_paper_execution_label(value):
         raise ValueError(f"not a legacy paper admission label: {value}")
     return False
+
+
+__all__ = [
+    "LEGACY_DIAGNOSTIC_REJECTION_LABELS",
+    "LEGACY_NOT_LIVE_EXECUTION_LABELS",
+    "LEGACY_STORED_REGISTERED_EQUIVALENT",
+    "SEMANTIC_REGISTERED_EQUIVALENT",
+    "is_legacy_paper_execution_label",
+    "legacy_label_blocks_real_execution",
+    "persisted_rejection_reasons",
+    "semantic_admission_label",
+]
