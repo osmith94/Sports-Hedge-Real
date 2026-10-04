@@ -106,7 +106,12 @@ def recovery_context(plan: PaperFillPlan, trade_id: str) -> str:
     for leg in plan.legs:
         if leg.requested_stake <= 0:
             continue
-        request = _request_for_leg(leg, trade_id=trade_id, tranche_id=OPENING_TRANCHE_ID)
+        request = _request_for_leg(
+            leg,
+            trade_id=trade_id,
+            tranche_id=OPENING_TRANCHE_ID,
+            snapshot_json=plan.execution_snapshot_json,
+        )
         if request is None:
             continue
         mode = plan.execution_modes.get(leg.venue, LegExecutionMode.INTERNAL)
@@ -168,7 +173,12 @@ def refusal_reason(
     if not legs:
         return "no_legs"
     requests = [
-        _request_for_leg(leg, trade_id="pending", tranche_id="pending")
+        _request_for_leg(
+            leg,
+            trade_id="pending",
+            tranche_id="pending",
+            snapshot_json=plan.execution_snapshot_json,
+        )
         for leg in legs
     ]
     if any(request is None for request in requests):
@@ -211,7 +221,13 @@ async def run_live_opening(
     requests = [
         request
         for request in (
-            _request_for_leg(leg, trade_id=trade_id, tranche_id=tranche_id) for leg in legs
+            _request_for_leg(
+                leg,
+                trade_id=trade_id,
+                tranche_id=tranche_id,
+                snapshot_json=plan.execution_snapshot_json,
+            )
+            for leg in legs
         )
         if request is not None
     ]

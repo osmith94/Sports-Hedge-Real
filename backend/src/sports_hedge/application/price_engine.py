@@ -419,9 +419,16 @@ class CataloguePriceEngine:
         on_item_decision: Callable[[PaperScanDecision, PriceEngineRuntimeItem], Any] | None = None,
         on_hot_promotion: Callable[[HotPromotionFact], Any] | None = None,
         observability: ScannerObservabilitySink | None = None,
+        venue_capital_authority: Any = None,
     ) -> None:
         resolved = settings or get_settings()
+        self.settings = resolved
         self.catalogue_store = catalogue_store
+        self.venue_capital = venue_capital_authority
+        if self.venue_capital is None and resolved.sports_hedge_mode == "real":
+            from sports_hedge.application.venue_capital import LiveVenueCapitalAuthority
+
+            self.venue_capital = LiveVenueCapitalAuthority(resolved)
         self.matchbook = matchbook
         self.kalshi = kalshi
         self.polymarket = polymarket
@@ -2205,15 +2212,34 @@ class CataloguePriceEngine:
         venues: tuple[VenueName, ...],
     ) -> Any:
         from sports_hedge.application.execution_reprice import (
+            PHASE_FRESH_BOOKS,
+            PHASE_NATIVE_IDS_BOUND,
+            PHASE_PRICE2_START,
             PHASE_REPRICE_STARTED,
             log_execution_phase,
         )
 
         identity = runtime.identity
         log_execution_phase(
+            PHASE_PRICE2_START,
+            catalogue_row_id=identity.catalogue_row_id,
+            venues=",".join(venue.value for venue in venues),
+        )
+        log_execution_phase(
             PHASE_REPRICE_STARTED,
             catalogue_row_id=identity.catalogue_row_id,
             venues=",".join(venue.value for venue in venues),
+        )
+        log_execution_phase(
+            PHASE_NATIVE_IDS_BOUND,
+            catalogue_row_id=identity.catalogue_row_id,
+            matchbook_event_id=identity.matchbook_event_id,
+            matchbook_market_id=identity.matchbook_market_id,
+            polymarket_event_id=identity.polymarket_event_id,
+            polymarket_market_id=identity.polymarket_market_id,
+            polymarket_tokens=",".join(
+                str(item.native_id) for item in identity.polymarket_token_ids
+            ),
         )
         # Execution-candidate rank only. This does not enqueue a HOT scan or change cadence.
         started_at = self.now()
@@ -2233,7 +2259,7 @@ class CataloguePriceEngine:
             assembly_ms = max(0, int((monotonic() - started_mono) * 1000))
         finally:
             _EXECUTION_REPRICE_CALLS.reset(timing_token)
-        return self._finish_execution_reprice(
+        result = self._finish_execution_reprice(
             identity,
             venues,
             bookset=bookset,
@@ -2241,6 +2267,21 @@ class CataloguePriceEngine:
             assembly_ms=assembly_ms,
             calls=calls,
         )
+        book_count = int(bookset.matchbook is not None) + len(bookset.kalshi_books) + len(
+            bookset.polymarket_books
+        )
+        log_execution_phase(
+            PHASE_FRESH_BOOKS,
+            catalogue_row_id=identity.catalogue_row_id,
+            books=book_count,
+            complete=str(bookset.complete).lower(),
+        )
+        self._attach_frozen_orders(result, bookset)
+        if result.pending_real_authority:
+            await self._prove_real_authority(result, venues)
+        elif result.snapshot is not None and result.snapshot.accepted:
+            self._log_accepted_package(result)
+        return result
 
     def _finish_execution_reprice(
         self,
@@ -2334,12 +2375,16 @@ class CataloguePriceEngine:
             diagnostics=traced,
         )
         returned: PaperScanDecision | None = None
+        pending_real = False
         if reason is None and snapshot.skew_exceeded():
             reason = EXECUTION_REPRICE_SKEW
         elif reason is None and decision is not None:
             block = execution_entry_block(decision)
             if block is not None:
                 reason = block
+                returned = decision
+            elif self._real_execution_mode():
+                pending_real = True
                 returned = decision
             else:
                 snapshot.accepted = True
@@ -2355,6 +2400,7 @@ class CataloguePriceEngine:
             refreshed_venues=tuple(ordered),
             diagnostics=traced,
             snapshot=snapshot,
+            pending_real_authority=pending_real,
         )
 
     def _execution_snapshot(
@@ -2461,6 +2507,130 @@ class CataloguePriceEngine:
             timing=timing,
             **provenance,
         )
+
+    def _real_execution_mode(self) -> bool:
+        if getattr(self.settings, "sports_hedge_mode", "paper") == "real":
+            return True
+        scan_settings = getattr(self.paper_scan, "settings", None)
+        return getattr(scan_settings, "sports_hedge_mode", "paper") == "real"
+
+    def _attach_frozen_orders(self, result: Any, bookset: _ExecutionBookSet) -> None:
+        if result.snapshot is None or result.decision is None:
+            return
+        from sports_hedge.execution.frozen import freeze_native_orders
+
+        result.snapshot.frozen_orders = freeze_native_orders(
+            result.decision,
+            polymarket_books=bookset.polymarket_books,
+        )
+
+    def _log_accepted_package(self, result: Any) -> None:
+        from sports_hedge.application.execution_reprice import (
+            PHASE_FEES_FX,
+            PHASE_PACKAGE_FROZEN,
+            PHASE_PRICE2_ACCEPT,
+            PHASE_SOLVER_COMPLETE,
+            log_execution_phase,
+        )
+
+        snapshot = result.snapshot
+        if snapshot is None:
+            return
+        log_execution_phase(
+            PHASE_FEES_FX,
+            snapshot_id=snapshot.snapshot_id,
+            venue_costs=len(snapshot.venue_costs),
+            fx_rates=len(snapshot.fx_rates),
+        )
+        log_execution_phase(
+            PHASE_SOLVER_COMPLETE,
+            snapshot_id=snapshot.snapshot_id,
+            net_edge=snapshot.net_edge,
+            guaranteed_profit=snapshot.guaranteed_profit,
+        )
+        log_execution_phase(
+            PHASE_PRICE2_ACCEPT,
+            snapshot_id=snapshot.snapshot_id,
+            accepted="true",
+        )
+        log_execution_phase(
+            PHASE_PACKAGE_FROZEN,
+            snapshot_id=snapshot.snapshot_id,
+            frozen_orders=len(snapshot.frozen_orders),
+        )
+
+    async def _prove_real_authority(self, result: Any, venues: tuple[VenueName, ...]) -> None:
+        """Read live capital once, then accept or reject. No order is sent."""
+
+        from time import monotonic
+
+        from sports_hedge.application.execution_reprice import (
+            PHASE_VENUE_CAPITAL,
+            ExecutionProviderCall,
+            log_execution_phase,
+        )
+        from sports_hedge.application.venue_capital import judge_real_package
+
+        snapshot = result.snapshot
+        decision = result.decision
+        if snapshot is None or decision is None:
+            return
+        started = monotonic()
+        evidence: tuple[Any, ...] = ()
+        outcome = "unproven"
+        try:
+            reader = getattr(self.venue_capital, "read", None)
+            if callable(reader):
+                evidence = tuple(await reader(venues))
+                outcome = "read"
+            else:
+                outcome = "missing_authority"
+        except Exception:  # noqa: BLE001 — an unread account cannot authorise a real package
+            evidence = ()
+            outcome = "unread"
+        elapsed = max(0, int((monotonic() - started) * 1000))
+        if result.diagnostics is not None:
+            result.diagnostics.calls = result.diagnostics.calls + (
+                ExecutionProviderCall(
+                    venue="account",
+                    stage="venue_capital",
+                    source_id="price-2",
+                    outcome=outcome,
+                    slot_wait_ms=0,
+                    io_ms=elapsed,
+                ),
+            )
+        block, bound = judge_real_package(
+            mode="real",
+            legs=decision.fill_legs,
+            frozen_orders=snapshot.frozen_orders,
+            readiness=evidence,
+        )
+        snapshot.venue_readiness = bound
+        proven = [item.venue for item in bound if item.proven]
+        log_execution_phase(
+            PHASE_VENUE_CAPITAL,
+            snapshot_id=snapshot.snapshot_id,
+            proven=",".join(proven) if proven else "none",
+            io_ms=elapsed,
+            outcome=outcome,
+        )
+        if block is not None:
+            snapshot.accepted = False
+            snapshot.rejection_reason = block
+            result.reason = block
+            result.pending_real_authority = False
+            log_execution_phase(
+                "PRICE2_REJECT",
+                snapshot_id=snapshot.snapshot_id,
+                reason=block,
+            )
+            return
+        snapshot.accepted = True
+        snapshot.rejection_reason = None
+        result.reason = None
+        result.pending_real_authority = False
+        self._log_accepted_package(result)
 
     def _execution_scheduler_work(
         self,

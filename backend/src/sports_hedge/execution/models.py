@@ -45,6 +45,15 @@ class VenueOrderRequest(BaseModel):
     requested_price: Decimal = Field(gt=0)
     requested_size: Decimal = Field(gt=0)
     client_order_id: str
+    # Native order frozen by Price-2. Dispatch submits these values and does
+    # not re-read books, balances, fees, or FX to rebuild them.
+    price2_snapshot_id: str | None = None
+    frozen_order_type: str | None = None
+    frozen_limit_price: Decimal | None = None
+    frozen_amount: Decimal | None = None
+    frozen_shares: Decimal | None = None
+    frozen_tick_size: str | None = None
+    frozen_minimum_size: Decimal | None = None
 
 
 class VenueOrderResult(BaseModel):

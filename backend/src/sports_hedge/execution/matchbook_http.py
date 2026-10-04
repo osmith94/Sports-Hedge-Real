@@ -37,7 +37,7 @@ import httpx
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import MarketSide, VenueName
 from sports_hedge.execution.models import VenueOrderRequest, VenueOrderResult, VenueOrderStatus
-from sports_hedge.execution.package import execution_armed
+from sports_hedge.execution.package import execution_armed, log_execution_dispatch
 from sports_hedge.execution.translate import TranslationError, matchbook_limit_odds, matchbook_stake
 from sports_hedge.venues.matchbook import (
     MATCHBOOK_SESSION_PATH,
@@ -96,8 +96,14 @@ class MatchbookHttpExecutionTransport:
         if request.client_order_id in self._unknown_submit:
             return _result(request, status=VenueOrderStatus.FAILED, at=now, filled_size=None)
         try:
-            odds = matchbook_limit_odds(request.requested_price, side=request.side)
-            stake = matchbook_stake(request.requested_size)
+            if request.frozen_limit_price is not None and request.frozen_amount is not None:
+                odds = request.frozen_limit_price
+                stake = request.frozen_amount
+                if odds <= 1 or stake <= 0:
+                    raise TranslationError("frozen Matchbook order is not positive")
+            else:
+                odds = matchbook_limit_odds(request.requested_price, side=request.side)
+                stake = matchbook_stake(request.requested_size)
             runner_id = int(request.native_runner_id)
         except (TranslationError, ValueError):
             return _result(request, status=VenueOrderStatus.FAILED, at=now)
@@ -115,6 +121,12 @@ class MatchbookHttpExecutionTransport:
             await self._login()
         except (httpx.HTTPError, MatchbookAuthError):
             return _result(request, status=VenueOrderStatus.FAILED, at=self._clock())
+        log_execution_dispatch(
+            "NO_PRE_SUBMIT_ECONOMIC_REFRESH",
+            venue=VenueName.MATCHBOOK.value,
+            snapshot_id=request.price2_snapshot_id,
+            runner_id=runner_id,
+        )
         self._unknown_submit.add(request.client_order_id)
         try:
             response = await self._client.post(
@@ -148,6 +160,14 @@ class MatchbookHttpExecutionTransport:
                 at=self._clock(),
                 filled_size=Decimal(0),
             )
+        log_execution_dispatch(
+            "ORDERS_SUBMITTED",
+            venue=VenueName.MATCHBOOK.value,
+            snapshot_id=request.price2_snapshot_id,
+            runner_id=runner_id,
+            odds=format(odds, "f"),
+            stake=format(stake, "f"),
+        )
         offer = _first_offer(response)
         offer_id = None if offer is None else offer.get("id")
         if offer is None or offer_id is None:

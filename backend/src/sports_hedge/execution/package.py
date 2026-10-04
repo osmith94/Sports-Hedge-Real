@@ -12,7 +12,9 @@ import hashlib
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from logging import getLogger
+from typing import Any
 
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import MarketSide, VenueName
@@ -33,6 +35,18 @@ from sports_hedge.paper.fills import PaperOpportunityLeg
 
 _SUPPORTED = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET})
 LIVE_EXECUTION_TRANSPORT_UNAVAILABLE = "LIVE_EXECUTION_TRANSPORT_UNAVAILABLE"
+LOGGER = getLogger("sports_hedge.execution.dispatch")
+
+
+def log_execution_dispatch(phase: str, **fields: object) -> None:
+    """One dispatch audit line. Economic facts are not recomputed here."""
+
+    parts = [f"phase={phase}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    LOGGER.info(" ".join(parts))
 
 
 def execution_capability(settings: Settings) -> dict[str, bool | str]:
@@ -104,7 +118,12 @@ async def execute_live_package(
     if not _accepted_plan(plan):
         return LiveExecutionPackage(outcome=LivePackageOutcome.FAILED, detail="decision_not_accepted")
     prepared = [
-        _request_for_leg(leg, trade_id=trade_id, tranche_id=tranche_id)
+        _request_for_leg(
+            leg,
+            trade_id=trade_id,
+            tranche_id=tranche_id,
+            snapshot_json=plan.execution_snapshot_json,
+        )
         for leg in plan.legs
         if leg.requested_stake > 0
     ]
@@ -131,10 +150,28 @@ async def execute_live_package(
             return _unsent(leg, trade_id=trade_id, tranche_id=tranche_id, at=now())
 
     legs = [leg for leg in plan.legs if leg.requested_stake > 0]
+    log_execution_dispatch(
+        "DISPATCH_BEGINS",
+        snapshot_id=snapshot_ref_from_json(plan.execution_snapshot_json),
+        legs=len(prepared),
+    )
+    log_execution_dispatch(
+        "NO_PRE_SUBMIT_ECONOMIC_REFRESH",
+        snapshot_id=snapshot_ref_from_json(plan.execution_snapshot_json),
+    )
     orders = list(
         await asyncio.gather(
             *(_one(request, leg) for request, leg in zip(prepared, legs, strict=True))
         )
+    )
+    log_execution_dispatch(
+        "ORDERS_SUBMITTED",
+        snapshot_id=snapshot_ref_from_json(plan.execution_snapshot_json),
+        orders=len(orders),
+    )
+    log_execution_dispatch(
+        "VENUE_RESPONSES_PERSISTED",
+        outcome=_outcome(orders).value,
     )
     return LiveExecutionPackage(outcome=_outcome(orders), orders=orders)
 
@@ -187,17 +224,31 @@ def _accepted_plan(plan: PaperFillPlan) -> bool:
     return isinstance(payload, dict) and payload.get("accepted") is True
 
 
+def snapshot_ref_from_json(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or payload.get("snapshot_id") is None:
+        return None
+    return str(payload["snapshot_id"])
+
+
 def _request_for_leg(
     leg: PaperOpportunityLeg,
     *,
     trade_id: str,
     tranche_id: str,
+    snapshot_json: str | None = None,
 ) -> VenueOrderRequest | None:
     event_id = (leg.source_event_id or "").strip()
     market_id = leg.source_market_id.strip()
     runner_id = leg.source_runner_id.strip()
     if not event_id or not market_id or not runner_id or leg.venue not in _SUPPORTED:
         return None
+    frozen = _frozen_fields(snapshot_json, venue=leg.venue.value, runner_id=runner_id)
     return VenueOrderRequest(
         venue=leg.venue,
         trade_id=trade_id,
@@ -217,7 +268,60 @@ def _request_for_leg(
             market_id=market_id,
             runner_id=runner_id,
         ),
+        **frozen,
     )
+
+
+def _frozen_fields(raw: str | None, *, venue: str, runner_id: str) -> dict[str, Any]:
+    """Copy one frozen native order. Missing JSON leaves the request unfrozen."""
+
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    orders = payload.get("frozen_orders")
+    if not isinstance(orders, list):
+        return {}
+    matched: dict[str, Any] | None = None
+    for item in orders:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("venue") or "") != venue:
+            continue
+        if str(item.get("native_runner_id") or "").strip() != runner_id:
+            continue
+        matched = item
+        break
+    if matched is None:
+        return {"price2_snapshot_id": snapshot_ref_from_json(raw)}
+    try:
+        fields: dict[str, Any] = {"price2_snapshot_id": snapshot_ref_from_json(raw)}
+        if venue == VenueName.POLYMARKET.value:
+            fields.update(
+                {
+                    "frozen_order_type": matched.get("order_type"),
+                    "frozen_limit_price": Decimal(str(matched["limit_price"])),
+                    "frozen_amount": Decimal(str(matched["native_amount"])),
+                    "frozen_shares": Decimal(str(matched["native_shares"])),
+                    "frozen_tick_size": None if matched.get("tick_size") is None else str(matched["tick_size"]),
+                    "frozen_minimum_size": Decimal(str(matched["minimum_order_size"])),
+                }
+            )
+        elif venue == VenueName.MATCHBOOK.value:
+            fields.update(
+                {
+                    "frozen_order_type": matched.get("native_side") or "back",
+                    "frozen_limit_price": Decimal(str(matched["ladder_odds"])),
+                    "frozen_amount": Decimal(str(matched["native_stake"])),
+                }
+            )
+    except (InvalidOperation, KeyError, ValueError):
+        return {"price2_snapshot_id": snapshot_ref_from_json(raw)}
+    return fields
 
 
 def _client_order_id(

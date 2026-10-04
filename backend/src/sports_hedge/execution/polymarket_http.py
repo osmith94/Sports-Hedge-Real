@@ -9,8 +9,10 @@ FAK is the order type. The venue cancels an unfilled remainder. A resting
 ``live`` order is cancelled here and the fill quantity is left unchanged.
 A delayed or timed-out submit is unknown, not zero, and is not posted again.
 
-Price-2 remains the fee model. This module records a fee rate only when a
-trade read returns one. It does not calculate a taker fee.
+Price-2 remains the fee model and the pre-trade authority. This module records
+a fee rate only when a trade read returns one. It does not calculate a taker
+fee, and it does not re-read the order book, collateral, allowance, or
+geoblock before POST. The frozen native order on the request is what is signed.
 
 Fee audit, 2026-10-03, https://docs.polymarket.com/trading/fees :
 the published formula is ``C × feeRate × p × (1 - p)``, applied at match time.
@@ -23,7 +25,7 @@ an exponent. Collateral is pUSD. This transport does not change that model.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -32,24 +34,19 @@ from typing import Any, Protocol
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import MarketSide, VenueName
 from sports_hedge.execution.models import VenueOrderRequest, VenueOrderResult, VenueOrderStatus
-from sports_hedge.execution.package import execution_armed
-from sports_hedge.execution.polymarket_geoblock import (
-    PolymarketEligibility,
-    fetch_geoblock,
-)
+from sports_hedge.execution.package import execution_armed, log_execution_dispatch
 from sports_hedge.execution.polymarket_buy_readiness import (
     PLATFORM_WIDE_APPROVAL_DIAGNOSTIC,
     platform_wide_approval_diagnostic,
     probe_exchange_v3_collateral,
-    v2_buy_readiness,
 )
-from sports_hedge.execution.polymarket_sdk import NOT_READY, PolymarketClientError, open_polymarket_client
+from sports_hedge.execution.polymarket_sdk import NOT_READY, open_polymarket_client
 from sports_hedge.execution.translate import (
     POLYMARKET_ORDER_TYPE,
     PolymarketNativeOrder,
     PolymarketOrderSide,
     TranslationError,
-    polymarket_native_order,
+    polymarket_token_id,
 )
 
 # Opening canary decision: a Polymarket SELL is share-denominated and is not
@@ -81,10 +78,6 @@ class PolymarketSubmission:
 
 
 class PolymarketBroker(Protocol):
-    def constraints(self, token_id: str) -> PolymarketConstraints: ...
-
-    def readiness(self, spend: Decimal) -> str | None: ...
-
     def post_fak(self, order: PolymarketNativeOrder) -> PolymarketSubmission: ...
 
     def cancel(self, order_id: str) -> str: ...
@@ -100,28 +93,14 @@ class SdkPolymarketBroker:
         self._client: Any = None
         self.posts = 0
 
-    def constraints(self, token_id: str) -> PolymarketConstraints:
-        book = self._open().get_order_book(token_id=token_id)
-        if str(book.asset_id) != token_id:
-            raise TranslationError("Polymarket book token does not match the order")
-        tick = format(Decimal(str(book.tick_size)), "f")
-        minimum = Decimal(str(book.min_order_size))
-        if minimum <= 0:
-            raise TranslationError("Polymarket minimum size is missing")
-        return PolymarketConstraints(tick_size=tick, minimum_shares=minimum, token_id=token_id)
-
     def readiness(self, spend: Decimal) -> str | None:
-        """pUSD readiness for one opening BUY. ``spend`` is the translated stake.
+        """Order-sized collateral check retained for operator unit tests.
 
-        The gate is collateral balance and the collateral allowance of the
-        client's exchange_v3 spender. ``get_trading_approvals_state`` is not
-        consulted. ``get_balance_allowance`` is called only with
-        ``asset_type="COLLATERAL"``. polymarket-client 0.12.0 types that
-        argument as a string literal. ``AssetType`` is not an enum, so
-        ``AssetType.COLLATERAL`` raises ``AttributeError``. This method does
-        not read ``CONDITIONAL`` or ``CONDITIONAL-V2`` balance or allowance.
-        Opening LAY/SELL is rejected before this method runs.
+        Dispatch does not call this. Price-2 reads collateral once and freezes
+        the decision. Calling it here would be a second account authority.
         """
+
+        from sports_hedge.execution.polymarket_buy_readiness import v2_buy_readiness
 
         return v2_buy_readiness(self._open(), spend)
 
@@ -221,14 +200,10 @@ class PolymarketHttpExecutionTransport:
         settings: Settings,
         *,
         broker: PolymarketBroker | None = None,
-        geoblock: Callable[[], Awaitable[PolymarketEligibility]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._settings = settings
         self._broker = broker if broker is not None else SdkPolymarketBroker(settings)
-        self._geoblock = geoblock or (
-            lambda: fetch_geoblock(settings.polymarket_geoblock_url)
-        )
         self._clock = clock or (lambda: datetime.now(UTC))
         self._results: dict[str, VenueOrderResult] = {}
         self._unknown: set[str] = set()
@@ -259,49 +234,22 @@ class PolymarketHttpExecutionTransport:
                 note="ambiguous_submit",
             )
         try:
-            constraints = await asyncio.to_thread(self._broker.constraints, request.native_runner_id.strip())
-            native = polymarket_native_order(
-                native_runner_id=request.native_runner_id,
-                native_market_id=request.native_market_id,
-                side=request.side,
-                decimal_odds=request.requested_price,
-                requested_stake=request.requested_size,
-                tick_size=constraints.tick_size,
-                minimum_shares=constraints.minimum_shares,
-            )
-        except (TranslationError, PolymarketClientError):
-            return _result(request, status=VenueOrderStatus.FAILED, at=now, filled_size=Decimal(0))
-        try:
-            block = await asyncio.to_thread(self._broker.readiness, native.stake)
-        except (PolymarketClientError, Exception):
+            native = frozen_polymarket_order(request)
+        except TranslationError:
             return _result(
                 request,
                 status=VenueOrderStatus.FAILED,
-                at=self._clock(),
+                at=now,
                 filled_size=Decimal(0),
-                note=f"{NOT_READY}: account readiness could not be read",
+                note="native_order_not_frozen",
                 order_type=POLYMARKET_ORDER_TYPE,
             )
-        if block:
-            return _result(
-                request,
-                status=VenueOrderStatus.FAILED,
-                at=self._clock(),
-                filled_size=Decimal(0),
-                note=block,
-                order_type=POLYMARKET_ORDER_TYPE,
-            )
-        eligibility = await self._geoblock()
-        if not eligibility.permitted:
-            return _result(
-                request,
-                status=VenueOrderStatus.FAILED,
-                at=self._clock(),
-                filled_size=Decimal(0),
-                note=eligibility.reason,
-                order_type=POLYMARKET_ORDER_TYPE,
-                eligibility=eligibility.audit(),
-            )
+        log_execution_dispatch(
+            "NO_PRE_SUBMIT_ECONOMIC_REFRESH",
+            venue=VenueName.POLYMARKET.value,
+            snapshot_id=request.price2_snapshot_id,
+            token_id=native.token_id,
+        )
         try:
             submission = await asyncio.to_thread(self._broker.post_fak, native)
         except PolymarketAmbiguous:
@@ -313,7 +261,6 @@ class PolymarketHttpExecutionTransport:
                 filled_size=None,
                 note="ambiguous_submit",
                 order_type=POLYMARKET_ORDER_TYPE,
-                eligibility=eligibility.audit(),
             )
             return result
         except Exception:
@@ -324,9 +271,15 @@ class PolymarketHttpExecutionTransport:
                 filled_size=Decimal(0),
                 note="order_not_submitted",
                 order_type=POLYMARKET_ORDER_TYPE,
-                eligibility=eligibility.audit(),
             )
-        result = _from_submission(request, native, submission, at=self._clock(), eligibility=eligibility)
+        log_execution_dispatch(
+            "ORDERS_SUBMITTED",
+            venue=VenueName.POLYMARKET.value,
+            snapshot_id=request.price2_snapshot_id,
+            token_id=native.token_id,
+            order_type=native.order_type,
+        )
+        result = _from_submission(request, native, submission, at=self._clock())
         if result.note == "ambiguous_submit" or result.filled_size is None:
             self._unknown.add(request.client_order_id)
         else:
@@ -376,6 +329,40 @@ class PolymarketHttpExecutionTransport:
         return updated
 
 
+def frozen_polymarket_order(request: VenueOrderRequest) -> PolymarketNativeOrder:
+    """Schema-check the frozen Price-2 order. Do not reprice it."""
+
+    if request.frozen_order_type != POLYMARKET_ORDER_TYPE:
+        raise TranslationError("Polymarket order type is not the frozen FAK order")
+    if (
+        request.frozen_limit_price is None
+        or request.frozen_amount is None
+        or request.frozen_shares is None
+        or not request.frozen_tick_size
+        or request.frozen_minimum_size is None
+    ):
+        raise TranslationError("Polymarket native order was not frozen")
+    token = polymarket_token_id(request.native_runner_id)
+    price = request.frozen_limit_price
+    amount = request.frozen_amount
+    shares = request.frozen_shares
+    if price <= 0 or price >= 1 or amount <= 0 or shares <= 0:
+        raise TranslationError("Polymarket frozen order is not a positive buy")
+    if shares < request.frozen_minimum_size:
+        raise TranslationError("Polymarket frozen size is below the frozen minimum")
+    return PolymarketNativeOrder(
+        token_id=token,
+        side=PolymarketOrderSide.BUY,
+        price=price,
+        amount=amount,
+        shares=shares,
+        stake=amount,
+        decimal_odds=Decimal(1) / price,
+        tick_size=request.frozen_tick_size,
+        order_type=POLYMARKET_ORDER_TYPE,
+    )
+
+
 def _submission(response: Any, fee_rate: Decimal | None) -> PolymarketSubmission:
     ok = getattr(response, "ok", None)
     if ok is False:
@@ -413,9 +400,8 @@ def _from_submission(
     submission: PolymarketSubmission,
     *,
     at: datetime,
-    eligibility: PolymarketEligibility,
 ) -> VenueOrderResult:
-    audit = eligibility.audit()
+    audit = None
     if submission.state == "rejected":
         zero_codes = {"fak_not_filled", "fok_not_filled", "unmatched", "not_enough_balance"}
         status = (
