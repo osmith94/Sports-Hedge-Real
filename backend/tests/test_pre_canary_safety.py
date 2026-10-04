@@ -286,6 +286,10 @@ def _matchbook_request() -> VenueOrderRequest:
         requested_price=Decimal("2.50"),
         requested_size=Decimal(10),
         client_order_id="mb-order-1",
+        price2_snapshot_id="exec:canary:direct",
+        frozen_order_type="back",
+        frozen_limit_price=Decimal("2.50"),
+        frozen_amount=Decimal(10),
     )
 
 
