@@ -170,9 +170,10 @@ def test_operator_console_hierarchy_is_treasury_then_positions_then_scan() -> No
     assert "usedFixture: false" in page
     sidebar = (FRONTEND / "components" / "sidebar.tsx").read_text(encoding="utf-8")
     assert 'href: "/"' in sidebar or 'href: "/",' in sidebar
-    assert "PAPER MODE" in sidebar
+    assert "RuntimeModeFooter" in sidebar
     layout = (FRONTEND / "app" / "layout.tsx").read_text(encoding="utf-8")
-    assert "PAPER MODE · NO EXECUTION" in layout
+    assert "RuntimeModeProvider" in layout
+    assert "RuntimeModeClock" in layout
 
 
 def test_live_scan_pulse_states_are_real_and_last_scan_is_not_invented() -> None:
