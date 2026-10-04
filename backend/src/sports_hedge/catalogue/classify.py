@@ -1,20 +1,21 @@
 """Deterministic Tenet 20 classification via the Approved Match Register.
 
-After fixture identity, Matchbook↔Kalshi rows that resolve to one register
-canonical key (MATCH_RESULT_FT / BTTS_FT / TOTAL_GOALS_FT:{line} / FTTS_FT)
-are PAPER_ASSUMED_EQUIVALENT, or APPROVED_EQUIVALENT when independently
-proven. Extra-time / penalties / to-qualify contracts are a different native
-archetype and are not registered. Independently proven unregistered pairs
-may still classify APPROVED_EQUIVALENT for offline census/onboarding, but
-they are not runtime-matched or paper-admitted. Numeric mapping confidence
-and mapping review are not admission. Never live-execution eligible.
+After fixture identity, rows that resolve to one register canonical key are
+PAPER_ASSUMED_EQUIVALENT (the stored registered-equivalent label) or
+APPROVED_EQUIVALENT when independently proven. Extra-time / penalties /
+to-qualify contracts are a different native archetype and are not registered.
+Independently proven unregistered pairs may still classify
+APPROVED_EQUIVALENT for offline census/onboarding, but they are not
+runtime-matched. Numeric mapping confidence and mapping review are not
+admission. Catalogue execution eligibility follows registration; it does not
+place a venue order.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from sports_hedge.application.complete_set import (
     runner_outcomes,
@@ -38,15 +39,15 @@ from sports_hedge.matching.approved_register import (
     NOT_REGISTERED_REASON,
     REGISTER_ADMITTED_REASON,
     canonical_key_for_market,
-    registered_structural_match,
 )
-from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.matching.markets import MarketMatchResult, MarketMatcher
 from sports_hedge.matching.ordinary_1x2 import (
     allow_unknown_settlement_for_ordinary_1x2,
 )
-from sports_hedge.matching.paper_assumed import (
+from sports_hedge.matching.assumed_settlement import (
     FAIR_PRICE_PAPER_ADMITTED_REASON,
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
+    REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
     both_independently_proven_regulation,
 )
 from sports_hedge.normalization.venues import (
@@ -62,7 +63,13 @@ CATALOGUE_SHARED_BY = ("hot", "universe")
 
 
 class CataloguePairAssessment(BaseModel):
-    """Pairwise catalogue verdict. Scan-lane independent. Paper-only."""
+    """Pairwise catalogue verdict. Scan-lane independent.
+
+    ``admitted`` is the only stored admission decision. Compatibility names
+    are computed from it and cannot be stored separately.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     state: CatalogueApprovalState
     reason: str
@@ -76,9 +83,18 @@ class CataloguePairAssessment(BaseModel):
     notes: list[str] = Field(default_factory=list)
     data_class: str = DATA_CLASS_FIXTURE
     catalogue_shared_by: tuple[str, ...] = CATALOGUE_SHARED_BY
-    execution_eligible: bool = False
-    paper_mode_admitted: bool = False
+    admitted: bool = False
     settlement_assumption: str | None = None
+
+    @computed_field
+    @property
+    def execution_eligible(self) -> bool:
+        return self.admitted
+
+    @computed_field
+    @property
+    def paper_mode_admitted(self) -> bool:
+        return self.admitted
 
 
 class PayloadSide(BaseModel):
@@ -181,10 +197,22 @@ def classify_payload_pair(
     return classify_pair(left_market, right_market)
 
 
-def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePairAssessment:
-    """Classify market-contract equivalence. Fixture identity remains separate."""
+def classify_pair(
+    left: CanonicalMarket,
+    right: CanonicalMarket,
+    match: MarketMatchResult | None = None,
+) -> CataloguePairAssessment:
+    """Classify market-contract equivalence. Fixture identity remains separate.
 
-    matcher = MarketMatcher().match(left, right)
+    When ``match`` is supplied, its ``register_key`` is the register decision.
+    A missing key is not re-resolved here.
+    """
+
+    result = match if match is not None else MarketMatcher().match(left, right)
+    # The matcher already resolved the register into register_key. A matched
+    # result without that key is not admitted. This function does not call
+    # registered_canonical_key again.
+    registered = bool(result.matched and result.register_key)
     unknown_1x2 = allow_unknown_settlement_for_ordinary_1x2(left, right)
     solver_model = solver_model_for_pair(left, right)
     pair = venue_pair_key(left.source_venue, right.source_venue)
@@ -192,18 +220,16 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         left.settlement.is_economically_complete() and right.settlement.is_economically_complete()
     )
     archetype = _archetype_from_markets(left, right)
-    state, reason, notes = _economic_state(left, right)
+    state, reason, notes = _economic_state(left, right, registered=registered)
     from sports_hedge.tennis.settlement import tennis_executable_block_reason
 
     tennis_blocked = tennis_executable_block_reason(left, right) is not None
     paper_assumed = state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT and not tennis_blocked
-    paper_admitted = (
-        matcher.matched and registered_structural_match(left, right) and not tennis_blocked
-    )
+    admitted = registered and not tennis_blocked
     conflict = (
         state is not CatalogueApprovalState.APPROVED_EQUIVALENT
         and not paper_assumed
-        and matcher.matched
+        and result.matched
         and solver_model is not None
     )
     if conflict:
@@ -224,13 +250,12 @@ def classify_pair(left: CanonicalMarket, right: CanonicalMarket) -> CataloguePai
         archetype=archetype,
         venue_pair=pair,
         solver_model=solver_model,
-        matcher_matched=matcher.matched,
+        matcher_matched=result.matched,
         matcher_admits_unknown_1x2=unknown_1x2,
         settlement_complete=complete,
         known_conflict_with_current_matcher=conflict,
         notes=notes,
-        execution_eligible=paper_admitted,
-        paper_mode_admitted=paper_admitted,
+        admitted=admitted,
         settlement_assumption=settlement_assumption,
     )
 
@@ -253,19 +278,22 @@ def _archetype_from_markets(
 
 
 def _economic_state(
-    left: CanonicalMarket, right: CanonicalMarket
+    left: CanonicalMarket,
+    right: CanonicalMarket,
+    *,
+    registered: bool,
 ) -> tuple[CatalogueApprovalState, str, list[str]]:
     notes: list[str] = []
     from sports_hedge.catalogue.registry import target_market_families
     from sports_hedge.tennis.settlement import tennis_executable_block_reason
 
     block = tennis_executable_block_reason(left, right)
-    if block is not None and registered_structural_match(left, right):
+    if block is not None and registered:
         notes.append(block)
         notes.append("match_winner_catalogued_not_solver_executable")
         return CatalogueApprovalState.REVIEW_REQUIRED, block, notes
 
-    if registered_structural_match(left, right):
+    if registered:
         notes.append(REGISTER_ADMITTED_REASON)
         notes.append(OWNER_APPROVED_PAPER_EQUIVALENCE_REASON)
         cancel_reason = KALSHI_UNMODELLED_CANCEL_RESCHEDULE_FAIR_PRICE_REASON
@@ -276,7 +304,7 @@ def _economic_state(
             notes.append(FAIR_PRICE_PAPER_ADMITTED_REASON)
         if both_independently_proven_regulation(left, right):
             return CatalogueApprovalState.APPROVED_EQUIVALENT, "approved_equivalent", notes
-        notes.append("paper_assumed_equivalent_not_settlement_proven")
+        notes.append(REGISTERED_EQUIVALENT_SETTLEMENT_NOTE)
         return (
             CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT,
             "paper_assumed_equivalent",

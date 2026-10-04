@@ -96,7 +96,6 @@ from sports_hedge.execution.package import execution_armed
 from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime, set_execution_runtime
 from sports_hedge.fees.cost import MarketAction
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
-from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 from sports_hedge.paper.active_trade_journal import (
     ActiveTradeEvent,
     ActiveTradeEventType,
@@ -916,7 +915,6 @@ class PaperOperationsService:
             reason
             for reason in current.rejection_reasons
             if reason not in capture_skip_reasons
-            and reason not in PAPER_NONBLOCKING_REJECTION_REASONS
             and reason not in RETRYABLE_ZERO_FILL_REASONS
         ]
         if remaining:

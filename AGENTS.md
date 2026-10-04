@@ -5,7 +5,7 @@ Before implementing or reviewing any Sports Hedge change:
 1. Read `docs/CORE_TENETS.md`.
 2. Identify every applicable file under `docs/core-tenets/`.
 3. Read the detailed feature/architecture specification linked from those tenets.
-4. Preserve the Phase 1 paper-only/read-only venue boundary.
+4. Keep execution disabled by default. Do not place venue orders or set `SPORTS_HEDGE_EXECUTION_ENABLED`. A registered relationship is not paper-only blocked.
 
 Before handing off a PR:
 

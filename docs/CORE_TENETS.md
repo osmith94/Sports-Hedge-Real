@@ -11,7 +11,7 @@ These files summarize the non-negotiable product principles agreed for Sports He
 ## Core tenets
 
 1. [`core-tenets/01_PRODUCT_STRUCTURE.md`](core-tenets/01_PRODUCT_STRUCTURE.md) — two distinct top-level product modules: Arbitrage and Research.
-2. [`core-tenets/02_PAPER_MODE_AND_EXECUTION_BOUNDARIES.md`](core-tenets/02_PAPER_MODE_AND_EXECUTION_BOUNDARIES.md) — Phase 1 is read-only toward venues and paper-only.
+2. [`core-tenets/02_PAPER_MODE_AND_EXECUTION_BOUNDARIES.md`](core-tenets/02_PAPER_MODE_AND_EXECUTION_BOUNDARIES.md) — paper mode simulates; real execution stays disarmed unless explicitly enabled. Registered admission is not a paper-only veto.
 3. [`core-tenets/03_CANONICAL_MARKET_EQUIVALENCE.md`](core-tenets/03_CANONICAL_MARKET_EQUIVALENCE.md) — executable cross-venue comparison is strict: both markets must resolve to the same Approved Match Register canonical key with matching required parameters; runtime scanning does not score, review, or re-litigate registered rows.
 4. [`core-tenets/04_ARBITRAGE_OPERATIONS.md`](core-tenets/04_ARBITRAGE_OPERATIONS.md) — arbitrage is depth-, cost- and risk-aware, with near-arb lifecycle visibility.
 5. [`core-tenets/05_RESEARCH_AND_VALUE.md`](core-tenets/05_RESEARCH_AND_VALUE.md) — Research is probabilistic and all actionable signals are weighted against equivalent market odds.

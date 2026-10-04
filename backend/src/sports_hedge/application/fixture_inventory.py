@@ -866,11 +866,11 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
 
 
 def _settlement_inventory_fields(canonical: CanonicalMarket | None) -> dict[str, str | None]:
-    """Distinguish owner-approved PAPER settlement from an unknown fingerprint.
+    """Distinguish an assumed sport settlement from an unknown fingerprint.
 
-    Economically incomplete NFL/MLB paper fingerprints stay incomplete for live
-    execution. Inventory still names the sport settlement authority instead of
-    calling that caveat unknown.
+    Economically incomplete NFL/MLB fingerprints stay incomplete, so they are
+    not APPROVED_EQUIVALENT. Inventory still names the sport settlement
+    authority. That status is not an independent catalogue execution veto.
     """
 
     if canonical is None:

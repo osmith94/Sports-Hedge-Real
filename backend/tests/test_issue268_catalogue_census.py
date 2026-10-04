@@ -482,7 +482,7 @@ def test_independently_proven_registered_pair_is_paper_admitted() -> None:
         repository.close()
 
 
-def test_paper_assumed_gamewin_is_paper_admitted_never_live_execution() -> None:
+def test_paper_assumed_gamewin_is_registered_and_catalogue_execution_eligible() -> None:
     entry = next(
         item for item in census_corpus() if item.entry_id == "bad-1x2-mb-k-gamewin-unknown"
     )

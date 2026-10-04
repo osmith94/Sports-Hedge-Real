@@ -1,4 +1,4 @@
-"""Tennis catalogue identity. Structurally identical singles Match Winner is PAPER-admitted."""
+"""Tennis catalogue identity. Structurally identical singles Match Winner is registered."""
 
 from __future__ import annotations
 
@@ -56,7 +56,10 @@ def tennis_canonical_key_for_market(market: CanonicalMarket) -> str | None:
 def tennis_registered_canonical_key(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> str | None:
-    """Catalogue key for exact-ID PAPER pricing. Live execution stays disabled."""
+    """Catalogue key for an exact registered singles Match Winner.
+
+    Catalogue eligibility follows this key. Venue orders stay separately gated.
+    """
 
     if left.source_venue == right.source_venue:
         return None

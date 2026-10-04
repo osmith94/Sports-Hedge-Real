@@ -1,7 +1,8 @@
-"""Owner-approved NFL PAPER register. Three venues, three families.
+"""Owner-approved NFL register. Three venues, three families.
 
-GAME_WINNER and exact .5 spread/total are PAPER-admitted. Exceptional
-lifecycle differences are not an audit caveat. Live execution stays disabled.
+GAME_WINNER and exact .5 spread/total are registered. Exceptional lifecycle
+differences are not an admission caveat. Catalogue eligibility follows this
+register. Venue orders stay behind the separate execution gates.
 """
 
 from __future__ import annotations
@@ -23,9 +24,11 @@ from sports_hedge.nfl.constants import (
 from sports_hedge.nfl.detect import is_nfl_canonical_event, is_nfl_market_family
 from sports_hedge.nfl.markets import is_exact_half_line
 
-NFL_PAPER_VENUES = frozenset(
+NFL_REGISTERED_VENUES = frozenset(
     {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
 )
+# LEGACY name for NFL_REGISTERED_VENUES. Same set; not a paper-only restriction.
+NFL_PAPER_VENUES = NFL_REGISTERED_VENUES
 GAME_WINNER_OUTCOMES = frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY})
 SPREAD_OUTCOMES = frozenset({CanonicalOutcome.HOME, CanonicalOutcome.AWAY})
 TOTAL_OUTCOMES = frozenset({CanonicalOutcome.OVER, CanonicalOutcome.UNDER})
@@ -79,7 +82,7 @@ def nfl_approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket)
     if left.source_venue == right.source_venue:
         return False
     venues = {left.source_venue, right.source_venue}
-    return venues <= NFL_PAPER_VENUES
+    return venues <= NFL_REGISTERED_VENUES
 
 
 def nfl_registered_canonical_key(

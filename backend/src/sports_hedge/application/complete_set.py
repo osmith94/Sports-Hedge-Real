@@ -240,11 +240,13 @@ def generalized_state_model_for_pair(
 
 
 def scan_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
+    """Scanner entry uses the matcher's register key. It does not resolve it again."""
+
     if not match.matched:
         return False
     from sports_hedge.catalogue.admission import catalogue_allows_solver
 
-    return catalogue_allows_solver(left, right)
+    return catalogue_allows_solver(left, right, match=match)
 
 
 def scan_ineligibility_reason(market: CanonicalMarket) -> str:

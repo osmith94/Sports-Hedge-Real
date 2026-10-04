@@ -291,6 +291,16 @@ def execution_reprice_permitted(decision: PaperScanDecision) -> bool:
     return "stale_quote" in blocking and "unknown_quote_age" not in blocking
 
 
+def price2_entry_authorized(snapshot: ExecutionSnapshot | None) -> bool:
+    """The accepted ExecutionSnapshot is the only economic vote for entry.
+
+    ``execution_entry_block`` runs once while that snapshot is built. Capture
+    does not call it again.
+    """
+
+    return snapshot is not None and snapshot.accepted is True
+
+
 def execution_entry_block(decision: PaperScanDecision) -> str | None:
     """Why a refreshed decision must not fill. None means it is capture-eligible."""
 
@@ -466,8 +476,8 @@ async def capture_with_execution_reprice(
             discovery_decision=discovery,
         )
 
-    block = execution_entry_block(refreshed.decision)
-    if block is not None:
+    if not price2_entry_authorized(refreshed.snapshot):
+        reason = refreshed.reason or EXECUTION_REPRICE_FAILED
         record_execution_snapshot_attempt(
             watchlist,
             refreshed.snapshot,
@@ -485,10 +495,10 @@ async def capture_with_execution_reprice(
         watchlist.note_execution_reprice_miss(
             refreshed.decision,
             occurred_at=datetime.now(UTC),
-            reason=block,
+            reason=reason,
             pricing_lane=pricing_lane,
             detail=execution_reprice_audit_detail(
-                block,
+                reason,
                 refreshed.diagnostics,
                 refreshed.snapshot,
             ),
@@ -496,7 +506,7 @@ async def capture_with_execution_reprice(
         )
         log_execution_phase(
             PHASE_REJECTED,
-            reason=block,
+            reason=reason,
             canonical_market_id=refreshed.decision.canonical_market_id,
         )
         return ExecutionCaptureResult(

@@ -2,9 +2,11 @@
 
 Sports Hedge is an internal football arbitrage research and paper-trading platform.
 
-## Phase 1
+## Mode
 
-Phase 1 is deliberately **read-only and paper-only**. It ingests market data, normalizes football markets across venues, models executable liquidity and costs, detects arbitrage, and simulates fills. It contains no real order-placement capability.
+The default runtime is **paper simulation with execution disabled**. It ingests market data, normalizes markets across venues, models executable liquidity and costs, detects arbitrage, and simulates fills.
+
+`SPORTS_HEDGE_MODE=real` is a separate live-execution seam. It does not place orders unless `SPORTS_HEDGE_EXECUTION_ENABLED` is also set, and catalogue admission is still not an order. Historical Phase 1 was paper-only; stored `paper_assumed_equivalent` labels remain readable and are not an independent execution veto.
 
 Initial venue plan:
 
@@ -12,7 +14,7 @@ Initial venue plan:
 - **Polymarket** — permitted public/read-only market data for research and paper simulation; execution disabled.
 - **Smarkets** — adapter reserved for a later phase.
 
-The paper-only boundary is enforced in both configuration and the venue interface. Phase 1 has no `place_order` or `cancel_order` methods.
+Execution stays off unless mode is `real` and execution is explicitly enabled. Paper fills are simulated.
 
 ## Repository layout
 

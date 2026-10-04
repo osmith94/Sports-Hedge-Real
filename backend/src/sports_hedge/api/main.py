@@ -78,7 +78,7 @@ enable_faulthandler()
 app = FastAPI(
     title="Sports Hedge API",
     version="0.1.0",
-    description="Phase 1 paper-only football arbitrage research API",
+    description="Sports Hedge API. Default mode simulates fills. Live execution stays disabled unless explicitly armed.",
     lifespan=lifespan,
 )
 app.add_middleware(

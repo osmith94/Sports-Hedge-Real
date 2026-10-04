@@ -7,10 +7,11 @@ each scan.
 Venue-native archetypes map to canonical keys so a future Polymarket/Smarkets
 onboarding adds one mapping per native market rather than N² pair rules.
 
-Current PAPER / READ-ONLY football venues: Matchbook, Kalshi, and Polymarket
-for the four locked full-time families when a venue market normalizes to the
-same canonical key. Live execution remains ineligible. Exceptional settlement
-differences are not an admission gate.
+Registered football venues: Matchbook, Kalshi, and Polymarket for the four
+locked full-time families when a venue market normalizes to the same
+canonical key. Catalogue eligibility follows that registration. Venue orders
+remain separately gated. Exceptional settlement differences are not an
+admission gate.
 """
 
 from __future__ import annotations
@@ -43,7 +44,9 @@ APPROVED_PAPER_VENUE_PAIR = frozenset(
     {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}
 )
 REGISTER_ADMITTED_REASON = "approved_match_register"
-REGISTER_PAPER_MODE_REASON = "register_paper_admitted_not_live_execution"
+# LEGACY string. Not emitted. Not a Real execution veto.
+LEGACY_REGISTER_PAPER_MODE_REASON = "register_paper_admitted_not_live_execution"
+REGISTER_PAPER_MODE_REASON = LEGACY_REGISTER_PAPER_MODE_REASON
 NOT_REGISTERED_REASON = "not_registered"
 CANONICAL_KEY_REASON_PREFIX = "canonical_key="
 _EXTRA_TIME_OR_PENALTIES_ARCHETYPE_REASON = (
@@ -292,7 +295,7 @@ def approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket) -> 
 
 
 def registered_canonical_key(left: CanonicalMarket, right: CanonicalMarket) -> str | None:
-    """Same canonical key on an approved PAPER venue pair, or None."""
+    """Same canonical key on a registered venue pair, or None."""
 
     from sports_hedge.mlb.register import is_mlb_register_market, mlb_registered_canonical_key
     from sports_hedge.nba.register import is_nba_register_market, nba_registered_canonical_key
