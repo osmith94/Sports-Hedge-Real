@@ -98,7 +98,25 @@ def _plan() -> PaperFillPlan:
             scanned_at=NOW,
         ),
         execution_authoritative=True,
-        execution_snapshot_json=json.dumps({"snapshot_id": "exec:canary:1", "accepted": True}),
+        execution_snapshot_json=json.dumps(
+            {
+                "snapshot_id": "exec:canary:1",
+                "accepted": True,
+                "frozen_orders": [
+                    {
+                        "venue": "matchbook",
+                        "native_event_id": leg.source_event_id,
+                        "native_market_id": leg.source_market_id,
+                        "native_runner_id": leg.source_runner_id,
+                        "native_side": "back",
+                        "ladder_odds": str(leg.displayed_odds),
+                        "native_stake": str(leg.requested_stake),
+                    }
+                    for leg in legs
+                    if leg.venue is VenueName.MATCHBOOK
+                ],
+            }
+        ),
         provenance="live_paper",
     )
 
