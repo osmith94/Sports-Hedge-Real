@@ -77,6 +77,16 @@ Double-click `scripts/windows/Start-SportsHedge-Demo.bat`. It starts the Python 
 
 Requires a local `backend/.venv` with the package installed and Node.js `npm` on PATH. If port 8000/3000 already has a listener (checked from the OS, not over HTTP), the launcher reuses it only when the PID identity belongs to this Sports Hedge launcher, the listener PID is that process or a verified descendant, the process command matches, and the recorded repo root plus Git HEAD match the current checkout. A launcher-owned process from a different HEAD is stopped and restarted. An unrelated occupant of those ports is refused rather than killed. The launcher prints the current branch, SHA, and whether each process was reused or restarted. `GET /build-info` (also nested on `GET /health`) reports the serving Git SHA. Matchbook credentials belong in the repository-root `.env` (same file as `.env.example`). The launcher starts FastAPI with working directory `backend\` but does not read `backend/.env`.
 
+## Real dry-run launcher (Windows)
+
+`SPORTS_HEDGE_MODE=real` with live order execution left off. One command:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows\Start-SportsHedge-Real.ps1
+```
+
+Or double-click `scripts\windows\Start-SportsHedge-Real.bat`. The scanner loop is enabled through the legacy-named `PAPER_LIVE_REFRESH_ENABLED=true` setting; that flag does not select paper mode. Autofill, auto-unwind, and the accounting schedule stay off. Success requires `GET /health` to show `mode=real`, `execution_enabled=false`, and `live_refresh.server_loop_enabled=true`. PID files live under `logs\real-*.pid`, separate from the demo launcher. Details and the port-8000 / scanner-loop troubleshooting notes: `docs/REAL_RUNBOOK.md`.
+
 ## Windows desktop app (`SportsHedge.exe`)
 
 `SportsHedge.exe` is a resident tray controller for day-to-day use without PowerShell. Build it once with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Build-SportsHedge-App.ps1` (Git, Node.js 22, .NET 8 SDK; output `dist\windows\SportsHedge.exe`; the backend venv from **Backend setup** is sufficient, including `tzdata` on Windows), then double-click it. It runs the **current local checkout** in PAPER MODE: it refuses unknown occupants of ports 8000/3000, runs `npm ci` when `frontend\package-lock.json` no longer matches the SHA-256 recorded for `node_modules`, rebuilds the production frontend (`npm run build`, never `next dev`) when `frontend\.next\sports-hedge-build.json` does not match Git HEAD, starts `python -m sports_hedge.api.desktop_host` and `npm run start` inside kill-on-close Windows Job Objects, waits for genuine health, opens `http://127.0.0.1:3000/` and stays in the tray. Closing the browser does not stop Sports Hedge; **Exit Sports Hedge** in the UI sidebar or tray shuts down gracefully (FastAPI lifespan cleanup runs), and ending `SportsHedge.exe` in Task Manager kills its backend/frontend trees via the Job Objects. It never runs `git fetch`/`pull`/`switch`/`reset`. Backend/frontend changes are picked up by updating the checkout; only changes under `desktop\` require rebuilding the exe. The PowerShell demo scripts above remain as diagnostic/fallback tools. Details, security review and remaining installer work: `docs/WINDOWS_DESKTOP_CONTROLLER.md`.
