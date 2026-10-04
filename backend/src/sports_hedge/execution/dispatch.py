@@ -33,6 +33,7 @@ from sports_hedge.execution.models import (
 from sports_hedge.execution.package import (
     LIVE_EXECUTION_TRANSPORT_UNAVAILABLE,
     _accepted_plan,
+    _frozen_package_ready,
     _outcome,
     _request_for_leg,
     execute_live_package,
@@ -183,6 +184,8 @@ def refusal_reason(
     ]
     if any(request is None for request in requests):
         return "missing_native_ids"
+    if not _frozen_package_ready(requests):
+        return "frozen_execution_package_required"
     venues = {leg.venue for leg in legs}
     if not venues <= {VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET}:
         return "unsupported_venue"
