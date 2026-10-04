@@ -397,6 +397,32 @@ async def test_matchbook_posts_the_frozen_odds_and_does_not_read_the_account() -
     assert "get_order_book" not in inspect.getsource(MatchbookHttpExecutionTransport.dispatch)
 
 
+async def test_matchbook_unfrozen_request_is_refused_before_login_or_post() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unfrozen request reached network: {request.url.path}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    transport = MatchbookHttpExecutionTransport(_armed(), client=client, clock=lambda: NOW)
+    request = VenueOrderRequest(
+        venue=VenueName.MATCHBOOK,
+        trade_id="trade-unfrozen",
+        tranche_id="opening",
+        native_event_id="evt-mb",
+        native_market_id="mb-mkt",
+        native_runner_id="101",
+        side=MarketSide.BACK,
+        currency="GBP",
+        requested_price=Decimal("2.09"),
+        requested_size=Decimal(4),
+        client_order_id="sh-" + "10" * 16,
+        price2_snapshot_id="exec:authority:unfrozen",
+    )
+    result = await transport.dispatch(request)
+    await client.aclose()
+    assert result.filled_size == 0
+    assert result.note == "native_order_not_frozen"
+
+
 async def test_matchbook_execution_disabled_does_not_post() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"disabled execution called {request.url.path}")
@@ -541,6 +567,36 @@ async def test_package_reaches_dispatch_unchanged_and_does_not_recompute_economi
     assert [path for _method, path in seen] == [MATCHBOOK_SESSION_PATH, SUBMIT_PATH]
 
 
+async def test_incomplete_frozen_package_sends_neither_leg() -> None:
+    plan = _plan()
+    payload = json.loads(plan.execution_snapshot_json or "{}")
+    payload["frozen_orders"] = [
+        item for item in payload.get("frozen_orders", []) if item.get("venue") != "matchbook"
+    ]
+    broken = plan.model_copy(update={"execution_snapshot_json": json.dumps(payload)})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"incomplete package reached Matchbook: {request.url.path}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    matchbook = MatchbookHttpExecutionTransport(_armed(), client=client, clock=lambda: NOW)
+    broker = _Posts()
+    polymarket = PolymarketHttpExecutionTransport(_armed(), broker=broker, clock=lambda: NOW)
+    package = await execute_live_package(
+        broken,
+        trade_id="trade-broken",
+        tranche_id=OPENING_TRANCHE_ID,
+        settings=_armed(),
+        matchbook=MatchbookExecutionClient(matchbook),
+        polymarket=PolymarketExecutionClient(polymarket),
+    )
+    await client.aclose()
+    assert package.outcome is LivePackageOutcome.FAILED
+    assert package.detail == "frozen_execution_package_required"
+    assert package.orders == []
+    assert broker.posts == 0
+
+
 class _Capital:
     def __init__(self, rows: tuple[VenueReadinessEvidence, ...]) -> None:
         self.rows = rows
@@ -552,10 +608,20 @@ class _Capital:
         return self.rows
 
 
+def test_real_price2_reads_capital_before_final_books() -> None:
+    source = inspect.getsource(CataloguePriceEngine._reprice_exact_books)
+    assert source.index("_read_real_authority_evidence") < source.index("_execution_fetch_venues")
+    assert source.index("_execution_fetch_venues") < source.index("_apply_real_authority")
+    local_judgment = inspect.getsource(CataloguePriceEngine._apply_real_authority)
+    assert ".read(" not in local_judgment
+    assert "await " not in local_judgment
+
+
 async def test_real_price2_rejects_when_live_capital_is_unavailable() -> None:
+    authority = _Capital(())
     engine = CataloguePriceEngine(
         settings=Settings(sports_hedge_mode="real", sports_hedge_execution_enabled=False),
-        venue_capital_authority=_Capital(()),
+        venue_capital_authority=authority,
     )
     leg = _pm_leg()
     snapshot = ExecutionSnapshot(
@@ -576,17 +642,20 @@ async def test_real_price2_rejects_when_live_capital_is_unavailable() -> None:
         pending_real_authority=True,
         diagnostics=ExecutionRepriceDiagnostics(started_at=NOW),
     )
-    await engine._prove_real_authority(result, (VenueName.POLYMARKET, VenueName.MATCHBOOK))
-    assert engine.venue_capital.calls == 1
+    evidence, call = await engine._read_real_authority_evidence(
+        (VenueName.POLYMARKET, VenueName.MATCHBOOK)
+    )
+    engine._apply_real_authority(result, evidence, call)
+    assert authority.calls == 1
     assert result.snapshot is not None
     assert result.snapshot.accepted is False
     assert result.reason == VENUE_CAPITAL_UNPROVEN
     assert result.diagnostics is not None
-    assert result.diagnostics.calls[-1].stage == "venue_capital"
+    assert result.diagnostics.calls[-1].stage == "venue_capital_pre_price2"
     assert engine.settings.sports_hedge_execution_enabled is False
 
 
-async def test_real_price2_accepts_only_after_live_capital_covers_the_stake() -> None:
+async def test_real_price2_accepts_after_pre_read_capital_covers_frozen_stakes() -> None:
     authority = _Capital(
         (
             VenueReadinessEvidence(
@@ -635,7 +704,11 @@ async def test_real_price2_accepts_only_after_live_capital_covers_the_stake() ->
         pending_real_authority=True,
         diagnostics=ExecutionRepriceDiagnostics(started_at=NOW),
     )
-    await engine._prove_real_authority(result, (VenueName.MATCHBOOK, VenueName.POLYMARKET))
+    evidence, call = await engine._read_real_authority_evidence(
+        (VenueName.MATCHBOOK, VenueName.POLYMARKET)
+    )
+    engine._apply_real_authority(result, evidence, call)
+    assert authority.calls == 1
     assert result.snapshot is not None
     assert result.snapshot.accepted is True
     assert result.reason is None
