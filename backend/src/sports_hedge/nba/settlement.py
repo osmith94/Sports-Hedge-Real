@@ -1,4 +1,10 @@
-"""PAPER-only NBA settlement caveat and automatic-settlement fail-closed rules."""
+"""NBA settlement assumption and automatic-settlement fail-closed rules.
+
+Kalshi↔Polymarket GAME_WINNER is the registered family. Spreads, totals, and
+Matchbook pairs stay fail-closed because ordinary full-game evidence is not
+established. The incomplete fingerprint is not a paper-only execution veto
+for the registered game-winner pair.
+"""
 
 from __future__ import annotations
 
@@ -22,10 +28,12 @@ from sports_hedge.nba.constants import (
     NBA_LIFECYCLE_AUDIT_KIND,
     NBA_NOT_LIVE_EXECUTION_REASON,
     NBA_PAPER_NORMAL_COMPLETION_REASON,
+    NBA_REGISTERED_SETTLEMENT_ASSUMPTION,
     NBA_SPORT,
 )
 from sports_hedge.nba.detect import is_nba_canonical_event, is_nba_market_family
 
+# LEGACY readable audit tokens. New rows use nba_paper_audit_reasons().
 NBA_PAPER_AUDIT_REASONS: tuple[str, ...] = (
     NBA_PAPER_NORMAL_COMPLETION_REASON,
     NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT,
@@ -115,12 +123,11 @@ def nba_paper_settlement(
     family: MarketFamily,
     line=None,
 ) -> SettlementFingerprint:
-    """Fingerprint for PAPER comparison of a completed NBA game.
+    """Fingerprint for registered comparison of a completed NBA game.
 
     Extra-time/OT inclusion is not independently proven on every venue/family.
-    The fingerprint stays economically incomplete so this path cannot be
-    mistaken for live-execution-grade APPROVED_EQUIVALENT. The register, not
-    this fingerprint, admits PAPER comparison.
+    The fingerprint stays economically incomplete so this path is not
+    APPROVED_EQUIVALENT. The register, not this fingerprint, admits the pair.
     """
 
     push = False if line is None else line_push_possible(line)
@@ -136,9 +143,13 @@ def nba_paper_settlement(
 
 
 def nba_paper_audit_reasons() -> list[str]:
-    """New PAPER rows record the live-execution boundary only."""
+    """New registered NBA rows record the settlement assumption.
 
-    return [NBA_NOT_LIVE_EXECUTION_REASON]
+    Historical rows may still store ``nba_paper_not_live_execution_equivalent``.
+    That string stays readable and is not an independent Real execution veto.
+    """
+
+    return [NBA_REGISTERED_SETTLEMENT_ASSUMPTION]
 
 
 def is_nba_paper_trade(trade) -> bool:

@@ -26,7 +26,7 @@ from sports_hedge.matching.ordinary_1x2 import (
     kalshi_gamewin_scope_unavailable,
     ordinary_1x2_match_reasons,
 )
-from sports_hedge.matching.paper_assumed import (
+from sports_hedge.matching.assumed_settlement import (
     OWNER_APPROVED_PAPER_EQUIVALENCE_REASON,
     PAPER_ASSUMED_REASON,
     paper_assumed_match_reasons,
@@ -38,6 +38,9 @@ class MarketMatchResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reasons: list[str]
     provenance: MappingProvenance = Field(default_factory=MappingProvenance)
+    # Set once by MarketMatcher from the Approved Match Register. Catalogue
+    # admission reads this instead of resolving the register again.
+    register_key: str | None = None
 
 
 class _MatchMemo:
@@ -92,6 +95,7 @@ def _copy_match_result(result: MarketMatchResult) -> MarketMatchResult:
         confidence=result.confidence,
         reasons=list(result.reasons),
         provenance=provenance,
+        register_key=result.register_key,
     )
 
 
@@ -321,6 +325,7 @@ class MarketMatcher:
                     confidence=event_result.confidence,
                     reasons=match_reasons,
                     provenance=event_result.provenance,
+                    register_key=key,
                 )
             match_reasons = list(event_result.reasons)
             match_reasons.extend(paper_assumed_match_reasons())
@@ -374,6 +379,7 @@ class MarketMatcher:
                 confidence=event_result.confidence,
                 reasons=match_reasons,
                 provenance=event_result.provenance,
+                register_key=key,
             )
 
         reasons = structural_mismatch_reasons(left, right)

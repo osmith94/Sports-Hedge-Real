@@ -48,7 +48,6 @@ from sports_hedge.liquidity.book import BookLevel
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.matching.events import paper_event_matcher
 from sports_hedge.matching.markets import MarketMatcher
-from sports_hedge.matching.paper_assumed import PAPER_NONBLOCKING_REJECTION_REASONS
 from sports_hedge.normalization.identity import (
     canonical_matched_event_id,
     canonical_matched_market_id,
@@ -267,7 +266,7 @@ class PaperScanService:
 
         from sports_hedge.catalogue.admission import assess_catalogue_admission
 
-        catalogue_admission = assess_catalogue_admission(left.market, right.market)
+        catalogue_admission = assess_catalogue_admission(left.market, right.market, match=match)
         if not catalogue_admission.allowed:
             rejections.append(
                 catalogue_admission.rejection_reason or "catalogue_not_registered"
@@ -528,14 +527,6 @@ class PaperScanService:
             payoff_scan=payoff_scan,
             effective_fx=effective_fx,
         )
-        from sports_hedge.catalogue.states import CatalogueApprovalState
-
-        if (
-            catalogue_admission.assessment.state
-            is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-        ):
-            rejections.append("paper_assumed_equivalent")
-
         draft = PaperScanDecision(
             market_match=match,
             canonical_event_id=event_id,
@@ -868,9 +859,9 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
-    """Audit labels such as paper_assumed_equivalent do not block PAPER admission."""
+    """Every remaining rejection blocks. Diagnostic labels are not rejections."""
 
-    return [reason for reason in reasons if reason not in PAPER_NONBLOCKING_REJECTION_REASONS]
+    return list(reasons)
 
 
 def _default_execution_mode(venue: VenueName) -> LegExecutionMode:

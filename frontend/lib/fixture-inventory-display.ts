@@ -23,7 +23,7 @@ export type KalshiFixtureMarketInventoryRow = FixtureMarketInventoryRow & {
 
 const COMPARISON_LABELS: Record<string, string> = {
   matched_equivalent: "Matched equivalent",
-  paper_assumed_equivalent: "Paper-assumed equivalent",
+  paper_assumed_equivalent: "Registered equivalent",
   venue_only: "Venue only",
   settlement_mismatch: "Settlement mismatch",
   unsupported_outcome_model: "Unsupported outcome model",
@@ -144,7 +144,7 @@ export function settlementLabel(facts: VenueMarketFacts): string {
     const detail = facts.settlement_provenance
       ? humanizeToken(facts.settlement_provenance)
       : "owner-approved paper comparison";
-    return `PAPER-assumed settlement · ${detail}`;
+    return `Registered equivalent · ${detail}`;
   }
   if (facts.settlement_status === "complete" || (facts.settlement_status == null && facts.settlement_complete)) {
     return "Settlement fingerprint complete";
@@ -203,6 +203,9 @@ export function provenanceLines(facts: VenueMarketFacts): string[] {
   }
   if (facts.settlement_key) lines.push(`Settlement key ${facts.settlement_key}`);
   if (facts.settlement_status === "paper_assumed") lines.push(settlementLabel(facts));
+  if ((facts.fee_basis || "").toLowerCase() === "formula" && facts.fee_rate != null) {
+    lines.push(`Rate coefficient ${facts.fee_rate}`);
+  }
   if (facts.fee_source) lines.push(`Fee source ${facts.fee_source}`);
   if (facts.fee_label) lines.push(`Fee rule ${facts.fee_label}`);
   if (facts.fee_account_assumption) lines.push("Fee is an operator/account assumption");
@@ -332,9 +335,23 @@ export function venueKindLabel(facts: VenueMarketFacts | null | undefined): stri
   return "";
 }
 
+function isFormulaFee(facts: VenueMarketFacts): boolean {
+  const basis = (facts.fee_basis || "").toLowerCase();
+  if (basis === "formula") return true;
+  const name = (facts.fee_formula_name || "").toLowerCase();
+  return name.includes("formula") || name.includes("polymarket_taker");
+}
+
 export function compactFeeLabel(facts: VenueMarketFacts): string | null {
   const status = facts.fee_status;
   if (status === "missing" || status === "unknown") return `Fee ${status}`;
+  if (isFormulaFee(facts)) {
+    const name = (facts.fee_formula_name || "").toLowerCase();
+    if (facts.venue === "polymarket" || name.includes("polymarket")) return "PM taker formula";
+    return "Fee formula";
+  }
+  if ((facts.fee_basis || "").toLowerCase() === "none_confirmed") return "Fee disabled";
+  if ((facts.fee_label || "").toLowerCase().includes("known zero")) return "Fee disabled";
   const fromRate = formatFeeRate(facts.fee_rate);
   if (fromRate) return `Fee ${fromRate}`;
   if (facts.fee_label) {
@@ -373,12 +390,12 @@ export function compactVenueMeta(
 
 export function failingVenueChecks(facts: VenueMarketFacts): string[] {
   const checks: string[] = [];
-  if (facts.settlement_status === "paper_assumed") {
-    checks.push(settlementLabel(facts));
-  } else if (
-    facts.settlement_status === "incomplete" ||
-    (facts.settlement_status == null &&
-      (facts.settlement_complete === false || facts.settlement_complete == null))
+  const registeredSettlement = facts.settlement_status === "paper_assumed";
+  if (
+    !registeredSettlement &&
+    (facts.settlement_status === "incomplete" ||
+      (facts.settlement_status == null &&
+        (facts.settlement_complete === false || facts.settlement_complete == null)))
   ) {
     checks.push("Settlement fingerprint incomplete/unknown");
   }

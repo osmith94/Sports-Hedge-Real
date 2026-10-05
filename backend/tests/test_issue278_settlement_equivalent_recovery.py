@@ -222,7 +222,7 @@ def test_production_path_mb_k_current_payload_is_paper_assumed_for_fair_price() 
     assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.matcher_matched is True
     assert assessment.settlement_complete is False
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert assessment.paper_mode_admitted is True
     assert assessment.catalogue_shared_by == ("hot", "universe")
     mb = normalize_payload_side(left)
@@ -233,7 +233,7 @@ def test_production_path_mb_k_current_payload_is_paper_assumed_for_fair_price() 
     assert scan_eligible_pair(mb, kalshi, match) is True
     admission = assess_catalogue_admission(mb, kalshi)
     assert admission.allowed is True
-    assert admission.live_execution_eligible is False
+    assert admission.live_execution_eligible is True
     assert admission.catalogue_shared_by == ("hot", "universe")
 
 
@@ -246,7 +246,7 @@ def test_generic_gamewin_without_scope_is_paper_assumed_not_approved() -> None:
     assert assessment.reason == "paper_assumed_equivalent"
     assert assessment.matcher_admits_unknown_1x2 is True
     assert assessment.settlement_assumption == "regulation_time"
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     left = normalize_payload_side(_mb([_mb_1x2()]))
     right = normalize_payload_side(
         _kalshi(_kalshi_1x2(rules=GAMEWIN_TEMPLATE), series=KALSHI_GAMEWIN_SERIES)
@@ -489,8 +489,8 @@ def test_hot_and_universe_share_the_current_payload_gate() -> None:
     universe = assess_catalogue_admission(left, right)
     assert hot.allowed is True
     assert universe.allowed is True
-    assert hot.live_execution_eligible is False
-    assert universe.live_execution_eligible is False
+    assert hot.live_execution_eligible is True
+    assert universe.live_execution_eligible is True
     assert hot.catalogue_shared_by == universe.catalogue_shared_by == ("hot", "universe")
     assert hot.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert universe.assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT

@@ -16,6 +16,7 @@ from sports_hedge.application.provider_access import DEFAULT_PROVIDER_CONCURRENC
 from sports_hedge.domain.models import VenueName
 
 _MATCHBOOK = VenueName.MATCHBOOK.value
+_POLYMARKET = VenueName.POLYMARKET.value
 _KALSHI = VenueName.KALSHI.value
 SYSTEM_LOAD_JSON_BUDGET_BYTES = 1024
 
@@ -30,6 +31,8 @@ class ProviderSlotLoad(BaseModel):
     latency_ms: int = Field(default=0, ge=0)
     deadline_misses: int = Field(default=0, ge=0)
     saturated: bool = False
+    # None: participation was not on this status. False: operator disabled.
+    participating: bool | None = None
 
 
 class HotLoad(BaseModel):
@@ -97,6 +100,7 @@ class SystemLoadSummary(BaseModel):
     hot: HotLoad = Field(default_factory=HotLoad)
     background: BackgroundLoad = Field(default_factory=BackgroundLoad)
     matchbook: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
+    polymarket: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     kalshi: ProviderSlotLoad = Field(default_factory=ProviderSlotLoad)
     universe: UniverseLoad = Field(default_factory=UniverseLoad)
     catalogue_items: int = Field(default=0, ge=0)
@@ -196,8 +200,15 @@ def system_load_from_status(
             cadence_seconds=_count(_attr(background, "cadence_seconds")),
             health=_lane_health(background, background_engine),
         ),
-        matchbook=_provider_slot(access, _MATCHBOOK),
-        kalshi=_provider_slot(access, _KALSHI),
+        matchbook=_provider_slot(
+            access, _MATCHBOOK, participating=_venue_participating(status, _MATCHBOOK)
+        ),
+        polymarket=_provider_slot(
+            access, _POLYMARKET, participating=_venue_participating(status, _POLYMARKET)
+        ),
+        kalshi=_provider_slot(
+            access, _KALSHI, participating=_venue_participating(status, _KALSHI)
+        ),
         universe=UniverseLoad(
             evaluated=evaluated,
             total=total,
@@ -220,10 +231,20 @@ def system_load_from_status(
 
 
 def system_load_payload_bytes(summary: SystemLoadSummary) -> int:
-    return len(json.dumps(summary.model_dump(mode="json"), separators=(",", ":")).encode("utf-8"))
+    return len(
+        json.dumps(
+            summary.model_dump(mode="json", exclude_none=True),
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
 
 
-def _provider_slot(access: Any, venue: str) -> ProviderSlotLoad:
+def _provider_slot(
+    access: Any,
+    venue: str,
+    *,
+    participating: bool | None = None,
+) -> ProviderSlotLoad:
     payload = access if isinstance(access, dict) else {}
     inflight_map = payload.get("inflight") if isinstance(payload.get("inflight"), dict) else {}
     waiting_map = payload.get("waiting") if isinstance(payload.get("waiting"), dict) else {}
@@ -243,8 +264,30 @@ def _provider_slot(access: Any, venue: str) -> ProviderSlotLoad:
         wait_ms=_count(venue_queue.get("wait_age_ms")),
         latency_ms=_count(venue_queue.get("service_latency_ms")),
         deadline_misses=_count(venue_queue.get("deadline_misses")),
-        saturated=bool(venue_queue.get("saturated")) if venue_queue else waiting > 0 and _count(inflight_map.get(venue)) >= limit and limit > 0,
+        saturated=bool(venue_queue.get("saturated")) if venue_queue else waiting > 0 and _count(inflight_map.get(venue)) >= limit > 0,
+        participating=participating,
     )
+
+
+def _venue_participating(status: Any, venue: str) -> bool | None:
+    """Operator participation when the status already carries it. No venue calls."""
+
+    raw = status.get("venue_participation") if isinstance(status, dict) else getattr(
+        status, "venue_participation", None
+    )
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        hot = raw.get("hot") or []
+        universe = raw.get("universe") or []
+    else:
+        hot = getattr(raw, "hot", None) or []
+        universe = getattr(raw, "universe", None) or []
+    names = {
+        str(getattr(item, "value", item)).strip().casefold()
+        for item in [*list(hot), *list(universe)]
+    }
+    return venue.casefold() in names
 
 
 _DEGRADED_VENUE = frozenset(

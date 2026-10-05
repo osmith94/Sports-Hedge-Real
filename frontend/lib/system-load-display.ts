@@ -117,6 +117,10 @@ export function systemLoadDetailLines(
       detail: providerDetail(mb),
     },
     {
+      key: "PM",
+      detail: providerDetail(load.polymarket ?? {}),
+    },
+    {
       key: "K",
       detail: providerDetail(kalshi),
     },
@@ -157,6 +161,7 @@ function formatCadence(seconds: unknown, fallback = "—"): string {
 }
 
 function providerDetail(slot: NonNullable<SystemLoadSummary["matchbook"]>): string {
+  if (slot?.participating === false) return "off";
   const bits = [
     `${asCount(slot?.inflight)}/${asCount(slot?.limit)} in use`,
     `queue ${asCount(slot?.waiting)}`,

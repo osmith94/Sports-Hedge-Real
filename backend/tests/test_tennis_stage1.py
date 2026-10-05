@@ -306,7 +306,7 @@ def test_match_winner_is_paper_admitted_without_retirement_block() -> None:
     admission = assess_catalogue_admission(left, right)
     assert admission.allowed is True
     assert admission.paper_mode_admitted is True
-    assert admission.live_execution_eligible is False
+    assert admission.live_execution_eligible is True
     assert admission.rejection_reason is None
     assert paper_assumed_solver_model(left, right) == "simple_complete_set"
     assert scan_eligible_pair(left, right, matched) is True

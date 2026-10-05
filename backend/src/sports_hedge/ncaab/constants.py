@@ -6,6 +6,8 @@ Not soccer, not NFL, not NBA/WNBA, and not NCAAW.
 NCAAB_SPORT = "basketball"
 NCAAB_COMPETITION = "NCAA Men's Basketball"
 NCAAB_EXCEPTIONAL_SETTLEMENT_CAVEAT = "exceptional_settlement_mismatch_possible"
+# LEGACY audit token. NCAAB stays blocked because no venue pair is registered.
+# New rows emit the unapproved-contract reasons, not this paper-only label.
 NCAAB_NOT_LIVE_EXECUTION_REASON = "ncaab_paper_not_live_execution_equivalent"
 NCAAB_SETTLEMENT_FAIL_CLOSED_REASON = "ncaab_exceptional_settlement_fail_closed"
 NCAAB_NORMAL_COMPLETION_NOT_PROVEN = "ncaab_normal_completion_not_proven"

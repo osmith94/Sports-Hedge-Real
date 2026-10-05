@@ -61,7 +61,7 @@ The 2026-09-22 census did not prove the ordinary NCAAB contract for any venue pa
 
 This does **not** copy NBA PR #506 settlement behaviour.
 
-The remaining block is ordinary-contract evidence (`ncaab_venue_pair_family_not_evidence_backed` / runtime `not_registered`), not exceptional settlement. New trades do not emit `exceptional_settlement_mismatch_possible`. Historical rows that stored that string stay readable. Live execution stays disabled.
+The remaining block is ordinary-contract evidence (`ncaab_venue_pair_family_not_evidence_backed` / runtime `not_registered`), not exceptional settlement and not a paper-only label. New trades do not emit `exceptional_settlement_mismatch_possible` or `ncaab_paper_not_live_execution_equivalent`. Historical rows that stored those strings stay readable. NCAAB stays execution-ineligible because no venue pair is registered.
 
 ---
 

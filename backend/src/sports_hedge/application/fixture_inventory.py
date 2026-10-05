@@ -159,12 +159,15 @@ class FixtureMarketInventoryRow(BaseModel):
     comparison_status: InventoryComparisonStatus
     reason: str | None = None
     rejection_reasons: list[str] = Field(default_factory=list)
+    pricing_diagnostics: list[str] = Field(default_factory=list)
     match_reasons: list[str] = Field(default_factory=list)
     entered_solver: bool = False
     solver_model: str | None = None
     current_net_edge: Decimal | None = None
     trigger_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
+    # Same GBP figure the watchlist stores. Not a second depth calculation.
+    limiting_depth_gbp: Decimal | None = None
     solver_is_arbitrage: bool = False
     matchbook: VenueMarketFacts | None = None
     polymarket: VenueMarketFacts | None = None
@@ -196,6 +199,11 @@ class InventoryMarket(BaseModel):
     observation: VenueMarketObservation | None = None
     normalize_error: str | None = None
     durable_kalshi_fee: dict[str, Any] | None = None
+    durable_polymarket_fee: dict[str, Any] | None = None
+
+
+EXECUTABLE_PRICE_NOT_REFRESHED = "executable_price_not_refreshed"
+PM_FEE_SNAPSHOT_UNKNOWN = "pm_fee_snapshot_unknown"
 
 
 def solver_eligible_pair(left: CanonicalMarket, right: CanonicalMarket, match: MarketMatchResult) -> bool:
@@ -652,12 +660,15 @@ def _paired_row(
     )
 
     def facts_for(item: InventoryMarket) -> VenueMarketFacts:
-        return _facts_from_inventory(
-            item,
-            venue_costs=venue_costs,
-            fx_snapshots=fx_snapshots,
-            cost_resolver=cost_resolver,
-            decision=decision,
+        return _consume_registered_settlement_authority(
+            _facts_from_inventory(
+                item,
+                venue_costs=venue_costs,
+                fx_snapshots=fx_snapshots,
+                cost_resolver=cost_resolver,
+                decision=decision,
+            ),
+            comparison_status=status,
         )
 
     return FixtureMarketInventoryRow(
@@ -685,6 +696,7 @@ def _paired_row(
         current_net_edge=_decision_net_edge(decision) if entered else None,
         trigger_net_edge=decision.minimum_net_edge if decision is not None and entered else None,
         distance_to_trigger_pp=_decision_distance(decision) if entered else None,
+        limiting_depth_gbp=_decision_limiting_depth(decision) if entered else None,
         solver_is_arbitrage=_decision_is_arb(decision) if entered else False,
         matchbook=facts_for(left) if left.venue is VenueName.MATCHBOOK else (
             facts_for(right) if right.venue is VenueName.MATCHBOOK else None
@@ -836,11 +848,15 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
         return InventoryComparisonStatus.OTHER
     if reason in {"paper_assumed_equivalent", "paper_assumed_not_live_execution_eligible"}:
         return InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT
-    if reason.startswith("missing_venue_cost") or reason in {
-        "missing_costs",
-        "legacy_fee_snapshot_not_cost_truth",
-        UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
-    }:
+    if (
+        reason.startswith("missing_venue_cost")
+        or reason.startswith("unknown_required_venue_cost")
+        or reason in {
+            "missing_costs",
+            "legacy_fee_snapshot_not_cost_truth",
+            UNSUPPORTED_STATE_PAYOFF_FEE_BASIS,
+        }
+    ):
         return InventoryComparisonStatus.MISSING_COSTS
     if reason.startswith("missing_fx") or reason.startswith("missing_fx_rate"):
         return InventoryComparisonStatus.MISSING_FX
@@ -865,12 +881,40 @@ def _rejection_maps_to(reason: str) -> InventoryComparisonStatus:
     return InventoryComparisonStatus.MATCHED_EQUIVALENT
 
 
-def _settlement_inventory_fields(canonical: CanonicalMarket | None) -> dict[str, str | None]:
-    """Distinguish owner-approved PAPER settlement from an unknown fingerprint.
+def _consume_registered_settlement_authority(
+    facts: VenueMarketFacts,
+    *,
+    comparison_status: InventoryComparisonStatus,
+) -> VenueMarketFacts:
+    """Registered equivalence is the settlement authority for the pair.
 
-    Economically incomplete NFL/MLB paper fingerprints stay incomplete for live
-    execution. Inventory still names the sport settlement authority instead of
-    calling that caveat unknown.
+    A reconstructed venue fingerprint that is still incomplete does not get a
+    second veto once the catalogue relationship is paper-assumed equivalent.
+    An economically complete fingerprint stays complete. This does not invent
+    independent regulation proof.
+    """
+
+    if comparison_status is not InventoryComparisonStatus.PAPER_ASSUMED_EQUIVALENT:
+        return facts
+    if facts.settlement_status in {"paper_assumed", "complete"} or facts.settlement_complete is True:
+        return facts
+    from sports_hedge.matching.assumed_settlement import REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+
+    return facts.model_copy(
+        update={
+            "settlement_status": "paper_assumed",
+            "settlement_provenance": facts.settlement_provenance
+            or REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
+        }
+    )
+
+
+def _settlement_inventory_fields(canonical: CanonicalMarket | None) -> dict[str, str | None]:
+    """Distinguish an assumed sport settlement from an unknown fingerprint.
+
+    Economically incomplete NFL/MLB fingerprints stay incomplete, so they are
+    not APPROVED_EQUIVALENT. Inventory still names the sport settlement
+    authority. That status is not an independent catalogue execution veto.
     """
 
     if canonical is None:
@@ -893,6 +937,16 @@ def _settlement_inventory_fields(canonical: CanonicalMarket | None) -> dict[str,
             "settlement_provenance": (
                 canonical.settlement.unknown_reason or MLB_SETTLEMENT_NOT_EXECUTABLE
             ),
+        }
+    from sports_hedge.matching.assumed_settlement import REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+
+    if (
+        not canonical.settlement.is_economically_complete()
+        and canonical.settlement.unknown_reason == REGISTERED_EQUIVALENT_SETTLEMENT_NOTE
+    ):
+        return {
+            "settlement_status": "paper_assumed",
+            "settlement_provenance": REGISTERED_EQUIVALENT_SETTLEMENT_NOTE,
         }
     if canonical.settlement.is_economically_complete():
         return {
@@ -943,6 +997,99 @@ def apply_durable_kalshi_fee_evidence(
         identities.discard("")
         if len(identities) == 1:
             item.durable_kalshi_fee = snapshots[0]
+
+
+def apply_durable_polymarket_fee_evidence(
+    items: list[InventoryMarket],
+    *,
+    catalogue_store: Any,
+    canonical_event_id: str,
+) -> None:
+    """Copy a persisted Polymarket fee snapshot onto rows that have no quote.
+
+    Observation ``polymarket_fee`` still wins when HOT/BACKGROUND has priced
+    the row. Unknown snapshots stay unknown. Nothing here defaults a missing
+    fee to zero.
+    """
+
+    if catalogue_store is None or not canonical_event_id:
+        return
+    rows = catalogue_store.list_rows_for_event(canonical_event_id)
+    for item in items:
+        if item.venue is not VenueName.POLYMARKET:
+            continue
+        metadata = item.observation.metadata if item.observation is not None else {}
+        if isinstance(metadata, dict) and isinstance(metadata.get("polymarket_fee"), dict):
+            continue
+        snapshots: list[dict[str, Any]] = []
+        for row in rows:
+            if not _catalogue_row_covers_polymarket_item(row, item):
+                continue
+            snapshot_id = getattr(row, "polymarket_fee_snapshot_id", None)
+            if not snapshot_id:
+                continue
+            snapshot = catalogue_store.get_polymarket_fee_snapshot(str(snapshot_id))
+            if snapshot is None:
+                continue
+            payload = snapshot.observation_metadata()
+            if isinstance(payload, dict):
+                snapshots.append(payload)
+        identities = {str(payload.get("source_market_id") or "") + "|" + str(payload.get("fees_enabled")) for payload in snapshots}
+        if len(snapshots) == 1 or (snapshots and len(identities) == 1):
+            item.durable_polymarket_fee = snapshots[0]
+
+
+def _catalogue_row_covers_polymarket_item(row: Any, item: InventoryMarket) -> bool:
+    event_id = str(getattr(row, "polymarket_event_id", "") or "")
+    market_id = str(getattr(row, "polymarket_market_id", "") or "")
+    if event_id and item.source_event_id and item.source_event_id != event_id:
+        return False
+    if market_id and item.source_market_id and item.source_market_id != market_id:
+        return False
+    family = str(getattr(row, "family", "") or "")
+    if item.canonical is not None and family and item.canonical.family.value != family:
+        return False
+    row_line = getattr(row, "line", None)
+    if item.canonical is not None and item.canonical.line is not None and row_line not in (None, ""):
+        try:
+            if Decimal(str(row_line)) != item.canonical.line:
+                return False
+        except (ArithmeticError, ValueError):
+            return False
+    return bool(market_id or getattr(row, "polymarket_fee_snapshot_id", None))
+
+
+def annotate_unpriced_registered_rows(
+    rows: list[FixtureMarketInventoryRow],
+) -> list[FixtureMarketInventoryRow]:
+    """Name why a registered equivalent still has no executable price.
+
+    Does not change comparison identity and is not an execution gate.
+    """
+
+    for row in rows:
+        if not inventory_is_comparable_opportunity(row.comparison_status):
+            continue
+        diagnostics: list[str] = []
+        present = [facts for facts in (row.matchbook, row.polymarket, row.kalshi) if facts is not None]
+        if len(present) >= 2 and all(_facts_lack_executable_price(facts) for facts in present):
+            diagnostics.append(EXECUTABLE_PRICE_NOT_REFRESHED)
+        polymarket = row.polymarket
+        if polymarket is not None and polymarket.fee_status in {None, "missing", "unknown"}:
+            diagnostics.append(PM_FEE_SNAPSHOT_UNKNOWN)
+        # Pricing-state diagnostics are read-model facts, not matcher,
+        # equivalence, or solver rejection reasons. Keep canonical comparison
+        # reasons identical across UNIVERSE and HOT.
+        for code in diagnostics:
+            if code not in row.pricing_diagnostics:
+                row.pricing_diagnostics.append(code)
+    return rows
+
+
+def _facts_lack_executable_price(facts: VenueMarketFacts) -> bool:
+    if not facts.best_backs:
+        return True
+    return all(quote.decimal_odds is None for quote in facts.best_backs)
 
 
 def _catalogue_row_covers_kalshi_item(row: Any, item: InventoryMarket) -> bool:
@@ -1016,6 +1163,12 @@ def _facts_from_inventory(
             snap = observation.metadata.get(fee_key)
             if isinstance(snap, dict):
                 fee_snapshot = snap
+    if fee_snapshot is None and item.venue is VenueName.POLYMARKET:
+        if isinstance(item.durable_polymarket_fee, dict):
+            fee_snapshot = item.durable_polymarket_fee
+    if fee_snapshot is None and item.venue is VenueName.KALSHI:
+        if isinstance(item.durable_kalshi_fee, dict):
+            fee_snapshot = item.durable_kalshi_fee
     return VenueMarketFacts(
         venue=item.venue,
         source_event_id=item.source_event_id,
@@ -1138,6 +1291,12 @@ def _resolve_inventory_cost(
     if item.venue is VenueName.POLYMARKET:
         metadata = observation.metadata if observation is not None else {}
         fee_meta = metadata.get("polymarket_fee") if isinstance(metadata, dict) else None
+        if not isinstance(fee_meta, dict):
+            fee_meta = (
+                item.durable_polymarket_fee
+                if isinstance(item.durable_polymarket_fee, dict)
+                else None
+            )
         if isinstance(fee_meta, dict):
             snapshot = polymarket_cost_from_market(
                 fee_meta,
@@ -1265,6 +1424,12 @@ def _decision_net_edge(decision: PaperScanDecision | None) -> Decimal | None:
     from sports_hedge.arbitrage.watchlist.economics import net_edge_from_implied_sum
 
     return net_edge_from_implied_sum(implied)
+
+
+def _decision_limiting_depth(decision: PaperScanDecision | None) -> Decimal | None:
+    from sports_hedge.arbitrage.watchlist.economics import limiting_depth_gbp_from_decision
+
+    return limiting_depth_gbp_from_decision(decision)
 
 
 def _decision_distance(decision: PaperScanDecision | None) -> Decimal | None:
@@ -1849,6 +2014,7 @@ def _attach_kalshi(
         row.entered_solver = False
         row.solver_model = None
         row.current_net_edge = None
+        row.limiting_depth_gbp = None
         row.solver_is_arbitrage = False
         return
     if pair_summaries:
@@ -1868,6 +2034,8 @@ def _attach_kalshi(
             row.trigger_net_edge = best_decision.minimum_net_edge
             if row.current_net_edge is None:
                 row.current_net_edge = best.current_net_edge
+        if best_decision is not None and row.current_net_edge is not None:
+            row.limiting_depth_gbp = _decision_limiting_depth(best_decision)
         for reason in best.rejection_reasons:
             if reason not in row.rejection_reasons:
                 row.rejection_reasons.append(reason)

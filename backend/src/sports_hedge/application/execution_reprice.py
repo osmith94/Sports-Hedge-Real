@@ -47,6 +47,14 @@ PHASE_REJECTED = "EXECUTION_REPRICE_REJECTED"
 PHASE_PAPER_ELIGIBLE = "PAPER_ELIGIBLE"
 PHASE_FILL_ATTEMPTED = "PAPER_FILL_ATTEMPTED"
 PHASE_FILL_COMPLETE = "PAPER_FILL_COMPLETE"
+PHASE_PRICE2_START = "PRICE2_START"
+PHASE_NATIVE_IDS_BOUND = "NATIVE_IDS_BOUND"
+PHASE_FRESH_BOOKS = "FRESH_BOOKS_OBTAINED"
+PHASE_VENUE_CAPITAL = "VENUE_CAPITAL_READINESS"
+PHASE_FEES_FX = "FEES_FX_CONSUMED"
+PHASE_SOLVER_COMPLETE = "SOLVER_COMPLETE"
+PHASE_PRICE2_ACCEPT = "PRICE2_ACCEPT"
+PHASE_PACKAGE_FROZEN = "EXECUTION_PACKAGE_FROZEN"
 
 CYCLE_FILLED = "filled"
 CYCLE_REJECTED = "rejected"
@@ -254,6 +262,7 @@ class ExecutionRepriceResult:
     diagnostics: ExecutionRepriceDiagnostics | None = None
     snapshot: ExecutionSnapshot | None = None
     duplicate: bool = False
+    pending_real_authority: bool = False
 
 
 @dataclass
@@ -289,6 +298,16 @@ def execution_reprice_permitted(decision: PaperScanDecision) -> bool:
     if decision.eligible_for_paper_simulation:
         return not blocking
     return "stale_quote" in blocking and "unknown_quote_age" not in blocking
+
+
+def price2_entry_authorized(snapshot: ExecutionSnapshot | None) -> bool:
+    """The accepted ExecutionSnapshot is the only economic vote for entry.
+
+    ``execution_entry_block`` runs once while that snapshot is built. Capture
+    does not call it again.
+    """
+
+    return snapshot is not None and snapshot.accepted is True
 
 
 def execution_entry_block(decision: PaperScanDecision) -> str | None:
@@ -466,8 +485,8 @@ async def capture_with_execution_reprice(
             discovery_decision=discovery,
         )
 
-    block = execution_entry_block(refreshed.decision)
-    if block is not None:
+    if not price2_entry_authorized(refreshed.snapshot):
+        reason = refreshed.reason or EXECUTION_REPRICE_FAILED
         record_execution_snapshot_attempt(
             watchlist,
             refreshed.snapshot,
@@ -485,10 +504,10 @@ async def capture_with_execution_reprice(
         watchlist.note_execution_reprice_miss(
             refreshed.decision,
             occurred_at=datetime.now(UTC),
-            reason=block,
+            reason=reason,
             pricing_lane=pricing_lane,
             detail=execution_reprice_audit_detail(
-                block,
+                reason,
                 refreshed.diagnostics,
                 refreshed.snapshot,
             ),
@@ -496,7 +515,7 @@ async def capture_with_execution_reprice(
         )
         log_execution_phase(
             PHASE_REJECTED,
-            reason=block,
+            reason=reason,
             canonical_market_id=refreshed.decision.canonical_market_id,
         )
         return ExecutionCaptureResult(
@@ -561,9 +580,9 @@ def _release_iteration(opportunity_id: str) -> None:
 
 
 def _paper_operations(watchlist: WatchlistService) -> Any:
-    from sports_hedge.api.paper import get_paper_operations_service, get_priority_alert_service
+    from sports_hedge.api.paper import get_paper_operations_service, operations_priority_alerts
 
-    return get_paper_operations_service(watchlist, get_priority_alert_service())
+    return get_paper_operations_service(watchlist, operations_priority_alerts())
 
 
 def _open_iterative_trade(operations: Any, opportunity_id: str) -> Any | None:
@@ -573,10 +592,13 @@ def _open_iterative_trade(operations: Any, opportunity_id: str) -> Any | None:
     trade = getter(opportunity_id) if callable(getter) else None
     if trade is None or trade.state is not PaperTradeState.OPEN:
         return None
+    if getattr(trade, "places_orders", False):
+        return None
     if trade.unresolved_recovery or trade.active_trade_phase in {
         PaperActiveTradePhase.EXIT_MANAGEMENT,
         PaperActiveTradePhase.MONITORING_CAP_REACHED,
         PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+        PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE,
     }:
         return None
     return trade

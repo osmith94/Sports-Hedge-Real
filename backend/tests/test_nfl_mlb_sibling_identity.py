@@ -402,7 +402,7 @@ def test_nfl_exact_lines_and_catalogue_families() -> None:
     for left, right in ((game, winner), (spread, mb_spread), (total, mb_total)):
         assessment = classify_pair(left, right)
         assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-        assert catalogue_allows_live_execution(left, right) is False
+        assert catalogue_allows_live_execution(left, right) is True
 
 
 def test_unsupported_nfl_props_and_periods_stay_rejected() -> None:
@@ -472,7 +472,7 @@ def test_mlb_total_lines_catalogue_and_rejected_run_line() -> None:
     assert registered_canonical_key(other, mb_other) == f"{CANONICAL_MLB_TOTAL_RUNS}:8.5"
     for left, right in ((game, winner), (total, mb_total)):
         assert classify_pair(left, right).state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
-        assert catalogue_allows_live_execution(left, right) is False
+        assert catalogue_allows_live_execution(left, right) is True
     with pytest.raises(VenueNormalizationError, match="unsupported MLB"):
         kalshi_mlb_event(
             {

@@ -277,6 +277,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                     "detail": trade.settlement_blocker_detail,
                 }
             ),
+            1 if trade.paper_only else 0,
+            1 if trade.places_orders else 0,
+            1 if trade.live_fill_unknown else 0,
         )
         self._connection.execute(
             """
@@ -289,8 +292,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 settlement_detail, provenance, fx_snapshots_json, venue_costs_json,
                 entry_risk_json, close_risks_json, close_fills_json, position_management_json,
                 tranches_json, active_trade_phase, residual_exposure_gbp, unresolved_recovery,
-                settlement_reconciliation_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                settlement_reconciliation_json, paper_only, places_orders, live_fill_unknown
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_id) DO UPDATE SET
                 opportunity_id = excluded.opportunity_id,
                 canonical_event_id = excluded.canonical_event_id,
@@ -328,7 +331,10 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                 active_trade_phase = excluded.active_trade_phase,
                 residual_exposure_gbp = excluded.residual_exposure_gbp,
                 unresolved_recovery = excluded.unresolved_recovery,
-                settlement_reconciliation_json = excluded.settlement_reconciliation_json
+                settlement_reconciliation_json = excluded.settlement_reconciliation_json,
+                paper_only = excluded.paper_only,
+                places_orders = excluded.places_orders,
+                live_fill_unknown = excluded.live_fill_unknown
             """,
             payload,
         )
@@ -341,8 +347,8 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                     displayed_odds, filled_odds, source_market_id, source_event_id,
                     source_runner_id, source_contract_id, opening_action, canonical_state,
                     settlement_fingerprint_key, fill_id, fill_kind, capital_source, execution_mode,
-                    tranche_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tranche_id, fill_quantity_known
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade.trade_id,
@@ -365,6 +371,7 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
                     leg.capital_source.value,
                     leg.execution_mode,
                     leg.tranche_id,
+                    1 if leg.fill_quantity_known else 0,
                 ),
             )
         for event in trade.audit:
@@ -487,6 +494,9 @@ class SqlitePaperTradeRepository(SerializedLedgerBound):
             active_trade_phase=_active_trade_phase_from_row(row),
             residual_exposure_gbp=_decimal(_row_value(row, "residual_exposure_gbp")),
             unresolved_recovery=bool(int(_row_value(row, "unresolved_recovery", 0) or 0)),
+            paper_only=bool(int(_row_value(row, "paper_only", 1) or 0)),
+            places_orders=bool(int(_row_value(row, "places_orders", 0) or 0)),
+            live_fill_unknown=bool(int(_row_value(row, "live_fill_unknown", 0) or 0)),
             audit=audit,
             **_settlement_reconciliation_fields(row),
         )
@@ -533,6 +543,9 @@ class SqlitePaperLedger:
             self._connection, commit=self._commit
         )
         self.accounting_emitter = AccountingEventEmitter(self.accounting_events)
+        from sports_hedge.execution.attempts import LiveExecutionAttemptStore
+
+        self.live_attempts = LiveExecutionAttemptStore(self._connection)
         if auto_seed:
             self.treasury.ensure_demo_session(
                 seed_gbp=seed_gbp,
@@ -791,6 +804,29 @@ class SqlitePaperLedger:
 
         ensure_active_trade_event_schema(self._connection)
         self._ensure_accounting_event_tables()
+        self._ensure_live_execution_columns()
+
+    def _ensure_live_execution_columns(self) -> None:
+        """Actual venue fills and the pre-write execution attempt are additive."""
+
+        if "paper_trades" in _table_names(self._connection):
+            trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
+            additions = {
+                "paper_only": "INTEGER NOT NULL DEFAULT 1",
+                "places_orders": "INTEGER NOT NULL DEFAULT 0",
+                "live_fill_unknown": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, spec in additions.items():
+                if name not in trade_cols:
+                    self._connection.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {spec}")
+        if "paper_trade_legs" in _table_names(self._connection):
+            leg_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trade_legs)")}
+            if "fill_quantity_known" not in leg_cols:
+                self._connection.execute(
+                    "ALTER TABLE paper_trade_legs ADD COLUMN fill_quantity_known "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+        self._connection.commit()
 
     def _ensure_risk_snapshot_columns(self) -> None:
         trade_cols = {row[1] for row in self._connection.execute("PRAGMA table_info(paper_trades)")}
@@ -1040,6 +1076,7 @@ def _leg_from_row(item: sqlite3.Row) -> PaperTradeLeg:
             "capital_source": _row_value(item, "capital_source") or "AUTO_POOL",
             "execution_mode": _row_value(item, "execution_mode") or "INTERNAL",
             "tranche_id": _row_value(item, "tranche_id") or OPENING_TRANCHE_ID,
+            "fill_quantity_known": bool(int(_row_value(item, "fill_quantity_known", 1) or 0)),
         }
     )
 

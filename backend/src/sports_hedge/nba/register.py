@@ -1,7 +1,7 @@
-"""Owner-gated NBA PAPER register.
+"""Owner-gated NBA register.
 
-PAPER admission is Kalshi↔Polymarket GAME_WINNER only. Spreads, totals, and
-every Matchbook pair stay fail-closed because ordinary full-game/OT game-book
+Admission is Kalshi↔Polymarket GAME_WINNER only. Spreads, totals, and every
+Matchbook pair stay fail-closed because ordinary full-game/OT game-book
 evidence is not established. Exceptional lifecycle is not the block.
 """
 

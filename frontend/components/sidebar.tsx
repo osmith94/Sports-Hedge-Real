@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { ExitSportsHedge } from "./exit-sports-hedge";
+import { RuntimeModeFooter, useRuntimeMode } from "./runtime-mode-provider";
 
 const navGroups = [
   {
@@ -34,8 +35,17 @@ const navGroups = [
   },
 ];
 
+function simulationNavLabel(href: string, label: string): string {
+  if (href === "/arbitrage/priority-alerts") return "Priority Alerts · simulation";
+  if (href === "/paper") return "Paper Portfolio · simulation";
+  if (href === "/treasury") return "Simulation Treasury";
+  return label;
+}
+
 export function Sidebar() {
   const pathname = usePathname();
+  const runtime = useRuntimeMode();
+  const simulation = runtime.simulationSection;
 
   return (
     <aside className="sidebar">
@@ -43,7 +53,7 @@ export function Sidebar() {
         <div className="brand-mark">SH</div>
         <div>
           <div className="brand-title">SPORTS HEDGE</div>
-          <div className="brand-subtitle">paper operations terminal</div>
+          <div className="brand-subtitle">{runtime.subtitle}</div>
         </div>
       </div>
 
@@ -65,7 +75,7 @@ export function Sidebar() {
                   key={item.href}
                 >
                   <span className="nav-icon">{item.icon}</span>
-                  <span>{item.label}</span>
+                  <span>{simulation ? simulationNavLabel(item.href, item.label) : item.label}</span>
                 </Link>
               );
             })}
@@ -74,10 +84,7 @@ export function Sidebar() {
       ))}
 
       <div className="sidebar-footer">
-        <div className="paper-pill"><span className="paper-dot" /> PAPER MODE</div>
-        <div className="sidebar-note">
-          Research and simulation only. Live execution is disabled at the application boundary.
-        </div>
+        <RuntimeModeFooter />
         <ExitSportsHedge />
       </div>
     </aside>

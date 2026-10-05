@@ -8,8 +8,9 @@ TENNIS_EVENT_DOUBLES = "doubles"
 TENNIS_EVENT_UNKNOWN = "unknown"
 
 # Captured 2026-09-24. Retirement / walkover / postponement rules are not
-# equivalent across Kalshi, Polymarket and Matchbook, so Match Winner is
-# catalogue-priceable and not solver/paper executable.
+# equivalent across Kalshi, Polymarket and Matchbook. Owner decision
+# 2026-09-26 admits structurally identical singles Match Winner. The
+# historical reason string stays on the fingerprint.
 TENNIS_RETIREMENT_SETTLEMENT_NOT_EQUIVALENT = "tennis_retirement_settlement_not_equivalent"
 TENNIS_ROUND_UNAVAILABLE = "tennis_round_unavailable"
 TENNIS_ROUND_MISMATCH = "tennis_round_mismatch"

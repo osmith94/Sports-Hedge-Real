@@ -49,6 +49,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+from sports_hedge.arbitrage.watchlist.economics import (
+    DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP,
+    DEFAULT_HOT_PROXIMITY_BAND_PP,
+)
 from sports_hedge.config import Settings, get_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -118,6 +122,15 @@ class OperatorScannerSettings(BaseModel):
         default=DEFAULT_UNIVERSE_DISCOVERY_REFRESH_SECONDS,
         ge=UNIVERSE_CADENCE_MIN_SECONDS,
         le=UNIVERSE_CADENCE_MAX_SECONDS,
+    )
+    hot_proximity_band_pp: Decimal = Field(
+        default=DEFAULT_HOT_PROXIMITY_BAND_PP,
+        gt=0,
+        le=10,
+    )
+    hot_minimum_limiting_depth_gbp: Decimal = Field(
+        default=DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP,
+        ge=0,
     )
     # Deprecated display/migration column. No allocation authority.
     max_allocated_per_trade_gbp: Decimal = Field(
@@ -235,6 +248,8 @@ class OperatorScannerSettingsUpdate(BaseModel):
         ge=UNIVERSE_CADENCE_MIN_SECONDS,
         le=UNIVERSE_CADENCE_MAX_SECONDS,
     )
+    hot_proximity_band_pp: Decimal | None = Field(default=None, gt=0, le=10)
+    hot_minimum_limiting_depth_gbp: Decimal | None = Field(default=None, ge=0)
     max_allocated_per_trade_gbp: Decimal | None = Field(
         default=None,
         ge=MAX_ALLOCATED_PER_TRADE_MIN_GBP,
@@ -398,6 +413,24 @@ def _env_max_allocated_per_trade_gbp(settings: Settings) -> Decimal:
     return clamp_max_allocated_per_trade_gbp(configured)
 
 
+def clamp_hot_proximity_band_pp(value: object) -> Decimal:
+    amount = Decimal(str(value)).quantize(Decimal("0.0001"))
+    if amount <= 0:
+        return DEFAULT_HOT_PROXIMITY_BAND_PP
+    if amount > Decimal("10"):
+        return Decimal("10")
+    return amount
+
+
+def clamp_hot_minimum_limiting_depth_gbp(value: object) -> Decimal:
+    amount = Decimal(str(value))
+    if amount < 0:
+        return Decimal("0")
+    if amount > Decimal("1000000"):
+        return Decimal("1000000")
+    return amount.quantize(Decimal("0.01"))
+
+
 def _env_outright_min_net_edge(settings: Settings) -> Decimal | None:
     configured = settings.outright_min_net_edge
     if configured is None:
@@ -434,6 +467,10 @@ def env_operator_scanner_settings(
         ),
         universe_discovery_refresh_seconds=clamp_universe_cadence_seconds(
             resolved.paper_universe_discovery_interval_seconds
+        ),
+        hot_proximity_band_pp=clamp_hot_proximity_band_pp(resolved.hot_proximity_band_pp),
+        hot_minimum_limiting_depth_gbp=clamp_hot_minimum_limiting_depth_gbp(
+            resolved.hot_minimum_limiting_depth_gbp
         ),
         max_allocated_per_trade_gbp=_env_max_allocated_per_trade_gbp(resolved),
         max_event_gbp=_env_placement_gbp(resolved, "max_event_gbp"),
@@ -529,6 +566,15 @@ class SqliteOperatorScannerSettingsStore:
             str(row[1])
             for row in connection.execute("PRAGMA table_info(operator_scanner_settings)")
         }
+        if "hot_proximity_band_pp" not in columns:
+            connection.execute(
+                "ALTER TABLE operator_scanner_settings ADD COLUMN hot_proximity_band_pp TEXT"
+            )
+        if "hot_minimum_limiting_depth_gbp" not in columns:
+            connection.execute(
+                "ALTER TABLE operator_scanner_settings "
+                "ADD COLUMN hot_minimum_limiting_depth_gbp TEXT"
+            )
         if "background_cadence_seconds" not in columns:
             connection.execute(
                 "ALTER TABLE operator_scanner_settings "
@@ -609,6 +655,8 @@ class SqliteOperatorScannerSettingsStore:
         background_reprice_after_seconds: int | None = None,
         universe_cadence_seconds: int | None = None,
         universe_discovery_refresh_seconds: int | None = None,
+        hot_proximity_band_pp: Decimal | None = None,
+        hot_minimum_limiting_depth_gbp: Decimal | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
         max_event_gbp: Decimal | None = None,
         max_opportunity_gbp: Decimal | None = None,
@@ -725,6 +773,22 @@ class SqliteOperatorScannerSettingsStore:
                 if max_one_time_gbp is not None
                 else one_time_current
             )
+        if hot_proximity_band_pp is None:
+            if current is not None:
+                proximity_band = current.hot_proximity_band_pp
+            else:
+                proximity_band = clamp_hot_proximity_band_pp(get_settings().hot_proximity_band_pp)
+        else:
+            proximity_band = clamp_hot_proximity_band_pp(hot_proximity_band_pp)
+        if hot_minimum_limiting_depth_gbp is None:
+            if current is not None:
+                minimum_depth = current.hot_minimum_limiting_depth_gbp
+            else:
+                minimum_depth = clamp_hot_minimum_limiting_depth_gbp(
+                    get_settings().hot_minimum_limiting_depth_gbp
+                )
+        else:
+            minimum_depth = clamp_hot_minimum_limiting_depth_gbp(hot_minimum_limiting_depth_gbp)
         if outright_min_net_edge is _UNSET:
             if current is not None:
                 outright = current.outright_min_net_edge
@@ -746,6 +810,8 @@ class SqliteOperatorScannerSettingsStore:
             background_scan_interval_seconds=background_scan,
             background_reprice_after_seconds=background,
             universe_discovery_refresh_seconds=universe,
+            hot_proximity_band_pp=proximity_band,
+            hot_minimum_limiting_depth_gbp=minimum_depth,
             max_allocated_per_trade_gbp=allocated,
             max_event_gbp=event_cap,
             max_opportunity_gbp=opportunity_cap,
@@ -1018,6 +1084,18 @@ class SqliteOperatorScannerSettingsStore:
                     now,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE operator_scanner_settings
+                SET hot_proximity_band_pp = ?,
+                    hot_minimum_limiting_depth_gbp = ?
+                WHERE id = 1
+                """,
+                (
+                    str(payload.hot_proximity_band_pp),
+                    str(payload.hot_minimum_limiting_depth_gbp),
+                ),
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -1203,6 +1281,26 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         universe_cadence_seconds,
         clamp_universe_cadence_seconds,
     )
+    raw_band = _row_optional(row, "hot_proximity_band_pp")
+    if raw_band is None or str(raw_band).strip() == "":
+        hot_proximity_band_pp = clamp_hot_proximity_band_pp(get_settings().hot_proximity_band_pp)
+    else:
+        try:
+            hot_proximity_band_pp = clamp_hot_proximity_band_pp(raw_band)
+        except (InvalidOperation, ValueError):
+            hot_proximity_band_pp = DEFAULT_HOT_PROXIMITY_BAND_PP
+            source = "env_default"
+    raw_depth = _row_optional(row, "hot_minimum_limiting_depth_gbp")
+    if raw_depth is None or str(raw_depth).strip() == "":
+        hot_minimum_limiting_depth_gbp = clamp_hot_minimum_limiting_depth_gbp(
+            get_settings().hot_minimum_limiting_depth_gbp
+        )
+    else:
+        try:
+            hot_minimum_limiting_depth_gbp = clamp_hot_minimum_limiting_depth_gbp(raw_depth)
+        except (InvalidOperation, ValueError):
+            hot_minimum_limiting_depth_gbp = DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP
+            source = "env_default"
     try:
         raw_allocated = _row_optional(row, "max_allocated_per_trade_gbp")
         if raw_allocated is None or str(raw_allocated).strip() == "":
@@ -1231,6 +1329,8 @@ def _settings_from_row(row: sqlite3.Row) -> OperatorScannerSettings:
         background_scan_interval_seconds=background_scan_interval_seconds,
         background_reprice_after_seconds=background_reprice_after_seconds,
         universe_discovery_refresh_seconds=universe_discovery_refresh_seconds,
+        hot_proximity_band_pp=hot_proximity_band_pp,
+        hot_minimum_limiting_depth_gbp=hot_minimum_limiting_depth_gbp,
         max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
         max_event_gbp=event_cap,
         max_opportunity_gbp=opportunity_cap,

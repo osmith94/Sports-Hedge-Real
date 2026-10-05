@@ -2,9 +2,11 @@
 
 Sports Hedge is an internal football arbitrage research and paper-trading platform.
 
-## Phase 1
+## Mode
 
-Phase 1 is deliberately **read-only and paper-only**. It ingests market data, normalizes football markets across venues, models executable liquidity and costs, detects arbitrage, and simulates fills. It contains no real order-placement capability.
+The default runtime is **paper simulation with execution disabled**. It ingests market data, normalizes markets across venues, models executable liquidity and costs, detects arbitrage, and simulates fills.
+
+`SPORTS_HEDGE_MODE=real` is a separate live-execution seam. It does not place orders unless `SPORTS_HEDGE_EXECUTION_ENABLED` is also set, and catalogue admission is still not an order. Historical Phase 1 was paper-only; stored `paper_assumed_equivalent` labels remain readable and are not an independent execution veto.
 
 Initial venue plan:
 
@@ -12,7 +14,7 @@ Initial venue plan:
 - **Polymarket** — permitted public/read-only market data for research and paper simulation; execution disabled.
 - **Smarkets** — adapter reserved for a later phase.
 
-The paper-only boundary is enforced in both configuration and the venue interface. Phase 1 has no `place_order` or `cancel_order` methods.
+Execution stays off unless mode is `real` and execution is explicitly enabled. Paper fills are simulated.
 
 ## Repository layout
 
@@ -74,6 +76,16 @@ Then inspect:
 Double-click `scripts/windows/Start-SportsHedge-Demo.bat`. It starts the Python backend and Next.js operator console hidden, waits until they are healthy, and opens `/` (Operations Console). Fixture replay remains a labelled advanced/test path at `/demo` and is not the normal operator surface. Fast/Full auto-refresh is server-owned; the browser polls status. Primary **Run scan** posts a bounded current-identity HOT refresh to `/paper/collect/hot`, while broad `/paper/collect` discovery is explicitly labelled **Run full diagnostic** under Advanced and may return partial coverage. A companion `Stop-SportsHedge-Demo.bat` stops only the launcher-started processes after verifying PID command/path identity; a reused PID is not killed, and verified Next.js descendants of a launcher-owned `npm` wrapper are stopped before the PID file is removed. Unrelated Node processes occupying port 3000 are refused rather than killed. To fast-forward the local demo onto latest `owner-live` in one command, run `powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows\Refresh-SportsHedge-Demo.ps1` from the repo root: it stops the owned tree, verifies ports 3000/8000 are gone, `git fetch`/`switch`/`pull --ff-only` `owner-live`, clears only `frontend/.next`, prints the serving branch/SHA, and delegates startup to `Start-SportsHedge-Demo.ps1`. Logs are written under `logs/`. The launcher forces paper mode (`execution_enabled=false`), enables local paper autofill and the read-only live-refresh loop for that process only, and does not add venue write, wallet, or trading-auth capability. It is not a Vercel/cloud deploy.
 
 Requires a local `backend/.venv` with the package installed and Node.js `npm` on PATH. If port 8000/3000 already has a listener (checked from the OS, not over HTTP), the launcher reuses it only when the PID identity belongs to this Sports Hedge launcher, the listener PID is that process or a verified descendant, the process command matches, and the recorded repo root plus Git HEAD match the current checkout. A launcher-owned process from a different HEAD is stopped and restarted. An unrelated occupant of those ports is refused rather than killed. The launcher prints the current branch, SHA, and whether each process was reused or restarted. `GET /build-info` (also nested on `GET /health`) reports the serving Git SHA. Matchbook credentials belong in the repository-root `.env` (same file as `.env.example`). The launcher starts FastAPI with working directory `backend\` but does not read `backend/.env`.
+
+## Real dry-run launcher (Windows)
+
+`SPORTS_HEDGE_MODE=real` with live order execution left off. One command:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows\Start-SportsHedge-Real.ps1
+```
+
+Or double-click `scripts\windows\Start-SportsHedge-Real.bat`. The scanner loop is enabled through the legacy-named `PAPER_LIVE_REFRESH_ENABLED=true` setting; that flag does not select paper mode. Autofill, auto-unwind, and the accounting schedule stay off. Success requires `GET /health` to show `mode=real`, `execution_enabled=false`, and `live_refresh.server_loop_enabled=true`. PID files live under `logs\real-*.pid`, separate from the demo launcher. Details and the port-8000 / scanner-loop troubleshooting notes: `docs/REAL_RUNBOOK.md`.
 
 ## Windows desktop app (`SportsHedge.exe`)
 

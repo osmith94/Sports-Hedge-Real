@@ -85,7 +85,7 @@ describe("catalogue coverage display", () => {
     const rows = fixture().catalogue_coverage?.rows ?? [];
     assert.equal(
       coverageRowLabel(rows[0]),
-      "1X2             PAPER_ASSUMED_EQUIVALENT — paper assumed equivalent",
+      "1X2             REGISTERED_EQUIVALENT — paper assumed equivalent",
     );
     assert.match(coverageRowLabel(rows[1]), /BTTS\s+APPROVED_EQUIVALENT/);
     assert.match(coverageRowLabel(rows[4]), /DNB\s+VENUE_UNAVAILABLE/);
@@ -108,7 +108,7 @@ describe("catalogue coverage display", () => {
     });
     const lines = universeArchetypeSummaryLines(live);
     assert.ok(lines.some((line) => line.startsWith("match_result_1x2:")));
-    assert.ok(lines.some((line) => line.includes("1 paper-assumed")));
+    assert.ok(lines.some((line) => line.includes("1 registered equivalent")));
     assert.ok(lines.some((line) => line.startsWith("both_teams_to_score:")));
     assert.ok(lines.some((line) => line.includes("1 approved")));
   });

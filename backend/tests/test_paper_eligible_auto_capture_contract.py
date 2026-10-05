@@ -52,11 +52,6 @@ MB_K = (VenueName.MATCHBOOK, VenueName.KALSHI)
 WRITE_TOKENS = ("place_order", "cancel_order", "sign_order", "submit_order")
 
 
-def _paper_assumed(decision):
-    reasons = list(dict.fromkeys([*decision.rejection_reasons, "paper_assumed_equivalent"]))
-    return decision.model_copy(update={"rejection_reasons": reasons})
-
-
 def _qualify(scan):
     decision = scan.scan_pair(
         _matchbook_btts(),
@@ -68,7 +63,10 @@ def _qualify(scan):
     )
     assert decision.eligible_for_paper_simulation is True, decision.rejection_reasons
     assert decision.allocation is not None and decision.allocation.accepted
-    return _paper_assumed(decision)
+    assert "paper_assumed_equivalent" not in decision.rejection_reasons
+    assert not any("not_live_execution" in reason for reason in decision.rejection_reasons)
+    assert not any(reason.startswith("settlement_assumption=") for reason in decision.rejection_reasons)
+    return decision
 
 
 def _observe(scan, watchlist, decision):
@@ -90,7 +88,7 @@ def _capture_rejections(watchlist, opportunity_id: str):
     ]
 
 
-def test_paper_assumed_classify_is_triggered_not_rejected() -> None:
+def test_fresh_admitted_scan_is_triggered_without_a_diagnostic_exception() -> None:
     observed = WatchObservation(
         observed_at=datetime(2026, 9, 20, 13, tzinfo=UTC),
         canonical_event_id="evt",
@@ -102,15 +100,21 @@ def test_paper_assumed_classify_is_triggered_not_rejected() -> None:
         implied_probability_sum=Decimal("0.989"),
         solver_is_arbitrage=True,
         eligible_for_paper_simulation=True,
-        rejection_reasons=["paper_assumed_equivalent"],
+        rejection_reasons=[],
         quote_age_ms=120,
     )
     status, reasons = classify_status(
         observed, approaching_band_pp=Decimal("0.25"), max_quote_age_ms=2000
     )
-    assert "paper_assumed_equivalent" in PAPER_NONBLOCKING_REJECTION_REASONS
     assert status is OpportunityStatus.TRIGGERED
-    assert "paper_assumed_equivalent" in reasons
+    assert "paper_assumed_equivalent" not in reasons
+    assert "paper_assumed_equivalent" in PAPER_NONBLOCKING_REJECTION_REASONS
+
+    labelled = observed.model_copy(update={"rejection_reasons": ["paper_assumed_equivalent"]})
+    blocked, _blocked_reasons = classify_status(
+        labelled, approaching_band_pp=Decimal("0.25"), max_quote_age_ms=2000
+    )
+    assert blocked is OpportunityStatus.REJECTED
 
 
 def test_paper_assumed_eligible_autofill_opens_once_and_locks(tmp_path: Path) -> None:

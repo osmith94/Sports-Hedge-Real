@@ -62,7 +62,7 @@ PAIRWISE_MATRIX: tuple[PairwiseCell, ...] = (
         reason=(
             "Approved only when Kalshi Get Market or nested rules prove regulation "
             "time. GAMEWIN-unknown and fair-price 1X2 are PAPER_ASSUMED_EQUIVALENT "
-            "in paper mode (Issue #326) and never live-execution eligible."
+            "registered equivalents (Issue #326)."
         ),
         sibling_states=[
             "PAPER_ASSUMED_EQUIVALENT: Kalshi GAMEWIN result-scope placeholder unavailable",

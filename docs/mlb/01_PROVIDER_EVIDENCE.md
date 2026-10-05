@@ -71,7 +71,7 @@ Census differences the owner reviewed before approving PAPER comparison:
 - Matchbook settlement text is absent.
 - A pitcher-dependent market, if one appears later, is not equated with an action market.
 
-Whole-number totals are not modelled. A line mismatch stays rejected with `mlb_total_line_mismatch`. A pair that fails the structural register stays `mlb_structural_identity_not_admitted`. The historical string `mlb_settlement_equivalence_not_proven` is not a PAPER blocker. Structurally valid Game Winner and same-line x.5 Total Runs pairs receive `MLB_GAME_WINNER_FT` or `MLB_TOTAL_RUNS_FT:<line>` and follow the existing PAPER catalogue path. They are not live-execution eligible.
+Whole-number totals are not modelled. A line mismatch stays rejected with `mlb_total_line_mismatch`. A pair that fails the structural register stays `mlb_structural_identity_not_admitted`. The historical string `mlb_settlement_equivalence_not_proven` is not an admission blocker. Structurally valid Game Winner and same-line x.5 Total Runs pairs receive `MLB_GAME_WINNER_FT` or `MLB_TOTAL_RUNS_FT:<line>` and follow the registered catalogue path. Catalogue eligibility follows that registration. Venue orders stay separately gated and default off.
 
 ## What Stage 1 admits
 

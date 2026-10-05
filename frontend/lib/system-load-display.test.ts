@@ -144,7 +144,7 @@ describe("system load display", () => {
       }),
     );
     assert.match(lines[1].detail, /1 fixtures · 3 items/);
-    assert.equal(lines[6].detail, "3 catalogue items");
+    assert.equal(lines.find((line) => line.key === "ALL")?.detail, "3 catalogue items");
     const compact = systemLoadLines(
       load({
         hot: { fixtures: 12, pricing_fixtures: 1, working_set: 3, cadence_seconds: 30 },
@@ -244,5 +244,22 @@ describe("system load display", () => {
     assert.match(pools, /treasury-carrying-source/);
     assert.match(pools, /title=\{carryingFromTreasury\(pool\)\}/);
     assert.match(css, /\.treasury-carrying-value/);
+  });
+
+  it("shows Polymarket between Matchbook and Kalshi from system_load.polymarket", () => {
+    const lines = systemLoadDetailLines(load({
+      polymarket: { inflight: 1, limit: 8, waiting: 2, latency_ms: 40 },
+      kalshi: { inflight: 0, limit: 4, waiting: 0, participating: false },
+    }));
+    const keys = lines.map((line) => line.key);
+    const mb = keys.indexOf("MB");
+    const pm = keys.indexOf("PM");
+    const kalshi = keys.indexOf("K");
+    assert.ok(mb >= 0 && pm > mb && kalshi > pm);
+    assert.match(lines[pm].detail, /1\/8 in use/);
+    assert.match(lines[pm].detail, /queue 2/);
+    assert.match(lines[pm].detail, /svc 40ms/);
+    assert.equal(lines[kalshi].detail, "off");
+    assert.doesNotMatch(lines[pm].detail, /off/);
   });
 });

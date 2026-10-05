@@ -5,11 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "sports-hedge"
 version = "0.1.0"
-description = "Paper-only football arbitrage research engine"
+description = "Sports Hedge Real catalogue and execution-gated arbitrage engine"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
+  "cryptography>=44,<47",
   "httpx>=0.28,<1",
+  "polymarket-client==0.12.0",
   "openpyxl>=3.1,<4",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",

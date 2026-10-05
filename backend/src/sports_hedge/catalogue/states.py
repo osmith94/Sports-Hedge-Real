@@ -9,6 +9,9 @@ from sports_hedge.domain.football import CanonicalOutcome, MarketFamily
 
 class CatalogueApprovalState(StrEnum):
     APPROVED_EQUIVALENT = "approved_equivalent"
+    # Stored wire value. Semantically a registered equivalent whose settlement
+    # is assumed, not an independent Real execution veto. See
+    # catalogue.legacy_paper_labels.
     PAPER_ASSUMED_EQUIVALENT = "paper_assumed_equivalent"
     APPROVED_PARAMETER_MISMATCH = "approved_parameter_mismatch"
     KNOWN_CONTRADICTION = "known_contradiction"

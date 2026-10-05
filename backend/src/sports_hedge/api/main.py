@@ -26,6 +26,7 @@ from sports_hedge.api.watchlist import router as watchlist_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.serving_build import get_serving_build_info
 from sports_hedge.config import emit_dotenv_operator_diagnostics, get_settings, inspect_dotenv_sources
+from sports_hedge.execution.package import execution_capability
 from sports_hedge.persistence.universe_checkpoint import get_universe_checkpoint_store
 from sports_hedge.domain.models import VenueCapabilities, VenueName
 from sports_hedge.application.provider_runtime import (
@@ -47,14 +48,21 @@ async def lifespan(_app: FastAPI):
             coordinator = get_live_refresh_coordinator()
             coordinator.bind_universe_checkpoint_store(get_universe_checkpoint_store())
             coordinator.configure_from_settings()
+            from sports_hedge.api.paper import recover_orphaned_live_executions_at_startup
+
+            recover_orphaned_live_executions_at_startup()
             schedule = get_accounting_schedule()
-            await coordinator.start_server_loop(server_owned_refresh_tick)
+            # Bootstrap or reuse scanner ECB FX before any HOT / UNIVERSE /
+            # BACKGROUND worker exists. Journal revaluation still runs only
+            # when accounting_schedule_enabled is true. A failed fetch stays
+            # fail-closed; workers start only after that attempt returns.
             await schedule.start()
+            await coordinator.start_server_loop(server_owned_refresh_tick)
             try:
                 yield
             finally:
-                await schedule.stop()
                 await coordinator.stop_server_loop()
+                await schedule.stop()
                 await aclose_shared_provider_runtime()
                 await aclose_shared_matchbook_client()
         except GeneratorExit:
@@ -74,7 +82,7 @@ enable_faulthandler()
 app = FastAPI(
     title="Sports Hedge API",
     version="0.1.0",
-    description="Phase 1 paper-only football arbitrage research API",
+    description="Sports Hedge API. Default mode simulates fills. Live execution stays disabled unless explicitly armed.",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -104,6 +112,19 @@ async def build_info() -> dict[str, object]:
     return get_serving_build_info().as_public_dict()
 
 
+def _orphaned_live_executions() -> list[dict[str, object]]:
+    """Read-only operator status. This path does not reconstruct trades."""
+
+    from sports_hedge.api.paper import get_paper_journal_holder
+    from sports_hedge.execution.orphans import orphaned_live_executions
+
+    holder_factory = get_paper_journal_holder
+    cache_info = getattr(holder_factory, "cache_info", None)
+    if cache_info is not None and cache_info().currsize:
+        return holder_factory().inspect_orphaned_live_executions()
+    return orphaned_live_executions()
+
+
 @app.get("/health")
 async def health() -> dict[str, object]:
     settings = get_settings()
@@ -112,6 +133,8 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "mode": settings.sports_hedge_mode,
         "execution_enabled": settings.sports_hedge_execution_enabled,
+        "execution": execution_capability(settings),
+        "orphaned_live_executions": _orphaned_live_executions(),
         "paper_autofill_enabled": settings.paper_autofill_enabled,
         "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
         "dotenv": inspect_dotenv_sources().as_public_dict(),

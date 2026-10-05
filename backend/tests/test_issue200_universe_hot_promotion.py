@@ -118,6 +118,7 @@ def _market_row(
     settlement_key: str | None = "regulation_time|full_time",
     settlement_complete: bool | None = True,
     trigger: Decimal | None = Decimal("0.01"),
+    limiting_depth_gbp: Decimal | None = Decimal("80"),
 ) -> FixtureMarketInventoryRow:
     equivalent = status is InventoryComparisonStatus.MATCHED_EQUIVALENT
     reasons = list(rejection_reasons or [])
@@ -135,6 +136,7 @@ def _market_row(
         solver_model="strict_complete_set" if (equivalent if entered_solver is None else entered_solver) else None,
         current_net_edge=edge,
         trigger_net_edge=trigger,
+        limiting_depth_gbp=limiting_depth_gbp,
         distance_to_trigger_pp=None if edge is None or trigger is None else trigger - edge,
         solver_is_arbitrage=arb,
         matchbook=_facts(

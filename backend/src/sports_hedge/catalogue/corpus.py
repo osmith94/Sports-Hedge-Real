@@ -343,7 +343,7 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             notes=[
                 "owner_paper_mode_assumption_for_complete_game_home_draw_away",
                 "not_settlement_proven",
-                "never_live_execution_eligible",
+                "settlement_not_independently_proven",
             ],
         ),
         CorpusEntry(
@@ -361,7 +361,7 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             notes=[
                 "kalshi_unmodelled_cancellation_reschedule_fair_price",
                 "owner_paper_mode_assumption_issue_326",
-                "never_live_execution_eligible",
+                "settlement_not_independently_proven",
             ],
         ),
         CorpusEntry(
@@ -373,7 +373,7 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             right=_pm([_pm_1x2(description="See market rules.")]),
             notes=[
                 "exceptional_or_unknown_settlement_text_is_not_a_paper_blocker",
-                "never_live_execution_eligible",
+                "settlement_not_independently_proven",
             ],
         ),
         CorpusEntry(
@@ -423,7 +423,7 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             known_kind="paper_assumed",
             left=_mb([_mb_btts()]),
             right=_kalshi([_kalshi_btts(rules="See contract URL.")]),
-            notes=["owner_paper_mode_assumption_issue_326", "never_live_execution_eligible"],
+            notes=["owner_paper_mode_assumption_issue_326", "settlement_not_independently_proven"],
         ),
         CorpusEntry(
             entry_id="good-totals-25-mb-pm",
@@ -456,7 +456,7 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             known_kind="paper_assumed",
             left=_mb([_mb_totals("2.5")]),
             right=_kalshi([_kalshi_totals("2.5", rules="See contract URL.")]),
-            notes=["owner_paper_mode_assumption_issue_326", "never_live_execution_eligible"],
+            notes=["owner_paper_mode_assumption_issue_326", "settlement_not_independently_proven"],
         ),
         CorpusEntry(
             entry_id="bad-totals-line-mismatch",
@@ -537,7 +537,7 @@ def census_corpus() -> tuple[CorpusEntry, ...]:
             known_kind="paper_assumed",
             left=_mb([_mb_ftts()]),
             right=_kalshi(_kalshi_ftts(rules="Winner of the match.")),
-            notes=["owner_paper_mode_assumption_issue_326", "never_live_execution_eligible"],
+            notes=["owner_paper_mode_assumption_issue_326", "settlement_not_independently_proven"],
         ),
         CorpusEntry(
             entry_id="bad-ftts-player-goalscorer",

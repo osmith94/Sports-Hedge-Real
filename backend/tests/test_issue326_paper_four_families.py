@@ -3,7 +3,7 @@
 Owner clarification: once canonical fixture + canonical market identity match,
 MATCH_RESULT / BTTS / exact-line TOTAL / FTTS are owner-approved cross-venue
 equivalents in PAPER / READ-ONLY mode. Kalshi fair-price wording does not
-block PAPER admission. Live execution stays ineligible. No Polymarket
+block register admission. Catalogue eligibility follows registration. No Polymarket
 expansion. No timeout inflation.
 
 Deterministic fixture/demo providers. Not owner-live quotes.
@@ -130,7 +130,7 @@ def _assert_paper_assumed(left: PayloadSide, right: PayloadSide) -> None:
     assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert assessment.state is not CatalogueApprovalState.APPROVED_EQUIVALENT
     assert assessment.paper_mode_admitted is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert assessment.settlement_assumption == "regulation_time"
     assert OWNER_APPROVED_PAPER_EQUIVALENCE_REASON in assessment.notes
     mb = normalize_payload_side(left)
@@ -140,12 +140,12 @@ def _assert_paper_assumed(left: PayloadSide, right: PayloadSide) -> None:
     assert match.matched is True
     assert "paper_assumed_equivalent" in match.reasons
     assert catalogue_allows_solver(mb, kalshi) is True
-    assert catalogue_allows_live_execution(mb, kalshi) is False
+    assert catalogue_allows_live_execution(mb, kalshi) is True
     assert scan_eligible_pair(mb, kalshi, match) is True
     assert solver_model_for_pair(mb, kalshi) is not None
     admission = assess_catalogue_admission(mb, kalshi)
     assert admission.allowed is True
-    assert admission.live_execution_eligible is False
+    assert admission.live_execution_eligible is True
 
 
 def test_1x2_fair_price_is_paper_assumed_not_approved() -> None:
@@ -272,14 +272,14 @@ def test_polymarket_structural_pairs_stay_paper_admitted_without_settlement_text
     )
     assert one_x_two.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert one_x_two.paper_mode_admitted is True
-    assert one_x_two.execution_eligible is False
+    assert one_x_two.execution_eligible is True
     btts = classify_payload_pair(
         _mb([_census_mb_btts()]),
         _pm([_pm_btts(description="See market rules.")]),
     )
     assert btts.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
     assert btts.paper_mode_admitted is True
-    assert btts.execution_eligible is False
+    assert btts.execution_eligible is True
 
 
 def _incomplete_kalshi_events() -> list[dict[str, Any]]:

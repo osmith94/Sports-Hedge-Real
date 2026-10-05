@@ -1,10 +1,10 @@
 """Approved-market catalogue census (Core Tenet 20).
 
 Classifier, pairwise matrix, and the Issue #316/#326 versioned registry live here.
-HOT and UNIVERSE share this catalogue. Paper-mode admission allows
-APPROVED_EQUIVALENT and PAPER_ASSUMED_EQUIVALENT for the four locked
-Matchbook↔Kalshi families. Live execution stays independently proven
-APPROVED_EQUIVALENT and remains disabled in Phase 1.
+HOT and UNIVERSE share this catalogue. Register admission allows
+APPROVED_EQUIVALENT and the stored PAPER_ASSUMED_EQUIVALENT label for locked
+families. That stored label is a registered equivalent, not a live-execution
+veto. Venue execution stays separately gated and defaults to disabled.
 """
 
 from sports_hedge.catalogue.admission import (

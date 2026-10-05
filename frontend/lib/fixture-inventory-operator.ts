@@ -209,23 +209,21 @@ export function classifyPairs(row: KalshiFixtureMarketInventoryRow): {
         row.comparison_status === "paper_assumed_equivalent") &&
       !mappingFailed
     ) {
-      const assumed = row.comparison_status === "paper_assumed_equivalent";
+      const registered = row.comparison_status === "paper_assumed_equivalent";
       return {
         comparable: [],
         incompatible: [],
         leftoverVenues: [],
         comparableKind,
-        comparableHeadline: assumed
-          ? `Paper-assumed comparable: ${present.map(venueTitle).join(" ↔ ")}`
-          : `Comparable: ${present.map(venueTitle).join(" ↔ ")}`,
+        comparableHeadline: `Comparable: ${present.map(venueTitle).join(" ↔ ")}`,
         badges: [
           {
-            text: `${present.map(venueShortLabel).join(" ↔ ")} · ${assumed ? "paper assumed" : "equivalent"}`,
+            text: `${present.map(venueShortLabel).join(" ↔ ")} · ${registered ? "registered equivalent" : "equivalent"}`,
             tone: "eligible",
             comparable: true,
           },
         ],
-        discoveredNotes: assumed ? [paperAssumptionNote(row)] : [],
+        discoveredNotes: registered ? [registeredEquivalentNote(row)] : [],
       };
     }
   }
@@ -286,17 +284,8 @@ export function isPrimaryApprovedFamily(
   return true;
 }
 
-function paperAssumptionNote(row: KalshiFixtureMarketInventoryRow): string {
-  const family = (row.family || "").toLowerCase();
-  if (
-    family === "game_winner" ||
-    family === "point_spread" ||
-    family === "total_points" ||
-    family === "total_runs"
-  ) {
-    return "PAPER structural equivalence; not independently settlement-proven; never live-execution eligible.";
-  }
-  return "1X2 paper-mode assumption; not independently settlement-proven; never live-execution eligible.";
+function registeredEquivalentNote(_row: KalshiFixtureMarketInventoryRow): string {
+  return "Registered equivalent. Settlement follows the approved match.";
 }
 
 function marketTitle(row: KalshiFixtureMarketInventoryRow): string {
@@ -308,6 +297,13 @@ function marketTitle(row: KalshiFixtureMarketInventoryRow): string {
   return parts.join(" · ");
 }
 
+function signedNetPercent(value: string | number | null | undefined): string {
+  const parsed = number(value);
+  const text = percent(value);
+  if (parsed !== null && parsed > 0) return `+${text}`;
+  return text;
+}
+
 function compactEconomics(
   row: KalshiFixtureMarketInventoryRow,
   decision: OperatorDecision,
@@ -316,8 +312,9 @@ function compactEconomics(
     row.entered_solver || row.current_net_edge != null || row.trigger_net_edge != null;
   if (!hasEconomics) return null;
   const parts: string[] = [];
-  if (row.current_net_edge != null) parts.push(`Net ${percent(row.current_net_edge)}`);
-  if (row.trigger_net_edge != null) parts.push(`Trigger ${percent(row.trigger_net_edge)}`);
+  if (row.current_net_edge != null) parts.push(`Net ${signedNetPercent(row.current_net_edge)}`);
+  else parts.push("Net edge unavailable");
+  if (row.trigger_net_edge != null) parts.push(`Min net arb ${percent(row.trigger_net_edge)}`);
   parts.push(decision.label);
   const net = number(row.current_net_edge);
   let tone: DecisionTone = decision.tone;

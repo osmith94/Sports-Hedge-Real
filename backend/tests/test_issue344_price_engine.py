@@ -1029,8 +1029,16 @@ async def test_scheduled_hot_tick_uses_price_engine_not_legacy_collector(monkeyp
         persist_kwargs = persist_calls[0]["kwargs"]
         report = persist_calls[0]["args"][1]
         assert persist_kwargs["scan_lane"] is ScanLane.HOT
-        assert report.enabled_venues == [VenueName.MATCHBOOK, VenueName.KALSHI]
-        assert report.matching_venues == [VenueName.MATCHBOOK, VenueName.KALSHI]
+        assert report.enabled_venues == [
+            VenueName.MATCHBOOK,
+            VenueName.POLYMARKET,
+            VenueName.KALSHI,
+        ]
+        assert report.matching_venues == [
+            VenueName.MATCHBOOK,
+            VenueName.POLYMARKET,
+            VenueName.KALSHI,
+        ]
         assert report.paper_decisions == [paper.decision]
         assert report.scan_diagnostics["price_engine"] is True
         assert report.scan_diagnostics["legacy_hot_collector"] is False

@@ -299,7 +299,7 @@ def test_kc_minus_6_5_canonicalises_across_venues() -> None:
         assert NFL_EXCEPTIONAL_SETTLEMENT_CAVEAT not in result.reasons
         assert registered_canonical_key(left, right) == f"{CANONICAL_NFL_POINT_SPREAD}:-6.5"
         assert catalogue_allows_solver(left, right)
-        assert catalogue_allows_live_execution(left, right) is False
+        assert catalogue_allows_live_execution(left, right) is True
         assessment = classify_pair(left, right)
         assert assessment.state is CatalogueApprovalState.PAPER_ASSUMED_EQUIVALENT
         assert assessment.settlement_assumption == "regulation_time"

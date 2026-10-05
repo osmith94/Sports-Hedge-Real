@@ -207,7 +207,17 @@ def test_diagnostic_retention_is_seven_days_and_row_capped(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_background_persist_stores_report_without_a_second_provider_pass(tmp_path) -> None:
+async def test_background_persist_stores_report_without_a_second_provider_pass(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _RetentionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ARG003
+            return NOW
+
+    # Retention is measured from the process clock. The fixture instant is
+    # older than the 7-day diagnostic window relative to a later wall clock.
+    monkeypatch.setattr("sports_hedge.persistence.paper.datetime", _RetentionClock)
     rows = [_row(suffix="persist", matchbook_market_id="42")]
     engine, matchbook, kalshi, _layer = _engine(rows, timeout=0.2, background_interval=0)
     result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)

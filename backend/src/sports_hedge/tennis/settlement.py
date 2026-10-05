@@ -18,9 +18,10 @@ retirement, walkover, void or postponement rule text.
 
 Fair-price versus explicit 50-50, the unstable postponement window, and the
 absent Matchbook rule were captured as different exceptional contracts. Owner
-decision 2026-09-26: those differences do not block PAPER comparison of a
-structurally identical singles Match Winner. Live execution stays disabled.
-The historical reason string remains readable on old audit rows.
+decision 2026-09-26: those differences do not block comparison of a
+structurally identical singles Match Winner. Catalogue eligibility follows
+the tennis register. Venue orders stay separately gated. The historical
+reason string remains readable on old audit rows.
 """
 
 from __future__ import annotations
@@ -49,11 +50,12 @@ def tennis_match_winner_settlement() -> SettlementFingerprint:
 def tennis_executable_block_reason(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> str | None:
-    """Retirement/walkover differences do not block PAPER comparison.
+    """Retirement/walkover differences do not block registered comparison.
 
     Structural identity, singles, tournament, round, and two-outcome Match
-    Winner checks stay in the tennis register. Live execution stays disabled.
-    The historical reason string remains defined for old audit rows.
+    Winner checks stay in the tennis register. This function does not veto
+    catalogue eligibility. The historical reason string remains defined for
+    old audit rows.
     """
 
     del left, right

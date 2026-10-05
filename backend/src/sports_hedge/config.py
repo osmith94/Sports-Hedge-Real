@@ -155,7 +155,14 @@ def emit_dotenv_operator_diagnostics(*, force: bool = False) -> DotenvDiagnostic
 
 
 class Settings(BaseSettings):
-    """Runtime configuration for the Phase 1 paper-only service."""
+    """Runtime configuration.
+
+    The default remains paper with execution disabled. ``real`` names the
+    live-execution seam in this repository. Arming that seam requires both
+    ``sports_hedge_mode="real"`` and ``sports_hedge_execution_enabled=True``.
+    Read-only Matchbook and Kalshi market-data clients stay unchanged either way.
+    Paper autofill still uses simulated fills until a later wave wires the seam.
+    """
 
     model_config = SettingsConfigDict(
         env_file_encoding="utf-8",
@@ -189,7 +196,7 @@ class Settings(BaseSettings):
             file_secret_settings,
         )
 
-    sports_hedge_mode: Literal["paper"] = "paper"
+    sports_hedge_mode: Literal["paper", "real"] = "paper"
     sports_hedge_execution_enabled: bool = False
 
     matchbook_username: str | None = None
@@ -233,11 +240,27 @@ class Settings(BaseSettings):
     )
     polymarket_gamma_page_limit: int = Field(default=100, ge=1, le=100)
     polymarket_gamma_max_pages_per_series: int = Field(default=5, ge=1, le=20)
+    # Execution signing material. Empty means the Polymarket execution transport
+    # is not configured. The private key file is never read by health.
+    # 0 EOA, 1 POLY_PROXY, 2 GNOSIS_SAFE, 3 deposit wallet. Omit both funder and
+    # signature type and the transport stays unarmed: the official client would
+    # otherwise deploy a deposit wallet.
+    polymarket_private_key_path: str | None = None
+    polymarket_funder_address: str | None = None
+    polymarket_signature_type: int | None = Field(default=None, ge=0, le=3)
+    polymarket_api_key: str | None = None
+    polymarket_api_secret: str | None = None
+    polymarket_api_passphrase: str | None = None
+    polymarket_geoblock_url: str = "https://polymarket.com/api/geoblock"
 
     # Public Kalshi Trade API v2 market data. Demo host is opt-in.
     kalshi_base_url: str = "https://external-api.kalshi.com/trade-api/v2"
     kalshi_demo_base_url: str = "https://external-api.demo.kalshi.co/trade-api/v2"
     kalshi_use_demo: bool = False
+    # Execution signing material. Empty means the Kalshi execution transport is
+    # not configured. The private key file is never read by health.
+    kalshi_api_key_id: str | None = None
+    kalshi_private_key_path: str | None = None
     kalshi_event_page_limit: int = Field(default=200, ge=1, le=200)
     kalshi_event_max_pages: int = Field(default=10, ge=1, le=50)
     kalshi_series_tickers: Annotated[list[str], NoDecode] = Field(
@@ -340,6 +363,14 @@ class Settings(BaseSettings):
     # Intra-generation ApprovedEquivalent presence is generation-scoped and
     # is not extended by raising this value.
     paper_universe_current_state_ttl_seconds: int = Field(default=360, ge=60, le=900)
+    # BACKGROUND-priced Opportunity Monitor retention. Not the UNIVERSE TTL.
+    # Default 45 minutes: longer than an ordinary ~629-row BACKGROUND pass
+    # (~21 minutes at ~2s effective wall time) with margin. HOT TTL stays 90s.
+    paper_background_current_state_ttl_seconds: int = Field(default=2700, ge=361, le=14400)
+    # HOT proximity promotion. Percentage points from Min Net Arb, and the
+    # minimum GBP limiting depth from the scan/watchlist economics path.
+    hot_proximity_band_pp: float = Field(default=0.60, gt=0, le=10)
+    hot_minimum_limiting_depth_gbp: float = Field(default=10, ge=0)
     # Lane-specific operator venue defaults. Empty/invalid values keep all three
     # first-class venues on. Persisted operator selections override these.
     paper_hot_venues: Annotated[list[str], NoDecode] = Field(
@@ -513,9 +544,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def enforce_phase_one_safety(self) -> Settings:
-        if self.sports_hedge_mode != "paper":
-            raise ValueError("Phase 1 supports paper mode only")
-        if self.sports_hedge_execution_enabled:
+        if self.sports_hedge_execution_enabled and self.sports_hedge_mode != "real":
             raise ValueError("Live execution is intentionally unavailable in Phase 1")
         # PAPER_LIVE_REFRESH_INTERVAL_SECONDS remains the HOT reprice-after alias.
         # It does not set the HOT scan interval.

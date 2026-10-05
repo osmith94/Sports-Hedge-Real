@@ -150,7 +150,7 @@ async def test_scenario2_fair_price_is_paper_assumed_not_approved() -> None:
     kalshi = normalize_payload_side(right)
     assert catalogue_allows_solver(mb, kalshi) is True
     assert scan_eligible_pair(mb, kalshi, MarketMatcher().match(mb, kalshi)) is True
-    assert assess_catalogue_admission(mb, kalshi).live_execution_eligible is False
+    assert assess_catalogue_admission(mb, kalshi).live_execution_eligible is True
 
 
 @pytest.mark.asyncio

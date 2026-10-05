@@ -1,9 +1,10 @@
-"""PAPER-only NCAAB settlement. Empty register; every participating venue required.
+"""NCAAB settlement. Empty register; every participating venue required.
 
 Do not copy NBA PR #506: automatic settlement must not ignore Polymarket, and
 family support must never be broader than the Approved Match Register. No
-NCAAB venue-pair/family cell is PAPER-admitted until NCAAB-specific evidence
-exists, so automatic settlement stays disabled.
+NCAAB venue-pair/family cell is admitted until NCAAB-specific evidence
+exists, so automatic settlement stays disabled. The block is missing ordinary
+contract evidence, not a paper-only label.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from sports_hedge.ncaab.constants import (
 )
 from sports_hedge.ncaab.detect import is_ncaab_canonical_event, is_ncaab_competition_label
 
+# LEGACY readable set, including the historical paper-only token.
 NCAAB_PAPER_AUDIT_REASONS: tuple[str, ...] = (
     NCAAB_PAIR_UNAPPROVED_REASON,
     NCAAB_EXCEPTIONAL_SETTLEMENT_CAVEAT,
@@ -70,7 +72,7 @@ def ncaab_paper_settlement(
     family: MarketFamily,
     line=None,
 ) -> SettlementFingerprint:
-    """Incomplete fingerprint. The empty register, not this object, admits PAPER."""
+    """Incomplete fingerprint. The empty register does not admit NCAAB."""
 
     del family
     push = False if line is None else line_push_possible(line)
@@ -86,11 +88,13 @@ def ncaab_paper_settlement(
 
 
 def ncaab_paper_audit_reasons() -> list[str]:
-    """New rows keep the ordinary-contract block, not an exceptional-settlement caveat."""
+    """New rows keep the ordinary-contract block, not a paper-only veto.
+
+    ``ncaab_paper_not_live_execution_equivalent`` may still appear on old rows.
+    """
 
     return [
         NCAAB_PAIR_UNAPPROVED_REASON,
-        NCAAB_NOT_LIVE_EXECUTION_REASON,
         NCAAB_AUTO_SETTLEMENT_DISABLED_REASON,
     ]
 

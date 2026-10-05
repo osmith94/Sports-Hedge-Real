@@ -635,6 +635,7 @@ export type ProviderSlotLoad = {
   latency_ms?: number;
   deadline_misses?: number;
   saturated?: boolean;
+  participating?: boolean | null;
 };
 
 export type HotLoad = {
@@ -688,6 +689,7 @@ export type SystemLoadSummary = {
   hot?: HotLoad;
   background?: BackgroundLoad;
   matchbook?: ProviderSlotLoad;
+  polymarket?: ProviderSlotLoad;
   kalshi?: ProviderSlotLoad;
   universe?: UniverseLoad;
   catalogue_items?: number;
@@ -758,6 +760,8 @@ export type OperatorScannerSettings = {
   background_scan_interval_seconds?: number;
   background_reprice_after_seconds?: number;
   universe_discovery_refresh_seconds?: number;
+  hot_proximity_band_pp?: string;
+  hot_minimum_limiting_depth_gbp?: string;
   hot_cadence_seconds?: number;
   background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
@@ -784,6 +788,8 @@ export type OperatorScannerSettingsUpdate = {
   background_scan_interval_seconds?: number;
   background_reprice_after_seconds?: number;
   universe_discovery_refresh_seconds?: number;
+  hot_proximity_band_pp?: string;
+  hot_minimum_limiting_depth_gbp?: string;
   hot_cadence_seconds?: number;
   background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
@@ -1835,6 +1841,15 @@ export async function resumeUniverseSchedule(): Promise<LiveRefreshStatus> {
 
 export function getVenueHealth(): Promise<VenueHealth[]> {
   return request("/venues/health");
+}
+
+export type RuntimeHealth = {
+  mode?: string;
+  execution_enabled?: boolean;
+};
+
+export function getRuntimeHealth(): Promise<RuntimeHealth> {
+  return request<RuntimeHealth>("/health");
 }
 
 export function getFixtureDetail(canonicalEventId: string): Promise<FixtureDetailReadModel> {

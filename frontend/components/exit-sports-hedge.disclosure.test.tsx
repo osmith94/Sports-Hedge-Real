@@ -30,7 +30,7 @@ describe("Exit Sports Hedge control", () => {
     assert.match(html, />Exit Sports Hedge</);
     assert.doesNotMatch(html, /alertdialog/);
     const footer = sidebar.slice(sidebar.indexOf('className="sidebar-footer"'));
-    assert.ok(footer.indexOf("<ExitSportsHedge />") > footer.indexOf("PAPER MODE"));
+    assert.ok(footer.indexOf("<ExitSportsHedge />") > footer.indexOf("<RuntimeModeFooter />"));
   });
 
   it("asks for confirmation with the agreed wording", () => {

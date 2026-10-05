@@ -867,11 +867,11 @@ def test_independently_proven_unregistered_pair_is_not_runtime_admitted() -> Non
     assessment = classify_payload_pair(entry.left, entry.right)
     assert assessment.state is CatalogueApprovalState.APPROVED_EQUIVALENT
     assert assessment.paper_mode_admitted is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     assert assessment.matcher_matched is True
     assert catalogue_allows_solver(left, right) is True
     assert catalogue_allows_live_execution(left, right) is True
-    assert assessment.execution_eligible is False
+    assert assessment.execution_eligible is True
     from sports_hedge.config import Settings
 
     assert Settings().sports_hedge_execution_enabled is False
@@ -879,6 +879,6 @@ def test_independently_proven_unregistered_pair_is_not_runtime_admitted() -> Non
     admission = assess_catalogue_admission(left, right)
     assert admission.allowed is True
     assert admission.paper_mode_admitted is True
-    assert admission.live_execution_eligible is False
+    assert admission.live_execution_eligible is True
     assert admission.rejection_reason is None
 

@@ -410,18 +410,46 @@ def get_paper_ledger() -> SqlitePaperLedger:
     )
 
 
+def operations_priority_alerts() -> PriorityAlertService | None:
+    """Paper operations share the process alert service.
+
+    REAL mode returns None and does not construct PriorityAlertService.
+    ``/priority-alerts`` routes keep depending on ``get_priority_alert_service``
+    and remain paper-only.
+    """
+
+    if get_settings().sports_hedge_mode != "paper":
+        return None
+    return get_priority_alert_service()
+
+
 @lru_cache
 def get_paper_journal_holder() -> PaperOperationsService:
-    """Process-local paper chain backed by the durable paper ledger."""
+    """Process-local paper chain backed by the durable paper ledger.
+
+    REAL orphan recovery uses this holder and must not construct the
+    paper-only priority alert service.
+    """
 
     from sports_hedge.api.watchlist import get_watchlist_repository, get_watchlist_service
 
+    settings = get_settings()
     return PaperOperationsService(
         watchlist=get_watchlist_service(get_watchlist_repository()),
-        alerts=get_priority_alert_service(),
+        alerts=operations_priority_alerts(),
         ledger=get_paper_ledger(),
         catalogue=get_approved_market_catalogue_store(),
+        settings=settings,
     )
+
+
+def recover_orphaned_live_executions_at_startup() -> list[dict[str, Any]]:
+    """Rebuild unambiguous orphaned attempts once, before live dispatch starts.
+
+    Callers that only resolve the paper service, and ``/health``, must not use this.
+    """
+
+    return get_paper_journal_holder().recover_orphaned_live_executions()
 
 
 def _unresolved_depends(value: Any) -> bool:
@@ -437,7 +465,7 @@ def _unresolved_depends(value: Any) -> bool:
 
 def get_paper_operations_service(
     watchlist: WatchlistService = Depends(get_watchlist_service),
-    alerts: PriorityAlertService = Depends(get_priority_alert_service),
+    alerts: PriorityAlertService | None = Depends(operations_priority_alerts),
 ) -> PaperOperationsService:
     holder = get_paper_journal_holder()
     if _unresolved_depends(watchlist) or _unresolved_depends(alerts):
@@ -494,7 +522,7 @@ def get_demo_walkthrough_service() -> DemoWalkthroughService:
     watchlist = get_watchlist_service(get_watchlist_repository())
     operations = get_paper_journal_holder()
     operations.watchlist = watchlist
-    operations.alerts = get_priority_alert_service()
+    operations.alerts = operations_priority_alerts()
     scan = PaperScanService(
         get_market_intelligence_service(),
         fx_service=get_fx_rate_service(),
@@ -866,7 +894,7 @@ def scan_pair(
             service=service,
             audit=audit,
             watchlist=watchlist,
-            operations=get_paper_operations_service(watchlist, get_priority_alert_service()),
+            operations=get_paper_operations_service(watchlist, operations_priority_alerts()),
             quote_age_ms=decision.quote_age_ms,
         )
         return decision
@@ -1149,6 +1177,8 @@ def put_operator_scanner_settings(
         background_reprice_after_seconds=update.background_reprice_after_seconds,
         universe_cadence_seconds=update.universe_cadence_seconds,
         universe_discovery_refresh_seconds=update.universe_discovery_refresh_seconds,
+        hot_proximity_band_pp=update.hot_proximity_band_pp,
+        hot_minimum_limiting_depth_gbp=update.hot_minimum_limiting_depth_gbp,
         max_allocated_per_trade_gbp=update.max_allocated_per_trade_gbp,
         max_event_gbp=update.max_event_gbp,
         max_opportunity_gbp=update.max_opportunity_gbp,
@@ -1682,7 +1712,7 @@ def _persist_collection_report(
     record = build_paper_scan_cycle_record(report, scan_lane=scan_lane or report.scan_lane)
     audit.append_cycle(record)
     _persist_cycle_diagnostic(audit, report, record)
-    operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+    operations = get_paper_operations_service(watchlist, operations_priority_alerts())
     already_captured = bool(
         (report.scan_diagnostics or {}).get(PRICE_ENGINE_ITEM_COMPLETION_CAPTURE)
     )
@@ -1975,6 +2005,7 @@ async def server_owned_refresh_tick(plan=None) -> None:
                 result,
                 started_at=started,
                 completed_at=finished,
+                enabled_venues=list(coordinator.pending_venues_for(ScanLane.HOT)),
             ),
             audit=audit,
         )
@@ -1987,7 +2018,12 @@ async def server_owned_refresh_tick(plan=None) -> None:
             coordinator.note_hot_scheduler_idle(idle_reason)
             return
         hot_wall = float(settings.paper_scan_hot_cycle_timeout_seconds)
-        price_engine_venues = [VenueName.MATCHBOOK, VenueName.KALSHI]
+        pending_hot = set(coordinator.pending_venues_for(ScanLane.HOT))
+        price_engine_venues = [
+            venue
+            for venue in (VenueName.MATCHBOOK, VenueName.POLYMARKET, VenueName.KALSHI)
+            if venue in pending_hot
+        ]
 
         async def hot_runner() -> CollectionReport:
             started = coordinator.now()
@@ -2435,7 +2471,7 @@ def persist_price_engine_item_capture(
     """
 
     with _PRICE_ENGINE_ITEM_PERSIST_LOCK:
-        operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+        operations = get_paper_operations_service(watchlist, operations_priority_alerts())
         return _persist_decision(
             decision,
             service=service,
@@ -2537,7 +2573,7 @@ def bind_price_engine_item_persist(
         observed_discovery = captured.discovery_decision or decision
         audit_decision = captured.entry_decision or observed_discovery
         if decision.canonical_market_id:
-            operations = get_paper_operations_service(watchlist, get_priority_alert_service())
+            operations = get_paper_operations_service(watchlist, operations_priority_alerts())
             miss = operations.consume_execution_miss(
                 _opportunity_id(decision.canonical_market_id)
             )

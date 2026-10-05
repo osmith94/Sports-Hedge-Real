@@ -13,7 +13,7 @@ const BLOCKER_LABELS: Record<string, string> = {
   nba_normal_completion_not_proven: "NBA normal completion not proven",
   exceptional_settlement_mismatch_possible: "Historical exceptional settlement caveat",
   canonical_outcome_not_determined: "Canonical outcome not determined",
-  mlb_settlement_equivalence_not_proven: "Historical MLB settlement equivalence not proven",
+  mlb_settlement_equivalence_not_proven: "Registered MLB equivalent",
   tennis_retirement_settlement_not_equivalent: "Historical tennis retirement settlement block",
   void_matchbook_runner: "Voided Matchbook runner",
 };

@@ -18,7 +18,7 @@ LOGGER = getLogger(__name__)
 LONDON = ZoneInfo("Europe/London")
 Clock = Callable[[], datetime]
 
-# Startup is on the demo critical path. ECB must fail closed quickly; BoE is a
+# Startup is on the scanner critical path. ECB must fail closed quickly; BoE is a
 # best-effort independent check and is skipped on startup so it cannot add ~30s.
 ECB_STARTUP_TIMEOUT_SECONDS = 5.0
 ECB_SCHEDULED_TIMEOUT_SECONDS = 8.0
@@ -26,37 +26,30 @@ BOE_CHECK_TIMEOUT_SECONDS = 2.0
 PRIOR_CLOSE_RETRY_SECONDS = 300.0
 
 
-class AccountingSchedule:
-    """Separate source ingestion from the 00:00 Europe/London valuation cut-off.
+class ScannerFxSchedule:
+    """Operational ECB bootstrap and daily refresh for scanner economics.
 
-    Daily ECB ingest is contracted around 16:15 Europe/London on working days and
-    is idempotent after a successful pull for that London date. Startup bootstraps
-    the latest published close when scanner USD is missing or stale, including
-    weekends and holidays (carry-forward of the latest working-day close).
+    This is market infrastructure, not accounting. It persists one ECB close
+    into the shared ``FxRateService`` repository. HOT, BACKGROUND, and Price-2
+    read that repository. They do not fetch FX themselves. Treasury demo rates
+    are not a source here.
     """
 
     def __init__(
         self,
         fx: FxRateService,
         *,
-        journal: PaperJournal | None = None,
         clock: Clock | None = None,
         http_factory: Callable[[], httpx.Client] | None = None,
-        enabled: bool = False,
     ) -> None:
         self.fx = fx
-        self.revaluation = DailyFxRevaluationService(fx, journal or PaperJournal())
         self.clock = clock or (lambda: datetime.now(UTC))
         self.http_factory = http_factory or (lambda: httpx.Client())
-        self.enabled = enabled
         self.last_ingest_source_date: date | None = None
         self.last_daily_ingest_london_date: date | None = None
-        self.last_revaluation_date: date | None = None
         self.last_error: str | None = None
         self.last_bootstrap_source_date: date | None = None
         self._next_window_attempt_at: datetime | None = None
-        self._task: asyncio.Task[None] | None = None
-        self._stop = asyncio.Event()
 
     def scanner_usd_usable(self, *, as_of: datetime) -> bool:
         try:
@@ -68,8 +61,9 @@ class AccountingSchedule:
     def bootstrap_if_needed(self, *, now: datetime | None = None) -> dict[str, str]:
         """Fetch the latest published ECB daily close when scanner USD is unusable.
 
-        Ignores the 16:15 UK publication window so a Sunday/holiday demo start can
+        Ignores the 16:15 UK publication window so a Sunday/holiday start can
         persist Friday's close. Does not invent a treasury/demo fallback rate.
+        A usable persisted close is reused and does not call ECB again.
         """
 
         instant = now or self.clock()
@@ -96,7 +90,9 @@ class AccountingSchedule:
                 return False
         return True
 
-    def run_due_jobs(self, *, now: datetime | None = None, startup: bool = False) -> dict[str, str]:
+    def run_due(self, *, now: datetime | None = None, startup: bool = False) -> dict[str, str]:
+        """Bootstrap or refresh the shared ECB close. Does not post journals."""
+
         instant = now or self.clock()
         actions: dict[str, str] = {}
         london_date = london_calendar_date(instant)
@@ -105,25 +101,16 @@ class AccountingSchedule:
         include_boe = not startup
         if not self.scanner_usd_usable(as_of=instant) and not window_open:
             actions.update(self.bootstrap_if_needed(now=instant))
-        ingested_new_primary = False
         if self._window_ingest_due(instant, london_date):
-            ingested = self._ingest(
-                instant,
-                action_key="ingest",
-                mark_daily_window=True,
-                ecb_timeout=ecb_timeout,
-                include_boe=include_boe,
+            actions.update(
+                self._ingest(
+                    instant,
+                    action_key="ingest",
+                    mark_daily_window=True,
+                    ecb_timeout=ecb_timeout,
+                    include_boe=include_boe,
+                )
             )
-            actions.update(ingested)
-            ingested_new_primary = ingested.get("ingest") == london_date.isoformat()
-        if self.last_revaluation_date != london_date or ingested_new_primary:
-            try:
-                self.revaluation.run(valuation_date=london_date, as_of=instant)
-                self.last_revaluation_date = london_date
-                actions["revaluation"] = london_date.isoformat()
-            except Exception as exc:  # noqa: BLE001 — scheduler must keep ticking
-                self.last_error = str(exc)
-                actions["revaluation_error"] = str(exc)
         return actions
 
     def _ingest(
@@ -204,7 +191,7 @@ class AccountingSchedule:
     def operator_status(self, *, as_of: datetime | None = None) -> dict[str, object]:
         instant = as_of or self.clock()
         payload: dict[str, object] = {
-            "enabled": self.enabled,
+            "fx_ingestion_enabled": True,
             "last_ingest_source_date": (
                 None
                 if self.last_ingest_source_date is None
@@ -282,9 +269,121 @@ class AccountingSchedule:
             return today_midnight + timedelta(days=1)
         return today_midnight
 
-    async def start(self) -> None:
+
+class AccountingSchedule:
+    """GL revaluation on top of the operational scanner FX schedule.
+
+    ``enabled`` gates journal revaluation only. Scanner ECB bootstrap and the
+    daily publication-window refresh run either way, into the same
+    ``FxRateService`` repository. There is no second FX source.
+    """
+
+    def __init__(
+        self,
+        fx: FxRateService,
+        *,
+        journal: PaperJournal | None = None,
+        clock: Clock | None = None,
+        http_factory: Callable[[], httpx.Client] | None = None,
+        enabled: bool = False,
+    ) -> None:
+        self.fx = fx
+        self.fx_ingestion = ScannerFxSchedule(fx, clock=clock, http_factory=http_factory)
+        self.revaluation = DailyFxRevaluationService(fx, journal or PaperJournal())
+        self.enabled = enabled
+        self.last_revaluation_date: date | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+
+    @property
+    def clock(self) -> Clock:
+        return self.fx_ingestion.clock
+
+    @clock.setter
+    def clock(self, value: Clock) -> None:
+        self.fx_ingestion.clock = value
+
+    @property
+    def http_factory(self) -> Callable[[], httpx.Client]:
+        return self.fx_ingestion.http_factory
+
+    @http_factory.setter
+    def http_factory(self, value: Callable[[], httpx.Client]) -> None:
+        self.fx_ingestion.http_factory = value
+
+    @property
+    def last_ingest_source_date(self) -> date | None:
+        return self.fx_ingestion.last_ingest_source_date
+
+    @property
+    def last_daily_ingest_london_date(self) -> date | None:
+        return self.fx_ingestion.last_daily_ingest_london_date
+
+    @property
+    def last_bootstrap_source_date(self) -> date | None:
+        return self.fx_ingestion.last_bootstrap_source_date
+
+    @property
+    def last_error(self) -> str | None:
+        return self.fx_ingestion.last_error
+
+    @last_error.setter
+    def last_error(self, value: str | None) -> None:
+        self.fx_ingestion.last_error = value
+
+    def scanner_usd_usable(self, *, as_of: datetime) -> bool:
+        return self.fx_ingestion.scanner_usd_usable(as_of=as_of)
+
+    def bootstrap_if_needed(self, *, now: datetime | None = None) -> dict[str, str]:
+        return self.fx_ingestion.bootstrap_if_needed(now=now)
+
+    def has_todays_published_usd(self, london_date: date) -> bool:
+        return self.fx_ingestion.has_todays_published_usd(london_date)
+
+    def ingest_published_closes(
+        self,
+        *,
+        retrieved_at: datetime,
+        ecb_timeout: float = ECB_SCHEDULED_TIMEOUT_SECONDS,
+        include_boe: bool = True,
+        boe_timeout: float = BOE_CHECK_TIMEOUT_SECONDS,
+    ) -> list:
+        return self.fx_ingestion.ingest_published_closes(
+            retrieved_at=retrieved_at,
+            ecb_timeout=ecb_timeout,
+            include_boe=include_boe,
+            boe_timeout=boe_timeout,
+        )
+
+    def run_due_jobs(self, *, now: datetime | None = None, startup: bool = False) -> dict[str, str]:
+        instant = now or self.clock()
+        actions = self.fx_ingestion.run_due(now=instant, startup=startup)
         if not self.enabled:
-            return
+            return actions
+        london_date = london_calendar_date(instant)
+        ingested_new_primary = actions.get("ingest") == london_date.isoformat()
+        if self.last_revaluation_date != london_date or ingested_new_primary:
+            try:
+                self.revaluation.run(valuation_date=london_date, as_of=instant)
+                self.last_revaluation_date = london_date
+                actions["revaluation"] = london_date.isoformat()
+            except Exception as exc:  # noqa: BLE001 — scheduler must keep ticking
+                self.last_error = str(exc)
+                actions["revaluation_error"] = str(exc)
+        return actions
+
+    def operator_status(self, *, as_of: datetime | None = None) -> dict[str, object]:
+        payload = self.fx_ingestion.operator_status(as_of=as_of)
+        payload["enabled"] = self.enabled
+        payload["accounting_enabled"] = self.enabled
+        return payload
+
+    def next_london_midnight(self, *, now: datetime | None = None) -> datetime:
+        return self.fx_ingestion.next_london_midnight(now=now)
+
+    async def start(self) -> None:
+        """Start scanner FX ingestion. Revaluation runs only when enabled."""
+
         if self._task is not None and not self._task.done():
             return
         await asyncio.to_thread(self._startup)
@@ -294,7 +393,7 @@ class AccountingSchedule:
     def _startup(self) -> None:
         instant = self.clock()
         self.run_due_jobs(now=instant, startup=True)
-        self._log_scanner_usd(as_of=instant, action="startup")
+        self.fx_ingestion._log_scanner_usd(as_of=instant, action="startup")
 
     async def stop(self) -> None:
         self._stop.set()
