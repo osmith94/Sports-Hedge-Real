@@ -41,6 +41,7 @@ from sports_hedge.application.fixture_inventory import (
 )
 from sports_hedge.application.quote_freshness import effective_quote_age_ms, require_aware_instant
 from sports_hedge.application.scan_lanes import (
+    DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     DEFAULT_HOT_TTL_SECONDS,
     DEFAULT_UNIVERSE_TTL_SECONDS,
@@ -52,8 +53,9 @@ from sports_hedge.application.scan_lanes import (
 )
 from sports_hedge.arbitrage.watchlist.economics import (
     distance_to_trigger_pp,
-    is_net_proximity_hot,
+    promotes_hot_net_proximity,
     qualifies_min_net_arb,
+    resolve_hot_proximity_limits,
 )
 
 _MAPPING_INCOMPATIBLE = frozenset(
@@ -101,6 +103,9 @@ class CurrentMarketSlot:
     evaluated_absent: bool = False
     universe_generation_id: int | None = None
     universe_generation_closed_at: datetime | None = None
+    # Set only by a BACKGROUND pricing refresh. Opportunity Monitor retention
+    # uses this clock. HOT and UNIVERSE discovery do not.
+    background_priced_at: datetime | None = None
 
 
 def canonical_current_market_key(row: FixtureMarketInventoryRow) -> str:
@@ -259,6 +264,12 @@ def merge_current_market_slots(
                 previous=previous,
                 pricing_refresh=pricing_refresh,
             ),
+            background_priced_at=_background_priced_at(
+                lane,
+                scanned=scanned,
+                pricing_refresh=pricing_refresh,
+                previous=previous,
+            ),
         )
     if not incoming_rows and not pricing_refresh:
         merged = mark_evaluated_absence(
@@ -309,9 +320,11 @@ def prune_expired_market_slots(
     *,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
     universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
+    **_: object,
 ) -> dict[str, CurrentMarketSlot]:
     evaluated = require_aware_instant(now, "now")
     live: dict[str, CurrentMarketSlot] = {}
@@ -321,6 +334,7 @@ def prune_expired_market_slots(
             now=evaluated,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=background_current_state_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
             open_universe_generation_id=open_universe_generation_id,
             universe_generation_closed_at_by_id=universe_generation_closed_at_by_id,
@@ -336,9 +350,11 @@ def slot_relationship_current(
     now: datetime,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
     universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
+    **_: object,
 ) -> bool:
     """True when ApprovedEquivalent / market presence is still discovery-current.
 
@@ -351,6 +367,9 @@ def slot_relationship_current(
 
     if slot.evaluated_absent:
         return False
+    if _uses_background_current_state_retention(slot):
+        priced = require_aware_instant(slot.background_priced_at, "background_priced_at")
+        return now < priced + timedelta(seconds=background_current_state_ttl_seconds)
     if slot.universe_generation_id is not None:
         proving = slot.universe_generation_id
         if open_universe_generation_id == proving:
@@ -391,18 +410,25 @@ def slot_freshness(
     now: datetime,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     **_: object,
 ) -> str:
     quote_age = effective_quote_age_ms(row_quote_age_ms(slot.row), slot.last_scanned_at, now)
+    retention = None
+    anchor = slot.last_scanned_at
+    if _uses_background_current_state_retention(slot):
+        retention = background_current_state_ttl_seconds
+        anchor = slot.background_priced_at or slot.last_scanned_at
     return freshness_class(
         lane=slot.scan_lane,
-        last_scanned_at=slot.last_scanned_at,
+        last_scanned_at=anchor,
         now=now,
         quote_age_ms=quote_age,
         max_quote_age_ms=max_quote_age_ms,
         hot_ttl_seconds=hot_ttl_seconds,
         universe_ttl_seconds=universe_ttl_seconds,
+        retention_ttl_seconds=retention,
     )
 
 
@@ -412,6 +438,7 @@ def stamp_current_market_row(
     now: datetime | None,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     **_: object,
 ) -> FixtureMarketInventoryRow:
@@ -423,6 +450,7 @@ def stamp_current_market_row(
             now=now,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=background_current_state_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         )
     return slot.row.model_copy(
@@ -499,6 +527,12 @@ def candidate_from_current_slot(
             now=now,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=int(
+                _.get(
+                    "background_current_state_ttl_seconds",
+                    DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
+                )
+            ),
             max_quote_age_ms=max_quote_age_ms,
         )
         quote_age = effective_quote_age_ms(row_quote_age_ms(row), slot.last_scanned_at, now)
@@ -525,9 +559,11 @@ def apply_current_market_inventory(
     now: datetime | None,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
     universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
+    **_: object,
 ):
     """Project merged current markets onto fixture headline fields.
 
@@ -541,6 +577,7 @@ def apply_current_market_inventory(
     ttl = {
         "hot_ttl_seconds": hot_ttl_seconds,
         "universe_ttl_seconds": universe_ttl_seconds,
+        "background_current_state_ttl_seconds": background_current_state_ttl_seconds,
         "max_quote_age_ms": max_quote_age_ms,
     }
     relationship = [slot for slot in slots if not slot.evaluated_absent]
@@ -680,6 +717,7 @@ def current_slots_prove_qualifying_opportunity(
     now: datetime,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     **_: object,
 ) -> bool:
@@ -697,6 +735,7 @@ def current_slots_prove_qualifying_opportunity(
             now=evaluated,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=background_current_state_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         )
         if freshness != FRESHNESS_EXPIRED:
@@ -704,15 +743,21 @@ def current_slots_prove_qualifying_opportunity(
     return False
 
 
-def stored_row_proves_surveillance_opportunity(row: FixtureMarketInventoryRow) -> bool:
+def stored_row_proves_surveillance_opportunity(
+    row: FixtureMarketInventoryRow,
+    *,
+    band_pp: Decimal | None = None,
+    minimum_limiting_depth_gbp: Decimal | None = None,
+) -> bool:
     """True when merged economics justify HOT without being a paper fill.
 
     Already-triggered net ROI (`current_net_edge >= trigger_net_edge`) stays
     HOT even when executable quote-age / allocator / risk gates fail. A
-    below-trigger approved market is HOT only inside the 0.50pp proximity
-    band via `distance_to_trigger_pp`. Arbitrary positive edge, gross edge,
+    below-trigger approved market is HOT only inside the configured proximity
+    band AND when `limiting_depth_gbp` meets the configured minimum. Slightly
+    negative edges can qualify. Arbitrary distance, missing depth, gross edge,
     or a hard-coded zero trigger do not promote. Settlement/mapping
-    contradictions still fail closed.
+    contradictions still fail closed. The depth gate is not a fill gate.
     """
 
     if not _row_has_comparable_cross_venue_economics(row):
@@ -725,21 +770,55 @@ def stored_row_proves_surveillance_opportunity(row: FixtureMarketInventoryRow) -
         return False
     if qualifies_min_net_arb(current, trigger):
         return True
-    return is_net_proximity_hot(current, trigger)
+    band, minimum = resolve_hot_proximity_limits(
+        band_pp=band_pp,
+        minimum_limiting_depth_gbp=minimum_limiting_depth_gbp,
+    )
+    return promotes_hot_net_proximity(
+        current,
+        trigger,
+        row.limiting_depth_gbp,
+        band_pp=band,
+        minimum_limiting_depth_gbp=minimum,
+    )
 
 
-def stored_row_proves_net_proximity(row: FixtureMarketInventoryRow) -> bool:
-    """Below Min Net Arb but within 0.50pp. Not a fill."""
+def stored_row_proves_net_proximity(
+    row: FixtureMarketInventoryRow,
+    *,
+    band_pp: Decimal | None = None,
+    minimum_limiting_depth_gbp: Decimal | None = None,
+) -> bool:
+    """Below Min Net Arb, inside the HOT band, with enough limiting depth. Not a fill."""
 
     if not _row_has_comparable_cross_venue_economics(row):
         return False
     if row.current_net_edge is None or row.trigger_net_edge is None:
         return False
-    return is_net_proximity_hot(row.current_net_edge, row.trigger_net_edge)
+    band, minimum = resolve_hot_proximity_limits(
+        band_pp=band_pp,
+        minimum_limiting_depth_gbp=minimum_limiting_depth_gbp,
+    )
+    return promotes_hot_net_proximity(
+        row.current_net_edge,
+        row.trigger_net_edge,
+        row.limiting_depth_gbp,
+        band_pp=band,
+        minimum_limiting_depth_gbp=minimum,
+    )
 
 
-def stored_row_net_proximity_distance_pp(row: FixtureMarketInventoryRow) -> Decimal | None:
-    if not stored_row_proves_net_proximity(row):
+def stored_row_net_proximity_distance_pp(
+    row: FixtureMarketInventoryRow,
+    *,
+    band_pp: Decimal | None = None,
+    minimum_limiting_depth_gbp: Decimal | None = None,
+) -> Decimal | None:
+    if not stored_row_proves_net_proximity(
+        row,
+        band_pp=band_pp,
+        minimum_limiting_depth_gbp=minimum_limiting_depth_gbp,
+    ):
         return None
     assert row.current_net_edge is not None
     assert row.trigger_net_edge is not None
@@ -765,23 +844,35 @@ def current_slots_prove_surveillance_opportunity(
     now: datetime,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    hot_proximity_band_pp: Decimal | None = None,
+    hot_minimum_limiting_depth_gbp: Decimal | None = None,
     **_: object,
 ) -> bool:
-    """True when a radar-current slot is triggered or within 0.50pp of Min Net Arb."""
+    """True when a radar-current slot is triggered or inside the HOT proximity gate."""
 
     evaluated = require_aware_instant(now, "now")
+    band, minimum = resolve_hot_proximity_limits(
+        band_pp=hot_proximity_band_pp,
+        minimum_limiting_depth_gbp=hot_minimum_limiting_depth_gbp,
+    )
     for slot in slots:
         if slot.evaluated_absent:
             continue
         # Pure row economics first; radar freshness is the costly clock check.
-        if not stored_row_proves_surveillance_opportunity(slot.row):
+        if not stored_row_proves_surveillance_opportunity(
+            slot.row,
+            band_pp=band,
+            minimum_limiting_depth_gbp=minimum,
+        ):
             continue
         freshness = slot_freshness(
             slot,
             now=evaluated,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=background_current_state_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         )
         if freshness != FRESHNESS_EXPIRED:
@@ -795,17 +886,23 @@ def current_slots_prove_net_proximity(
     now: datetime,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    hot_proximity_band_pp: Decimal | None = None,
+    hot_minimum_limiting_depth_gbp: Decimal | None = None,
     **_: object,
 ) -> bool:
-    """True when any radar-current approved market is in the 0.50pp proximity band."""
+    """True when any radar-current approved market passes the HOT proximity gate."""
 
     return current_slots_net_proximity_distance_pp(
         slots,
         now=now,
         hot_ttl_seconds=hot_ttl_seconds,
         universe_ttl_seconds=universe_ttl_seconds,
+        background_current_state_ttl_seconds=background_current_state_ttl_seconds,
         max_quote_age_ms=max_quote_age_ms,
+        hot_proximity_band_pp=hot_proximity_band_pp,
+        hot_minimum_limiting_depth_gbp=hot_minimum_limiting_depth_gbp,
     ) is not None
 
 
@@ -815,13 +912,20 @@ def current_slots_net_proximity_distance_pp(
     now: datetime,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
+    hot_proximity_band_pp: Decimal | None = None,
+    hot_minimum_limiting_depth_gbp: Decimal | None = None,
     **_: object,
 ) -> Decimal | None:
     """Closest in-band distance among radar-current approved markets, else None."""
 
     evaluated = require_aware_instant(now, "now")
     closest: Decimal | None = None
+    band, minimum = resolve_hot_proximity_limits(
+        band_pp=hot_proximity_band_pp,
+        minimum_limiting_depth_gbp=hot_minimum_limiting_depth_gbp,
+    )
     for slot in slots:
         if slot.evaluated_absent:
             continue
@@ -830,11 +934,16 @@ def current_slots_net_proximity_distance_pp(
             now=evaluated,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=background_current_state_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         )
         if freshness == FRESHNESS_EXPIRED:
             continue
-        distance = stored_row_net_proximity_distance_pp(slot.row)
+        distance = stored_row_net_proximity_distance_pp(
+            slot.row,
+            band_pp=band,
+            minimum_limiting_depth_gbp=minimum,
+        )
         if distance is None:
             continue
         if closest is None or distance < closest:
@@ -851,6 +960,37 @@ def row_quote_age_ms(row: FixtureMarketInventoryRow) -> int | None:
     if not ages:
         return None
     return max(ages)
+
+
+def _uses_background_current_state_retention(slot: CurrentMarketSlot) -> bool:
+    """BACKGROUND pricing keeps its own monitor clock. HOT does not borrow it."""
+
+    return slot.scan_lane is not ScanLane.HOT and slot.background_priced_at is not None
+
+
+def _background_priced_at(
+    scan_lane: ScanLane,
+    *,
+    scanned: datetime,
+    pricing_refresh: bool,
+    previous: CurrentMarketSlot | None,
+) -> datetime | None:
+    """Keep the last BACKGROUND price anchor across confirming UNIVERSE scans.
+
+    A newer BACKGROUND price replaces the anchor. HOT pricing drops it and
+    uses the HOT clock. A confirming UNIVERSE rediscovery of the same live
+    relationship preserves the previous anchor. Absence, replacement of an
+    evaluated-absent slot, and a first discovery with no prior BACKGROUND
+    price do not invent one.
+    """
+
+    if pricing_refresh and scan_lane is ScanLane.UNIVERSE:
+        return scanned
+    if scan_lane is ScanLane.HOT:
+        return None
+    if previous is None or previous.evaluated_absent:
+        return None
+    return previous.background_priced_at
 
 
 def _is_universe_discovery(

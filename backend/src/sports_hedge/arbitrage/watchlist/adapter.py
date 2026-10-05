@@ -3,13 +3,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from decimal import Decimal
 
+from sports_hedge.application.mapping_review import safe_mapping_review_candidate
 from sports_hedge.arbitrage.watchlist.economics import (
     gross_edge_from_quotes,
     net_edge_from_implied_sum,
     quantized_edge,
+    selected_quote_limiting_depth,
 )
 from sports_hedge.arbitrage.watchlist.models import WatchLeg, WatchObservation
-from sports_hedge.application.mapping_review import safe_mapping_review_candidate
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.market_intelligence.models import MarketSnapshot
@@ -34,6 +35,7 @@ def observation_from_paper_decision(
     legs: list[WatchLeg] = []
     limiting_depth: Decimal | None = None
     limiting_leg: str | None = None
+    selected_quotes: list[object] = []
     implied: Decimal | None = None
     current_edge: Decimal | None = None
     gross_edge: Decimal | None = None
@@ -55,6 +57,7 @@ def observation_from_paper_decision(
             (stake.runner_outcome or "", stake.venue): stake
             for stake in solution.selected_stakes
         }
+        selected_quotes = list(decision.payoff_scan.selected_quotes)
         for quote in decision.payoff_scan.selected_quotes:
             venue_currency = _currency_for_venue(quote.venue, history)
             if venue_currency is None:
@@ -82,9 +85,6 @@ def observation_from_paper_decision(
                     cumulative_depth_gbp=quote.cumulative_depth,
                 )
             )
-            if limiting_depth is None or quote.cumulative_depth < limiting_depth:
-                limiting_depth = quote.cumulative_depth
-                limiting_leg = quote.outcome
     elif decision.depth_scan is not None:
         solution = decision.depth_scan.solution
         implied = solution.implied_probability_sum
@@ -93,6 +93,7 @@ def observation_from_paper_decision(
             current_edge = net_edge_from_implied_sum(implied)
         gross_edge = gross_edge_from_quotes(decision.depth_scan.selected_quotes)
         stake_by_outcome = {stake.outcome: stake for stake in solution.stakes}
+        selected_quotes = list(decision.depth_scan.selected_quotes)
         for quote in decision.depth_scan.selected_quotes:
             venue_currency = _currency_for_venue(quote.venue, history)
             if venue_currency is None:
@@ -120,12 +121,12 @@ def observation_from_paper_decision(
                     cumulative_depth_gbp=quote.cumulative_depth,
                 )
             )
-            if limiting_depth is None or quote.cumulative_depth < limiting_depth:
-                limiting_depth = quote.cumulative_depth
-                limiting_leg = quote.outcome
         if solver_is_arbitrage:
             capital = solution.total_stake
             guaranteed_profit = solution.guaranteed_profit
+
+    if selected_quotes:
+        limiting_depth, limiting_leg = selected_quote_limiting_depth(selected_quotes)
 
     venues = list(dict.fromkeys(leg.venue for leg in legs))
     if snapshot is not None:

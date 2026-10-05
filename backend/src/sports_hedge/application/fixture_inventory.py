@@ -166,6 +166,8 @@ class FixtureMarketInventoryRow(BaseModel):
     current_net_edge: Decimal | None = None
     trigger_net_edge: Decimal | None = None
     distance_to_trigger_pp: Decimal | None = None
+    # Same GBP figure the watchlist stores. Not a second depth calculation.
+    limiting_depth_gbp: Decimal | None = None
     solver_is_arbitrage: bool = False
     matchbook: VenueMarketFacts | None = None
     polymarket: VenueMarketFacts | None = None
@@ -694,6 +696,7 @@ def _paired_row(
         current_net_edge=_decision_net_edge(decision) if entered else None,
         trigger_net_edge=decision.minimum_net_edge if decision is not None and entered else None,
         distance_to_trigger_pp=_decision_distance(decision) if entered else None,
+        limiting_depth_gbp=_decision_limiting_depth(decision) if entered else None,
         solver_is_arbitrage=_decision_is_arb(decision) if entered else False,
         matchbook=facts_for(left) if left.venue is VenueName.MATCHBOOK else (
             facts_for(right) if right.venue is VenueName.MATCHBOOK else None
@@ -1423,6 +1426,12 @@ def _decision_net_edge(decision: PaperScanDecision | None) -> Decimal | None:
     return net_edge_from_implied_sum(implied)
 
 
+def _decision_limiting_depth(decision: PaperScanDecision | None) -> Decimal | None:
+    from sports_hedge.arbitrage.watchlist.economics import limiting_depth_gbp_from_decision
+
+    return limiting_depth_gbp_from_decision(decision)
+
+
 def _decision_distance(decision: PaperScanDecision | None) -> Decimal | None:
     current = _decision_net_edge(decision)
     if current is None or decision is None:
@@ -2005,6 +2014,7 @@ def _attach_kalshi(
         row.entered_solver = False
         row.solver_model = None
         row.current_net_edge = None
+        row.limiting_depth_gbp = None
         row.solver_is_arbitrage = False
         return
     if pair_summaries:
@@ -2024,6 +2034,8 @@ def _attach_kalshi(
             row.trigger_net_edge = best_decision.minimum_net_edge
             if row.current_net_edge is None:
                 row.current_net_edge = best.current_net_edge
+        if best_decision is not None and row.current_net_edge is not None:
+            row.limiting_depth_gbp = _decision_limiting_depth(best_decision)
         for reason in best.rejection_reasons:
             if reason not in row.rejection_reasons:
                 row.rejection_reasons.append(reason)

@@ -38,6 +38,7 @@ from sports_hedge.application.provider_access import (
 )
 from sports_hedge.application.scan_lanes import ScanLane
 from sports_hedge.application.scanner_observability import ScannerObservabilitySink
+from sports_hedge.arbitrage.depth import DepthQuoteCandidate
 from sports_hedge.arbitrage.models import PayoffSolution
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.domain.models import VenueName
@@ -78,6 +79,12 @@ def _json_walk(value: Any) -> str:
 
 
 def _positive_near_decision(*, scanned_at=NOW) -> PaperScanDecision:
+    """0.20pp inside the HOT band, with the configured minimum limiting depth.
+
+    Depth is the existing GBP-normalised selected-quote cumulative depth.
+    Proximity without that depth must not promote.
+    """
+
     return PaperScanDecision(
         scanned_at=scanned_at,
         market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=["register"]),
@@ -87,7 +94,19 @@ def _positive_near_decision(*, scanned_at=NOW) -> PaperScanDecision:
                 roi=Decimal("0.008"),
                 minimum_state_pnl=Decimal("0"),
                 numerically_validated=True,
-            )
+            ),
+            selected_quotes=[
+                DepthQuoteCandidate(
+                    outcome="yes",
+                    venue=VenueName.MATCHBOOK,
+                    source_market_id="near",
+                    source_runner_id="yes",
+                    gross_weighted_odds=Decimal("2"),
+                    net_decimal_odds=Decimal("1.9"),
+                    cumulative_depth=Decimal("80"),
+                    levels_consumed=1,
+                )
+            ],
         ),
         minimum_net_edge=Decimal("0.01"),
         solver_model="strict_complete_set",
