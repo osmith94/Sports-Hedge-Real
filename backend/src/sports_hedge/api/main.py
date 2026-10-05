@@ -52,13 +52,17 @@ async def lifespan(_app: FastAPI):
 
             recover_orphaned_live_executions_at_startup()
             schedule = get_accounting_schedule()
-            await coordinator.start_server_loop(server_owned_refresh_tick)
+            # Bootstrap or reuse scanner ECB FX before any HOT / UNIVERSE /
+            # BACKGROUND worker exists. Journal revaluation still runs only
+            # when accounting_schedule_enabled is true. A failed fetch stays
+            # fail-closed; workers start only after that attempt returns.
             await schedule.start()
+            await coordinator.start_server_loop(server_owned_refresh_tick)
             try:
                 yield
             finally:
-                await schedule.stop()
                 await coordinator.stop_server_loop()
+                await schedule.stop()
                 await aclose_shared_provider_runtime()
                 await aclose_shared_matchbook_client()
         except GeneratorExit:

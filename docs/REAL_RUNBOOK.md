@@ -13,6 +13,8 @@ ACCOUNTING_SCHEDULE_ENABLED=false
 
 `PAPER_LIVE_REFRESH_ENABLED` is a legacy-named scanner-loop setting. Setting it `true` does **not** switch the runtime into paper mode. `GET /health` must report `mode=real`.
 
+`ACCOUNTING_SCHEDULE_ENABLED=false` keeps journal revaluation off. It does not disable scanner FX. Startup bootstraps or reuses the latest published ECB USD close in the shared FX repository before any scanner pricing worker starts. The treasury demo rate is not used for scanner economics.
+
 ## One command
 
 From the repository root:

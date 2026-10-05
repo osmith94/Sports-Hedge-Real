@@ -158,12 +158,20 @@ def test_fastapi_lifespan_path_remains_intact() -> None:
     assert api_main.app.router.lifespan_context is not None
     source = (REPO_ROOT / "backend/src/sports_hedge/api/main.py").read_text(encoding="utf-8")
     for step in (
-        "await schedule.stop()",
+        "await schedule.start()",
+        "await coordinator.start_server_loop(",
         "await coordinator.stop_server_loop()",
+        "await schedule.stop()",
         "await aclose_shared_provider_runtime()",
         "await aclose_shared_matchbook_client()",
     ):
         assert step in source
+    assert source.index("await schedule.start()") < source.index(
+        "await coordinator.start_server_loop("
+    )
+    assert source.index("await coordinator.stop_server_loop()") < source.index(
+        "await schedule.stop()"
+    )
     host_source = (REPO_ROOT / "backend/src/sports_hedge/api/desktop_host.py").read_text(
         encoding="utf-8"
     )
