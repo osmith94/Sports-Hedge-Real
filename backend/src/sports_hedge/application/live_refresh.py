@@ -2116,10 +2116,33 @@ class LiveRefreshCoordinator:
             resolved.paper_universe_discovery_interval_seconds
         )
 
+    def _in_memory_hot_proximity_limits(self) -> tuple[Decimal, Decimal]:
+        """HOT band and depth already held on the coordinator. No settings I/O."""
+
+        operator = self.status.operator_settings
+        if operator is not None:
+            return operator.hot_proximity_band_pp, operator.hot_minimum_limiting_depth_gbp
+        resolved = get_settings()
+        return (
+            Decimal(str(resolved.hot_proximity_band_pp)),
+            Decimal(str(resolved.hot_minimum_limiting_depth_gbp)),
+        )
+
+    def _apply_hot_proximity_limits(self, engine: Any | None = None) -> None:
+        band, depth = self._in_memory_hot_proximity_limits()
+        target = self._price_engine if engine is None else engine
+        setter = getattr(target, "set_hot_proximity_limits", None)
+        if setter is not None:
+            setter(band_pp=band, minimum_limiting_depth_gbp=depth)
+        state_setter = getattr(self._fixture_state, "set_hot_proximity_limits", None)
+        if state_setter is not None:
+            state_setter(band_pp=band, minimum_limiting_depth_gbp=depth)
+
     def _sync_price_engine_reprice_intervals_unlocked(
         self, hot_reprice: int, background_reprice: int
     ) -> None:
         engine = self._price_engine
+        self._apply_hot_proximity_limits(engine)
         if engine is None:
             return
         hot_setter = getattr(engine, "set_hot_reprice_after_seconds", None)
@@ -2612,6 +2635,7 @@ class LiveRefreshCoordinator:
                 hot_interval_seconds=self._effective_hot_reprice_after_seconds(),
                 background_interval_seconds=self._effective_background_reprice_after_seconds(),
             )
+            self._apply_hot_proximity_limits(self._price_engine)
         else:
             self._sync_price_engine_reprice_intervals_unlocked(
                 self._effective_hot_reprice_after_seconds(),
@@ -5921,6 +5945,7 @@ class LiveRefreshCoordinator:
 
     def radar_horizon_kwargs(self, settings: Settings | None = None) -> dict[str, Any]:
         resolved = settings or get_settings()
+        band_pp, minimum_depth = self._in_memory_hot_proximity_limits()
         return {
             "hot_horizon": timedelta(minutes=resolved.paper_hot_pre_kickoff_horizon_minutes),
             "post_kickoff_unknown_horizon": timedelta(
@@ -5936,6 +5961,8 @@ class LiveRefreshCoordinator:
             ),
             "hot_interval_seconds": int(self.status.interval_seconds),
             "universe_interval_seconds": resolved.paper_live_refresh_universe_interval_seconds,
+            "hot_proximity_band_pp": band_pp,
+            "hot_minimum_limiting_depth_gbp": minimum_depth,
         }
 
     async def start_server_loop(self, tick) -> None:

@@ -324,6 +324,7 @@ def prune_expired_market_slots(
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
     universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
+    **_: object,
 ) -> dict[str, CurrentMarketSlot]:
     evaluated = require_aware_instant(now, "now")
     live: dict[str, CurrentMarketSlot] = {}
@@ -353,6 +354,7 @@ def slot_relationship_current(
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
     universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
+    **_: object,
 ) -> bool:
     """True when ApprovedEquivalent / market presence is still discovery-current.
 
@@ -561,6 +563,7 @@ def apply_current_market_inventory(
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     open_universe_generation_id: int | None = None,
     universe_generation_closed_at_by_id: dict[int, datetime] | None = None,
+    **_: object,
 ):
     """Project merged current markets onto fixture headline fields.
 
@@ -972,17 +975,22 @@ def _background_priced_at(
     pricing_refresh: bool,
     previous: CurrentMarketSlot | None,
 ) -> datetime | None:
-    """Stamp a BACKGROUND price. Discovery and HOT refresh clear that clock."""
+    """Keep the last BACKGROUND price anchor across confirming UNIVERSE scans.
+
+    A newer BACKGROUND price replaces the anchor. HOT pricing drops it and
+    uses the HOT clock. A confirming UNIVERSE rediscovery of the same live
+    relationship preserves the previous anchor. Absence, replacement of an
+    evaluated-absent slot, and a first discovery with no prior BACKGROUND
+    price do not invent one.
+    """
 
     if pricing_refresh and scan_lane is ScanLane.UNIVERSE:
         return scanned
     if scan_lane is ScanLane.HOT:
         return None
-    if scan_lane is ScanLane.UNIVERSE and not pricing_refresh:
+    if previous is None or previous.evaluated_absent:
         return None
-    if previous is not None:
-        return previous.background_priced_at
-    return None
+    return previous.background_priced_at
 
 
 def _is_universe_discovery(

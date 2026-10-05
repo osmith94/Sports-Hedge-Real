@@ -436,6 +436,8 @@ class CataloguePriceEngine:
     ) -> None:
         resolved = settings or get_settings()
         self.settings = resolved
+        self._hot_proximity_band_pp = Decimal(str(resolved.hot_proximity_band_pp))
+        self._hot_minimum_limiting_depth_gbp = Decimal(str(resolved.hot_minimum_limiting_depth_gbp))
         self.catalogue_store = catalogue_store
         self.venue_capital = venue_capital_authority
         if self.venue_capital is None and resolved.sports_hedge_mode == "real":
@@ -529,6 +531,24 @@ class CataloguePriceEngine:
         """Apply the BACKGROUND per-row reprice age without reconstructing work."""
 
         self._background_interval = int(seconds)
+
+    def set_hot_proximity_limits(
+        self,
+        *,
+        band_pp: Decimal,
+        minimum_limiting_depth_gbp: Decimal,
+    ) -> None:
+        """Apply coordinator-resolved HOT proximity limits. No settings I/O."""
+
+        self._hot_proximity_band_pp = band_pp
+        self._hot_minimum_limiting_depth_gbp = minimum_limiting_depth_gbp
+
+    def _decision_is_interesting(self, decision: PaperScanDecision | None) -> bool:
+        return _decision_is_interesting(
+            decision,
+            band_pp=self._hot_proximity_band_pp,
+            minimum_limiting_depth_gbp=self._hot_minimum_limiting_depth_gbp,
+        )
 
     def set_operator_scope(
         self,
@@ -2087,7 +2107,7 @@ class CataloguePriceEngine:
             right_id = getattr(right_market, "source_market_id", None)
             if left_id and right_id:
                 source_decisions.append((str(left_id), str(right_id), decision))
-            if _decision_is_interesting(decision):
+            if self._decision_is_interesting(decision):
                 self._maybe_promote(runtime, decision, result)
             await self._handoff_item_decision(runtime, decision, result)
         if (
@@ -3168,7 +3188,7 @@ class CataloguePriceEngine:
         row_id = runtime.identity.catalogue_row_id
         version = runtime.identity.content_version
         canonical_id = runtime.identity.canonical_event_id
-        if _decision_is_interesting(decision):
+        if self._decision_is_interesting(decision):
             self._clear_execution_miss(row_id)
             runtime.execution_miss_sticky = False
             if self.fixture_state is not None and not self._event_execution_miss_active(canonical_id):
@@ -4903,11 +4923,18 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
     return None
 
 
-def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
+def _decision_is_interesting(
+    decision: PaperScanDecision | None,
+    *,
+    band_pp: Decimal | None = None,
+    minimum_limiting_depth_gbp: Decimal | None = None,
+) -> bool:
     """Triggered Min Net Arb, or proximity inside the depth gate.
 
     Uses `current_net_edge` (`decision_net_edge`) versus `trigger_net_edge`
     (`decision.minimum_net_edge`) and the existing `limiting_depth_gbp`.
+    Band and depth are already-resolved Decimals. Omitted values use pure
+    constants. This function does not read settings or persistence.
     Does not hard-code zero or gross edge. Does not branch on sport.
     Proximity may be slightly negative. Qualifying rows keep their own gates.
     """
@@ -4920,7 +4947,10 @@ def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
         return False
     if qualifies_min_net_arb(edge, trigger):
         return True
-    band, minimum = resolve_hot_proximity_limits()
+    band, minimum = resolve_hot_proximity_limits(
+        band_pp=band_pp,
+        minimum_limiting_depth_gbp=minimum_limiting_depth_gbp,
+    )
     return promotes_hot_net_proximity(
         edge,
         trigger,

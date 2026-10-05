@@ -215,24 +215,18 @@ def resolve_hot_proximity_limits(
     band_pp: Decimal | None = None,
     minimum_limiting_depth_gbp: Decimal | None = None,
 ) -> tuple[Decimal, Decimal]:
-    """Operator HOT band and minimum limiting depth, with explicit overrides."""
+    """Fill omitted HOT proximity limits from pure constants.
 
-    configured_band = DEFAULT_HOT_PROXIMITY_BAND_PP
-    configured_depth = DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP
-    if band_pp is None or minimum_limiting_depth_gbp is None:
-        try:
-            from sports_hedge.persistence.operator_scanner_settings import (
-                effective_operator_scanner_settings,
-            )
+    This does not read operator settings or any persistence store. The
+    coordinator resolves operator values once and passes them in. Isolated
+    callers that omit the arguments get the defaults.
+    """
 
-            operator = effective_operator_scanner_settings()
-            configured_band = operator.hot_proximity_band_pp
-            configured_depth = operator.hot_minimum_limiting_depth_gbp
-        except Exception:
-            pass
     return (
-        configured_band if band_pp is None else band_pp,
-        configured_depth if minimum_limiting_depth_gbp is None else minimum_limiting_depth_gbp,
+        DEFAULT_HOT_PROXIMITY_BAND_PP if band_pp is None else band_pp,
+        DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP
+        if minimum_limiting_depth_gbp is None
+        else minimum_limiting_depth_gbp,
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from sports_hedge.application.collector import (
@@ -44,6 +45,10 @@ from sports_hedge.application.operations_read_model import (
     UniverseCatalogueSnapshot,
 )
 from sports_hedge.application.quote_freshness import require_aware_instant
+from sports_hedge.arbitrage.watchlist.economics import (
+    DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP,
+    DEFAULT_HOT_PROXIMITY_BAND_PP,
+)
 from sports_hedge.application.scan_lanes import (
     DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
@@ -250,6 +255,20 @@ class FixtureCurrentStateStore:
         self._execution_miss_hot_until: dict[str, datetime] = {}
         self._touched_ids: set[str] | None = None
         self._universe_catalogue = UniverseCatalogueMemory()
+        self._hot_proximity_limits = (
+            DEFAULT_HOT_PROXIMITY_BAND_PP,
+            DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP,
+        )
+
+    def set_hot_proximity_limits(
+        self,
+        *,
+        band_pp: Decimal,
+        minimum_limiting_depth_gbp: Decimal,
+    ) -> None:
+        """Remember coordinator-resolved HOT proximity limits. No settings I/O."""
+
+        self._hot_proximity_limits = (band_pp, minimum_limiting_depth_gbp)
 
     def clear(self, *, keep_tombstones: bool = False, keep_universe_generation: bool = False) -> None:
         with self._lock:
@@ -640,6 +659,11 @@ class FixtureCurrentStateStore:
             merged["universe_generation_closed_at_by_id"] = dict(
                 self._universe_generation_closed_at_by_id
             )
+        band, depth = self._hot_proximity_limits
+        if "hot_proximity_band_pp" not in merged:
+            merged["hot_proximity_band_pp"] = band
+        if "hot_minimum_limiting_depth_gbp" not in merged:
+            merged["hot_minimum_limiting_depth_gbp"] = depth
         return merged
 
     def _resolve_upsert_generation_id(
@@ -705,6 +729,7 @@ class FixtureCurrentStateStore:
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
         quote_age_ms_by_market: dict[str, int | None] | None = None,
         max_quote_age_ms: int = 1000,
+        **kwargs: Any,
     ) -> list[FixtureRadarRow]:
         with self._lock:
             return self._current_radar_rows_unlocked(
@@ -719,6 +744,7 @@ class FixtureCurrentStateStore:
                 universe_interval_seconds=universe_interval_seconds,
                 quote_age_ms_by_market=quote_age_ms_by_market,
                 max_quote_age_ms=max_quote_age_ms,
+                **kwargs,
             )
 
     def _current_radar_rows_unlocked(
@@ -735,6 +761,7 @@ class FixtureCurrentStateStore:
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
         quote_age_ms_by_market: dict[str, int | None] | None = None,
         max_quote_age_ms: int = 1000,
+        **kwargs: Any,
     ) -> list[FixtureRadarRow]:
         evaluated = require_aware_instant(now, "now")
         quote_ages = quote_age_ms_by_market or {}
@@ -745,6 +772,7 @@ class FixtureCurrentStateStore:
                 "universe_ttl_seconds": universe_ttl_seconds,
                 "background_current_state_ttl_seconds": background_current_state_ttl_seconds,
                 "max_quote_age_ms": max_quote_age_ms,
+                **kwargs,
             }
         )
         self._evict_non_current(
@@ -2298,6 +2326,10 @@ def _market_ttl_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed["universe_generation_closed_at_by_id"] = kwargs[
             "universe_generation_closed_at_by_id"
         ]
+    if "hot_proximity_band_pp" in kwargs:
+        allowed["hot_proximity_band_pp"] = kwargs["hot_proximity_band_pp"]
+    if "hot_minimum_limiting_depth_gbp" in kwargs:
+        allowed["hot_minimum_limiting_depth_gbp"] = kwargs["hot_minimum_limiting_depth_gbp"]
     return allowed
 
 

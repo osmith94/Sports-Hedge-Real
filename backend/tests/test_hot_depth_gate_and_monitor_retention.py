@@ -81,7 +81,7 @@ def _quote(depth: Decimal, *, outcome: str = "yes") -> DepthQuoteCandidate:
     )
 
 
-def _priced_decision(*depths: Decimal) -> PaperScanDecision:
+def _priced_decision(*depths: Decimal, edge: Decimal = EDGE_NEG_010) -> PaperScanDecision:
     return PaperScanDecision(
         scanned_at=NOW,
         canonical_event_id="evt-depth",
@@ -90,7 +90,7 @@ def _priced_decision(*depths: Decimal) -> PaperScanDecision:
         payoff_scan=PayoffScanResult(
             solution=PayoffSolution(
                 is_arbitrage=False,
-                roi=EDGE_NEG_010,
+                roi=edge,
                 minimum_state_pnl=Decimal("0"),
                 numerically_validated=True,
             ),
@@ -100,6 +100,13 @@ def _priced_decision(*depths: Decimal) -> PaperScanDecision:
         solver_model="strict_complete_set",
         eligible_for_paper_simulation=False,
     )
+
+
+def _background_price_anchor(store: FixtureCurrentStateStore):
+    record = store._rows[CANONICAL_ID]
+    live = [slot for slot in (record.markets or {}).values() if not slot.evaluated_absent]
+    assert len(live) == 1
+    return live[0].background_priced_at
 
 
 def _publish(
@@ -331,6 +338,127 @@ def test_background_retention_expiry_removes_the_row() -> None:
     gone = NOW + timedelta(seconds=DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS + 1)
     assert opportunity_id in store.current_tracked_opportunity_ids(still)
     assert opportunity_id not in store.current_tracked_opportunity_ids(gone)
+
+
+def test_universe_confirmation_preserves_background_retention_anchor() -> None:
+    """Confirming UNIVERSE rediscovery must not fall back to the 360s clock."""
+
+    store = FixtureCurrentStateStore()
+    row = _market_row(
+        edge=EDGE_ZERO,
+        arb=False,
+        trigger=MIN_NET,
+        limiting_depth_gbp=DEPTH_OK,
+        quote_age_ms=5_000,
+    )
+    opportunity_id = _publish(store, row, pricing_refresh=True)
+    confirmed = NOW + timedelta(seconds=60)
+    _publish(store, row, when=confirmed, pricing_refresh=False)
+    anchor = _background_price_anchor(store)
+    assert anchor == NOW
+    still_visible = NOW + timedelta(seconds=421)
+    assert still_visible > confirmed + timedelta(seconds=DEFAULT_UNIVERSE_TTL_SECONDS)
+    assert still_visible < NOW + timedelta(seconds=DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS)
+    assert opportunity_id in store.current_tracked_opportunity_ids(still_visible)
+    radar = store.current_radar_rows(still_visible)
+    assert len(radar) == 1
+    assert radar[0].freshness == FRESHNESS_RADAR_CURRENT
+    assert radar[0].freshness != FRESHNESS_EXECUTABLE
+    assert _background_price_anchor(store) == NOW
+
+
+def test_repeated_hot_classification_does_not_read_operator_settings(monkeypatch) -> None:
+    """Coordinator-resolved limits stay in memory. Classification does not load SQLite."""
+
+    from sports_hedge.application.current_market_inventory import (
+        current_slots_prove_surveillance_opportunity,
+    )
+    from sports_hedge.application.live_refresh import LiveRefreshCoordinator
+    from sports_hedge.application.price_engine import _decision_is_interesting
+    from sports_hedge.arbitrage.watchlist.economics import resolve_hot_proximity_limits
+
+    settings_store = SqliteOperatorScannerSettingsStore(":memory:")
+    settings_store.save_settings(
+        min_net_edge=MIN_NET,
+        max_execution_risk=40,
+        hot_proximity_band_pp=Decimal("0.40"),
+        hot_minimum_limiting_depth_gbp=Decimal("25"),
+    )
+    coordinator = LiveRefreshCoordinator(
+        clock=lambda: NOW,
+        operator_settings_store=settings_store,
+    )
+    coordinator.configure_from_settings()
+    engine = coordinator.price_engine()
+    assert engine._hot_proximity_band_pp == Decimal("0.40")
+    assert engine._hot_minimum_limiting_depth_gbp == Decimal("25.00")
+    horizon = coordinator.radar_horizon_kwargs()
+    assert horizon["hot_proximity_band_pp"] == Decimal("0.40")
+    assert horizon["hot_minimum_limiting_depth_gbp"] == Decimal("25.00")
+
+    loads = {"count": 0}
+    original_load = settings_store.load
+
+    def _counting_load():
+        loads["count"] += 1
+        return original_load()
+
+    monkeypatch.setattr(settings_store, "load", _counting_load)
+    monkeypatch.setattr(
+        "sports_hedge.persistence.operator_scanner_settings.effective_operator_scanner_settings",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("classification called effective_operator_scanner_settings")
+        ),
+    )
+    monkeypatch.setattr(
+        "sports_hedge.arbitrage.watchlist.economics.effective_operator_scanner_settings",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("economics imported operator settings")
+        ),
+        raising=False,
+    )
+
+    inside_band = _priced_decision(DEPTH_OK, edge=EDGE_POS_020)
+    outside_resolved_band = _priced_decision(DEPTH_OK, edge=EDGE_NEG_010)
+    row = _market_row(
+        edge=EDGE_POS_020,
+        arb=False,
+        trigger=MIN_NET,
+        limiting_depth_gbp=DEPTH_OK,
+    )
+    state = FixtureCurrentStateStore()
+    state.set_hot_proximity_limits(
+        band_pp=engine._hot_proximity_band_pp,
+        minimum_limiting_depth_gbp=engine._hot_minimum_limiting_depth_gbp,
+    )
+    _publish(state, row, pricing_refresh=True)
+    record = state._rows[CANONICAL_ID]
+    assert engine._decision_is_interesting(outside_resolved_band) is False
+    for _ in range(25):
+        assert engine._decision_is_interesting(inside_band) is True
+        assert (
+            _decision_is_interesting(
+                inside_band,
+                band_pp=engine._hot_proximity_band_pp,
+                minimum_limiting_depth_gbp=engine._hot_minimum_limiting_depth_gbp,
+            )
+            is True
+        )
+        assert (
+            current_slots_prove_surveillance_opportunity(
+                record.live_market_slots(),
+                now=NOW,
+                hot_proximity_band_pp=horizon["hot_proximity_band_pp"],
+                hot_minimum_limiting_depth_gbp=horizon["hot_minimum_limiting_depth_gbp"],
+            )
+            is True
+        )
+        assert CANONICAL_ID in state.hot_identity_scope(NOW)
+        coordinator.radar_horizon_kwargs()
+    assert loads["count"] == 0
+    assert "effective_operator_scanner_settings" not in inspect.getsource(promotes_hot_net_proximity)
+    assert "effective_operator_scanner_settings" not in inspect.getsource(resolve_hot_proximity_limits)
+    assert "effective_operator_scanner_settings" not in inspect.getsource(_decision_is_interesting)
 
 
 def test_tracked_cohort_does_not_backfill_audit_history() -> None:
