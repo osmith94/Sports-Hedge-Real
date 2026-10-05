@@ -1177,6 +1177,8 @@ def put_operator_scanner_settings(
         background_reprice_after_seconds=update.background_reprice_after_seconds,
         universe_cadence_seconds=update.universe_cadence_seconds,
         universe_discovery_refresh_seconds=update.universe_discovery_refresh_seconds,
+        hot_proximity_band_pp=update.hot_proximity_band_pp,
+        hot_minimum_limiting_depth_gbp=update.hot_minimum_limiting_depth_gbp,
         max_allocated_per_trade_gbp=update.max_allocated_per_trade_gbp,
         max_event_gbp=update.max_event_gbp,
         max_opportunity_gbp=update.max_opportunity_gbp,

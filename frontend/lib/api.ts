@@ -760,6 +760,8 @@ export type OperatorScannerSettings = {
   background_scan_interval_seconds?: number;
   background_reprice_after_seconds?: number;
   universe_discovery_refresh_seconds?: number;
+  hot_proximity_band_pp?: string;
+  hot_minimum_limiting_depth_gbp?: string;
   hot_cadence_seconds?: number;
   background_cadence_seconds?: number;
   universe_cadence_seconds?: number;
@@ -786,6 +788,8 @@ export type OperatorScannerSettingsUpdate = {
   background_scan_interval_seconds?: number;
   background_reprice_after_seconds?: number;
   universe_discovery_refresh_seconds?: number;
+  hot_proximity_band_pp?: string;
+  hot_minimum_limiting_depth_gbp?: string;
   hot_cadence_seconds?: number;
   background_cadence_seconds?: number;
   universe_cadence_seconds?: number;

@@ -39,7 +39,11 @@ from logging import getLogger
 from time import monotonic
 from typing import Any
 
-from sports_hedge.application.fixture_sport import resolve_discovered_fixture_sport
+from sports_hedge.application.adaptive_scheduler import (
+    LANE_EXECUTION_CANDIDATE,
+    SchedulerWork,
+    order_scheduler_work,
+)
 from sports_hedge.application.approved_market_catalogue import (
     ApprovedMarketCatalogueRow,
     DerivedPriceEngineItem,
@@ -47,7 +51,6 @@ from sports_hedge.application.approved_market_catalogue import (
     executable_polymarket_token_ids,
     required_outcomes_for_key,
 )
-from sports_hedge.application.target_competitions import resolve_catalogue_competition_code
 from sports_hedge.application.collector import (
     CollectionReport,
     CollectorIssue,
@@ -55,6 +58,7 @@ from sports_hedge.application.collector import (
     MarketEvaluationState,
     _inventory_from_observation,
 )
+from sports_hedge.application.coverage_cursor import CoverageCursor
 from sports_hedge.application.cycle_diagnostics import CycleDiagnosticAccumulator
 from sports_hedge.application.executable_liquidity import (
     decision_is_solver_arbitrage,
@@ -69,6 +73,7 @@ from sports_hedge.application.fixture_inventory import (
     assemble_fixture_inventory,
     inventory_is_comparable_opportunity,
 )
+from sports_hedge.application.fixture_sport import resolve_discovered_fixture_sport
 from sports_hedge.application.hot_market_relationships import (
     HOT_REVALIDATION_NEEDED_REASON,
     extract_matchbook_market_payload,
@@ -80,25 +85,19 @@ from sports_hedge.application.market_observation import (
     PolymarketObservationBuilder,
     VenueMarketObservation,
 )
-from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.opportunity_viability import (
     CROSS_VENUE_UNAVAILABLE,
     NO_CROSS_VENUE_CANDIDATE,
     UPPER_BOUND_BELOW_MIN_NET,
     assess_identity_viability,
     build_viability_evidence,
-    market_relationship_not_collected,
     catalogue_ready_venues,
-    venue_blocked_for_identity,
     get_opportunity_viability_cache,
+    market_relationship_not_collected,
     reset_opportunity_viability_cache,
+    venue_blocked_for_identity,
 )
-from sports_hedge.application.adaptive_scheduler import (
-    LANE_EXECUTION_CANDIDATE,
-    SchedulerWork,
-    order_scheduler_work,
-)
-from sports_hedge.application.coverage_cursor import CoverageCursor
+from sports_hedge.application.paper_scan import PaperScanService
 from sports_hedge.application.provider_access import (
     HEALTH_CAPACITY_SATURATED,
     HEALTH_DEFERRED,
@@ -110,21 +109,6 @@ from sports_hedge.application.provider_access import (
     ProviderAccessLayer,
     ProviderLease,
     get_shared_provider_access,
-)
-from sports_hedge.arbitrage.arb_upper_bound import (
-    implied_from_kalshi_book,
-    implied_from_matchbook_market,
-    implied_from_observation,
-    merge_known_implied,
-    optimistic_net_edge_upper_bound,
-)
-from sports_hedge.application.scanner_observability import (
-    PRICE_ENGINE_EVALUATED_DEFINITION,
-    PriceEnginePublicStatus,
-    PriceEngineTierStatus,
-    ScannerObservabilitySink,
-    record_operation_health,
-    venue_health_from_operation_health,
 )
 from sports_hedge.application.quote_freshness import (
     QuoteAgeAssessment,
@@ -138,24 +122,35 @@ from sports_hedge.application.scan_lanes import (
     ScanLane,
     classify_scan_lane,
 )
-from sports_hedge.arbitrage.watchlist.economics import (
-    distance_to_trigger_pp,
-    is_net_proximity_hot,
-    qualifies_min_net_arb,
+from sports_hedge.application.scanner_observability import (
+    PRICE_ENGINE_EVALUATED_DEFINITION,
+    PriceEnginePublicStatus,
+    PriceEngineTierStatus,
+    ScannerObservabilitySink,
+    record_operation_health,
+    venue_health_from_operation_health,
+)
+from sports_hedge.application.target_competitions import resolve_catalogue_competition_code
+from sports_hedge.arbitrage.arb_upper_bound import (
+    implied_from_kalshi_book,
+    implied_from_matchbook_market,
+    implied_from_observation,
+    merge_known_implied,
+    optimistic_net_edge_upper_bound,
 )
 from sports_hedge.arbitrage.min_net_threshold import catalogue_market_scope
+from sports_hedge.arbitrage.watchlist.economics import (
+    distance_to_trigger_pp,
+    limiting_depth_gbp_from_decision,
+    promotes_hot_net_proximity,
+    qualifies_min_net_arb,
+    resolve_hot_proximity_limits,
+)
 from sports_hedge.arbitrage.watchlist.models import (
     format_hot_promotion_detail,
     hot_promotion_opportunity_id,
 )
-from sports_hedge.lifecycle.execution_miss import (
-    REASON_RECENTLY_QUALIFYING_EXECUTION_MISS,
-    execution_miss_hot_active,
-)
 from sports_hedge.config import Settings, get_settings
-from sports_hedge.persistence.operator_scanner_settings import (
-    effective_operator_scanner_settings,
-)
 from sports_hedge.domain.football import (
     CanonicalEvent,
     CanonicalMarket,
@@ -168,8 +163,15 @@ from sports_hedge.domain.football import (
 )
 from sports_hedge.domain.models import VenueName
 from sports_hedge.fees.cost import VenueCostSnapshot
+from sports_hedge.lifecycle.execution_miss import (
+    REASON_RECENTLY_QUALIFYING_EXECUTION_MISS,
+    execution_miss_hot_active,
+)
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.persistence.approved_market_catalogue import SqliteApprovedMarketCatalogueStore
+from sports_hedge.persistence.operator_scanner_settings import (
+    effective_operator_scanner_settings,
+)
 from sports_hedge.venues.matchbook import MatchbookMarketGoneError
 from sports_hedge.venues.rate_limit import ProviderRateLimitedError
 
@@ -4902,10 +4904,12 @@ def _family_from_key(identity: DerivedPriceEngineItem) -> MarketFamily | None:
 
 
 def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
-    """Triggered Min Net Arb or 0.50pp net proximity. Broader than paper entry.
+    """Triggered Min Net Arb, or proximity inside the depth gate.
 
     Uses `current_net_edge` (`decision_net_edge`) versus `trigger_net_edge`
-    (`decision.minimum_net_edge`). Does not hard-code zero or gross edge.
+    (`decision.minimum_net_edge`) and the existing `limiting_depth_gbp`.
+    Does not hard-code zero or gross edge. Does not branch on sport.
+    Proximity may be slightly negative. Qualifying rows keep their own gates.
     """
 
     if decision is None:
@@ -4916,7 +4920,14 @@ def _decision_is_interesting(decision: PaperScanDecision | None) -> bool:
         return False
     if qualifies_min_net_arb(edge, trigger):
         return True
-    return is_net_proximity_hot(edge, trigger)
+    band, minimum = resolve_hot_proximity_limits()
+    return promotes_hot_net_proximity(
+        edge,
+        trigger,
+        limiting_depth_gbp_from_decision(decision),
+        band_pp=band,
+        minimum_limiting_depth_gbp=minimum,
+    )
 
 
 def _overlay_decision_inventory(
@@ -4937,9 +4948,10 @@ def _overlay_decision_inventory(
         return rows
     edge = decision_net_edge(decision)
     is_arb = decision_is_solver_arbitrage(decision)
-    if edge is None or edge <= 0:
-        if not is_arb:
-            return rows
+    depth = limiting_depth_gbp_from_decision(decision)
+    if edge is None:
+        return rows
+    if edge <= 0 and is_arb:
         edge = Decimal("0.01")
     require_kalshi = kalshi_obs is not None and polymarket_obs is None
     require_polymarket = polymarket_obs is not None and kalshi_obs is None
@@ -4955,6 +4967,7 @@ def _overlay_decision_inventory(
         for row in comparable:
             row.current_net_edge = edge
             row.trigger_net_edge = decision.minimum_net_edge
+            row.limiting_depth_gbp = depth
             row.solver_is_arbitrage = is_arb or (edge is not None and edge > 0)
             row.entered_solver = True
             if row.matchbook is not None and row.matchbook.quote_age_ms is None:
@@ -5024,6 +5037,7 @@ def _decision_inventory_row(
         solver_model=decision.solver_model or "strict_complete_set",
         current_net_edge=edge,
         trigger_net_edge=decision.minimum_net_edge,
+        limiting_depth_gbp=limiting_depth_gbp_from_decision(decision),
         solver_is_arbitrage=is_arb or edge > 0,
         matchbook=_facts(matchbook_obs),
         polymarket=_facts(other_obs) if other_obs.venue is VenueName.POLYMARKET else None,

@@ -29,6 +29,10 @@ from sports_hedge.application.hot_identity import (
     hot_scheduling_key,
     unique_hot_scheduling_ids,
 )
+from sports_hedge.application.hot_market_relationships import (
+    HotMarketRelationship,
+    relationships_from_current_slots,
+)
 from sports_hedge.application.operations_read_model import (
     AWAITING_CROSS_VENUE_STATES,
     DeferredFixtureReport,
@@ -39,12 +43,9 @@ from sports_hedge.application.operations_read_model import (
     UniverseCatalogueMetadata,
     UniverseCatalogueSnapshot,
 )
-from sports_hedge.application.hot_market_relationships import (
-    HotMarketRelationship,
-    relationships_from_current_slots,
-)
 from sports_hedge.application.quote_freshness import require_aware_instant
 from sports_hedge.application.scan_lanes import (
+    DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
     DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     DEFAULT_HOT_HORIZON,
     DEFAULT_HOT_INTERVAL_SECONDS,
@@ -672,6 +673,7 @@ class FixtureCurrentStateStore:
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
         hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+        background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
         max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     ) -> list[DiscoveredFixture]:
         """Projected fixture board. Evicts under the store lock, projects outside it."""
@@ -685,6 +687,7 @@ class FixtureCurrentStateStore:
             universe_interval_seconds=universe_interval_seconds,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=background_current_state_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         ).discovered
 
@@ -697,6 +700,7 @@ class FixtureCurrentStateStore:
         post_kickoff_current_radar_ceiling=DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
         hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+        background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
         hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
         quote_age_ms_by_market: dict[str, int | None] | None = None,
@@ -710,6 +714,7 @@ class FixtureCurrentStateStore:
                 post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
                 hot_ttl_seconds=hot_ttl_seconds,
                 universe_ttl_seconds=universe_ttl_seconds,
+                background_current_state_ttl_seconds=background_current_state_ttl_seconds,
                 hot_interval_seconds=hot_interval_seconds,
                 universe_interval_seconds=universe_interval_seconds,
                 quote_age_ms_by_market=quote_age_ms_by_market,
@@ -725,6 +730,7 @@ class FixtureCurrentStateStore:
         post_kickoff_current_radar_ceiling=DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING,
         hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+        background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
         hot_interval_seconds: int = DEFAULT_HOT_INTERVAL_SECONDS,
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
         quote_age_ms_by_market: dict[str, int | None] | None = None,
@@ -737,6 +743,7 @@ class FixtureCurrentStateStore:
             {
                 "hot_ttl_seconds": hot_ttl_seconds,
                 "universe_ttl_seconds": universe_ttl_seconds,
+                "background_current_state_ttl_seconds": background_current_state_ttl_seconds,
                 "max_quote_age_ms": max_quote_age_ms,
             }
         )
@@ -1159,6 +1166,7 @@ class FixtureCurrentStateStore:
         universe_interval_seconds: int = DEFAULT_UNIVERSE_INTERVAL_SECONDS,
         hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
         universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+        background_current_state_ttl_seconds: int = DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
         max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     ) -> OperatorBoard:
         """One eviction, then inventory and HOT counts projected off the store lock.
@@ -1175,6 +1183,7 @@ class FixtureCurrentStateStore:
             post_kickoff_current_radar_ceiling=post_kickoff_current_radar_ceiling,
             hot_ttl_seconds=hot_ttl_seconds,
             universe_ttl_seconds=universe_ttl_seconds,
+            background_current_state_ttl_seconds=background_current_state_ttl_seconds,
             max_quote_age_ms=max_quote_age_ms,
         )
         return OperatorBoard(
@@ -2277,6 +2286,10 @@ def _market_ttl_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed["hot_ttl_seconds"] = kwargs["hot_ttl_seconds"]
     if "universe_ttl_seconds" in kwargs:
         allowed["universe_ttl_seconds"] = kwargs["universe_ttl_seconds"]
+    if "background_current_state_ttl_seconds" in kwargs:
+        allowed["background_current_state_ttl_seconds"] = kwargs[
+            "background_current_state_ttl_seconds"
+        ]
     if "max_quote_age_ms" in kwargs:
         allowed["max_quote_age_ms"] = kwargs["max_quote_age_ms"]
     if "open_universe_generation_id" in kwargs:

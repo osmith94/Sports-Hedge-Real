@@ -553,10 +553,12 @@ UNIVERSE catalogue completion of a new ACTIVE row may create derived price-engin
 
 HOT promotion should be broader than actual paper/live trade eligibility.
 
+Net-proximity promotion uses the operator HOT proximity band (default 0.60 percentage points from Min Net Arb) and the operator minimum limiting depth (default £10). The depth figure is the existing scan/watchlist `limiting_depth_gbp`. A slightly negative edge inside that band can be HOT when depth is sufficient. Penny depth stays off HOT and may remain on the Opportunity Monitor. Qualifying arbs keep their own deployment, depth, and execution gates. The gate is not sport-specific.
+
 A fixture may deserve rapid monitoring because it has:
 
 - positive edge below the trade threshold;
-- near-trigger edge;
+- near-trigger edge, including a small negative edge inside the configured band when limiting depth is sufficient;
 - significant divergence;
 - rapid movement;
 - newly catalogued approved-equivalent cross-venue market.

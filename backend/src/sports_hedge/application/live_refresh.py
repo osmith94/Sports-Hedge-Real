@@ -1647,6 +1647,8 @@ class LiveRefreshCoordinator:
         background_reprice_after_seconds: int | None = None,
         universe_cadence_seconds: int | None = None,
         universe_discovery_refresh_seconds: int | None = None,
+        hot_proximity_band_pp: Decimal | None = None,
+        hot_minimum_limiting_depth_gbp: Decimal | None = None,
         max_allocated_per_trade_gbp: Decimal | None = None,
         max_event_gbp: Decimal | None = None,
         max_opportunity_gbp: Decimal | None = None,
@@ -1666,6 +1668,8 @@ class LiveRefreshCoordinator:
             background_reprice_after_seconds=background_reprice_after_seconds,
             universe_cadence_seconds=universe_cadence_seconds,
             universe_discovery_refresh_seconds=universe_discovery_refresh_seconds,
+            hot_proximity_band_pp=hot_proximity_band_pp,
+            hot_minimum_limiting_depth_gbp=hot_minimum_limiting_depth_gbp,
             max_allocated_per_trade_gbp=max_allocated_per_trade_gbp,
             max_event_gbp=max_event_gbp,
             max_opportunity_gbp=max_opportunity_gbp,
@@ -5694,6 +5698,9 @@ class LiveRefreshCoordinator:
                 universe_interval_seconds=horizon["universe_interval_seconds"],
                 hot_ttl_seconds=horizon["hot_ttl_seconds"],
                 universe_ttl_seconds=horizon["universe_ttl_seconds"],
+                background_current_state_ttl_seconds=horizon[
+                    "background_current_state_ttl_seconds"
+                ],
             )
             inventory = board.discovered
             hot_count, universe_count = board.membership
@@ -5707,6 +5714,9 @@ class LiveRefreshCoordinator:
                 universe_interval_seconds=horizon["universe_interval_seconds"],
                 hot_ttl_seconds=horizon["hot_ttl_seconds"],
                 universe_ttl_seconds=horizon["universe_ttl_seconds"],
+                background_current_state_ttl_seconds=horizon[
+                    "background_current_state_ttl_seconds"
+                ],
             )
             inventory = []
             hot_count, universe_count = projection.hot_count, projection.universe_count
@@ -5921,6 +5931,9 @@ class LiveRefreshCoordinator:
             ),
             "hot_ttl_seconds": resolved.paper_hot_current_state_ttl_seconds,
             "universe_ttl_seconds": resolved.paper_universe_current_state_ttl_seconds,
+            "background_current_state_ttl_seconds": (
+                resolved.paper_background_current_state_ttl_seconds
+            ),
             "hot_interval_seconds": int(self.status.interval_seconds),
             "universe_interval_seconds": resolved.paper_live_refresh_universe_interval_seconds,
         }

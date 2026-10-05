@@ -44,9 +44,11 @@ from sports_hedge.application.fixture_current_state import FixtureCurrentStateSt
 from sports_hedge.application.paper_operations import PaperOperationsError
 from sports_hedge.application.price_engine import _decision_is_interesting
 from sports_hedge.application.scan_lanes import ScanLane, classify_scan_lane
+from sports_hedge.arbitrage.depth import DepthQuoteCandidate
 from sports_hedge.arbitrage.models import PayoffSolution
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.arbitrage.watchlist.economics import (
+    DEFAULT_HOT_PROXIMITY_BAND_PP,
     MOVED_BELOW_MIN_NET_ARB,
     NET_PROXIMITY_BAND_PP,
     arrival_net_edge_after_venue_costs,
@@ -82,7 +84,26 @@ HIGH_COMMISSION = Decimal("0.05")
 LOW_COMMISSION = Decimal("0.01")
 
 
-def _near_decision(*, roi: Decimal, trigger: Decimal = TRIGGER) -> PaperScanDecision:
+def _near_decision(
+    *,
+    roi: Decimal,
+    trigger: Decimal = TRIGGER,
+    limiting_depth: Decimal | None = None,
+) -> PaperScanDecision:
+    quotes = []
+    if limiting_depth is not None:
+        quotes.append(
+            DepthQuoteCandidate(
+                outcome="yes",
+                venue=VenueName.MATCHBOOK,
+                source_market_id="mb",
+                source_runner_id="y",
+                gross_weighted_odds=Decimal("2"),
+                net_decimal_odds=Decimal("2"),
+                cumulative_depth=limiting_depth,
+                levels_consumed=1,
+            )
+        )
     return PaperScanDecision(
         scanned_at=NOW,
         market_match=MarketMatchResult(matched=True, confidence=1.0, reasons=["register"]),
@@ -92,7 +113,8 @@ def _near_decision(*, roi: Decimal, trigger: Decimal = TRIGGER) -> PaperScanDeci
                 roi=roi,
                 minimum_state_pnl=Decimal("0"),
                 numerically_validated=True,
-            )
+            ),
+            selected_quotes=quotes,
         ),
         minimum_net_edge=trigger,
         solver_model="strict_complete_set",
@@ -102,11 +124,14 @@ def _near_decision(*, roi: Decimal, trigger: Decimal = TRIGGER) -> PaperScanDeci
 
 def test_distance_contract_is_current_net_versus_trigger_net() -> None:
     assert NET_PROXIMITY_BAND_PP == Decimal("0.50")
+    assert DEFAULT_HOT_PROXIMITY_BAND_PP == Decimal("0.60")
     assert qualifies_min_net_arb(EDGE_120, TRIGGER) is True
     assert distance_to_trigger_pp(EDGE_080, TRIGGER) == Decimal("0.2000")
     assert is_net_proximity_hot(EDGE_080, TRIGGER) is True
     assert distance_to_trigger_pp(EDGE_049, TRIGGER) == Decimal("0.5100")
-    assert is_net_proximity_hot(EDGE_049, TRIGGER) is False
+    # 0.51pp is inside the 0.60 HOT band and outside the 0.50 watchlist band.
+    assert is_net_proximity_hot(EDGE_049, TRIGGER) is True
+    assert is_net_proximity_hot(EDGE_049, TRIGGER, band_pp=Decimal("0.50")) is False
     assert net_proximity_reason_label(Decimal("0.05")) == "NET PROXIMITY · 0.05pp TO TRIGGER"
     assert net_proximity_reason_label(Decimal("0.20")) == "NET PROXIMITY · 0.20pp TO TRIGGER"
 
@@ -137,7 +162,7 @@ def test_current_net_080_trigger_100_is_hot_proximity_without_fill() -> None:
     assert stored_row_proves_qualifying_executable(row) is False
     assert stored_row_proves_net_proximity(row) is True
     assert stored_row_proves_surveillance_opportunity(row) is True
-    assert _decision_is_interesting(_near_decision(roi=EDGE_080)) is True
+    assert _decision_is_interesting(_near_decision(roi=EDGE_080, limiting_depth=Decimal("80"))) is True
 
     store = FixtureCurrentStateStore()
     fixture = _fixture(opportunity="near", arb=False, qualifying=0)
@@ -152,7 +177,7 @@ def test_current_net_080_trigger_100_is_hot_proximity_without_fill() -> None:
     assert shown.hot_reasons == [net_proximity_reason_label(Decimal("0.20"))]
 
 
-def test_current_net_049_trigger_100_is_not_economically_hot() -> None:
+def test_current_net_049_trigger_100_is_hot_inside_060_band_with_depth() -> None:
     status, _reasons = classify_status(
         _observation(edge=EDGE_049, eligible=False, rejection_reasons=["net_edge_below_threshold"]),
         approaching_band_pp=NET_PROXIMITY_BAND_PP,
@@ -160,8 +185,8 @@ def test_current_net_049_trigger_100_is_not_economically_hot() -> None:
     )
     assert status is OpportunityStatus.WATCHING
     row = _market_row(edge=EDGE_049, arb=False, trigger=TRIGGER)
-    assert stored_row_proves_net_proximity(row) is False
-    assert stored_row_proves_surveillance_opportunity(row) is False
+    assert stored_row_proves_net_proximity(row) is True
+    assert stored_row_proves_surveillance_opportunity(row) is True
     assert stored_row_proves_qualifying_executable(row) is False
     assert _decision_is_interesting(_near_decision(roi=EDGE_049)) is False
 
@@ -172,7 +197,7 @@ def test_current_net_049_trigger_100_is_not_economically_hot() -> None:
         scan_lane=ScanLane.UNIVERSE,
         now=NOW,
     )
-    assert CANONICAL_ID not in store.hot_identity_scope(NOW)
+    assert CANONICAL_ID in store.hot_identity_scope(NOW)
 
 
 def test_post_trigger_arrival_tolerance_unit_contract() -> None:

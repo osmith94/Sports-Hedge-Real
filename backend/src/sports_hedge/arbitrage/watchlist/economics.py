@@ -19,9 +19,15 @@ from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 EDGE_QUANT = Decimal("0.00000001")
 PP_QUANT = Decimal("0.0001")
 PERCENTAGE_POINTS = Decimal("100")
-# Operator-facing HOT proximity band. Not a second threshold setting: this is
-# the same 0.50pp near-arb distance already used by watchlist APPROACHING.
+# Watchlist APPROACHING classification band. HOT promotion uses the separate
+# operator band below; the two are not the same control.
 NET_PROXIMITY_BAND_PP = Decimal("0.50")
+# HOT net-proximity promotion. Operator-configurable. Not sport-specific.
+# Distance is percentage points below Min Net Arb. Inclusive of the band edge.
+DEFAULT_HOT_PROXIMITY_BAND_PP = Decimal("0.60")
+# GBP limiting depth already produced by the scan/watchlist quote path.
+# Below this, a near row stays on the monitor and off the HOT roster.
+DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP = Decimal("10")
 MOVED_BELOW_MIN_NET_ARB = "moved_below_min_net_arb"
 
 SEMANTIC_REASONS = (
@@ -116,19 +122,118 @@ def qualifies_min_net_arb(current_net_edge: Decimal, trigger_net_edge: Decimal |
     return current_net_edge >= trigger_net_edge
 
 
-def is_net_proximity_hot(current_net_edge: Decimal, trigger_net_edge: Decimal | None) -> bool:
-    """Economically HOT, not yet a fill: below trigger but within 0.50pp.
+def is_net_proximity_hot(
+    current_net_edge: Decimal,
+    trigger_net_edge: Decimal | None,
+    *,
+    band_pp: Decimal | None = None,
+) -> bool:
+    """Below Min Net Arb but within the HOT proximity band.
 
     Uses existing `distance_to_trigger_pp`. Never treats gross edge or a hard-coded
-    zero as the trigger. Unconfigured trigger is not proximity.
+    zero as the trigger. A negative edge can still be inside the band. Unconfigured
+    trigger is not proximity. This distance check does not apply the depth gate.
     """
 
     if trigger_net_edge is None:
         return False
     if qualifies_min_net_arb(current_net_edge, trigger_net_edge):
         return False
+    band = DEFAULT_HOT_PROXIMITY_BAND_PP if band_pp is None else band_pp
     distance = distance_to_trigger_pp(current_net_edge, trigger_net_edge)
-    return Decimal("0") < distance <= NET_PROXIMITY_BAND_PP
+    return Decimal("0") < distance <= band
+
+
+def selected_quote_limiting_depth(
+    quotes: Sequence[object],
+) -> tuple[Decimal | None, str | None]:
+    """Min GBP-normalised selected-quote depth and the limiting outcome.
+
+    This is the scan/watchlist economics depth. Callers must not recompute it
+    from raw books or touch size.
+    """
+
+    limiting: Decimal | None = None
+    leg: str | None = None
+    for quote in quotes:
+        depth = getattr(quote, "cumulative_depth", None)
+        if depth is None:
+            continue
+        if limiting is None or depth < limiting:
+            limiting = depth
+            leg = getattr(quote, "outcome", None)
+    return limiting, leg
+
+
+def limiting_depth_gbp_from_decision(decision: object | None) -> Decimal | None:
+    """Authoritative `limiting_depth_gbp` for one paper decision."""
+
+    if decision is None:
+        return None
+    quotes = None
+    payoff = getattr(decision, "payoff_scan", None)
+    depth_scan = getattr(decision, "depth_scan", None)
+    if payoff is not None:
+        quotes = getattr(payoff, "selected_quotes", None)
+    elif depth_scan is not None:
+        quotes = getattr(depth_scan, "selected_quotes", None)
+    if not quotes:
+        return None
+    depth, _leg = selected_quote_limiting_depth(quotes)
+    return depth
+
+
+def promotes_hot_net_proximity(
+    current_net_edge: Decimal,
+    trigger_net_edge: Decimal | None,
+    limiting_depth_gbp: Decimal | None,
+    *,
+    band_pp: Decimal | None = None,
+    minimum_limiting_depth_gbp: Decimal | None = None,
+) -> bool:
+    """HOT proximity requires the configured band and minimum limiting depth.
+
+    Does not require `current_net_edge > 0`. Qualifying rows (edge at or above
+    Min Net Arb) are not proximity; they keep their own promotion path.
+    Missing depth fails closed. The gate does not branch by competition.
+    """
+
+    if not is_net_proximity_hot(current_net_edge, trigger_net_edge, band_pp=band_pp):
+        return False
+    minimum = (
+        DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP
+        if minimum_limiting_depth_gbp is None
+        else minimum_limiting_depth_gbp
+    )
+    if limiting_depth_gbp is None:
+        return False
+    return limiting_depth_gbp >= minimum
+
+
+def resolve_hot_proximity_limits(
+    *,
+    band_pp: Decimal | None = None,
+    minimum_limiting_depth_gbp: Decimal | None = None,
+) -> tuple[Decimal, Decimal]:
+    """Operator HOT band and minimum limiting depth, with explicit overrides."""
+
+    configured_band = DEFAULT_HOT_PROXIMITY_BAND_PP
+    configured_depth = DEFAULT_HOT_MINIMUM_LIMITING_DEPTH_GBP
+    if band_pp is None or minimum_limiting_depth_gbp is None:
+        try:
+            from sports_hedge.persistence.operator_scanner_settings import (
+                effective_operator_scanner_settings,
+            )
+
+            operator = effective_operator_scanner_settings()
+            configured_band = operator.hot_proximity_band_pp
+            configured_depth = operator.hot_minimum_limiting_depth_gbp
+        except Exception:
+            pass
+    return (
+        configured_band if band_pp is None else band_pp,
+        configured_depth if minimum_limiting_depth_gbp is None else minimum_limiting_depth_gbp,
+    )
 
 
 def net_proximity_reason_label(distance_pp: Decimal) -> str:

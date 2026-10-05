@@ -32,6 +32,16 @@ DEFAULT_POST_KICKOFF_UNKNOWN_HORIZON = timedelta(hours=3)
 DEFAULT_POST_KICKOFF_CURRENT_RADAR_CEILING = timedelta(hours=4)
 DEFAULT_HOT_TTL_SECONDS = 90
 DEFAULT_UNIVERSE_TTL_SECONDS = 360
+# BACKGROUND-priced Opportunity Monitor retention. Independent of the HOT
+# radar TTL (90s) and the UNIVERSE current-state TTL (360s).
+#
+# A normal full BACKGROUND catalogue pass is catalogue size × effective row
+# time. About 629 ACTIVE rows at ~2s effective wall time (provider timeout
+# 8s, shared concurrency, HOT pre-emption) is ~21 minutes. 45 minutes covers
+# that pass with margin, then a genuinely unrevisited row expires. Stale
+# quotes may stay radar_current. They do not become executable. This is not
+# an audit-history backfill and it does not raise the UNIVERSE TTL.
+DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS = 45 * 60
 DEFAULT_HOT_INTERVAL_SECONDS = 30
 DEFAULT_HOT_SCAN_INTERVAL_SECONDS = 10
 # Fixture radar / membership TTL helper. Not BACKGROUND pricing and not the
@@ -541,18 +551,27 @@ def freshness_class(
     max_quote_age_ms: int = DEFAULT_EXECUTABLE_QUOTE_AGE_MS,
     hot_ttl_seconds: int = DEFAULT_HOT_TTL_SECONDS,
     universe_ttl_seconds: int = DEFAULT_UNIVERSE_TTL_SECONDS,
+    retention_ttl_seconds: int | None = None,
 ) -> str:
-    """Return executable / radar_current / expired. Expired rows must be omitted."""
+    """Return executable / radar_current / expired. Expired rows must be omitted.
+
+    `retention_ttl_seconds` overrides the lane TTL. BACKGROUND current-state
+    retention uses it. HOT and UNIVERSE callers leave it unset.
+    """
 
     evaluated = require_aware_instant(now, "now")
     if last_scanned_at is None:
         return FRESHNESS_EXPIRED
-    expires = observation_expires_at(
-        last_scanned_at,
-        lane,
-        hot_ttl_seconds=hot_ttl_seconds,
-        universe_ttl_seconds=universe_ttl_seconds,
-    )
+    if retention_ttl_seconds is None:
+        expires = observation_expires_at(
+            last_scanned_at,
+            lane,
+            hot_ttl_seconds=hot_ttl_seconds,
+            universe_ttl_seconds=universe_ttl_seconds,
+        )
+    else:
+        scanned = require_aware_instant(last_scanned_at, "last_scanned_at")
+        expires = scanned + timedelta(seconds=retention_ttl_seconds)
     if evaluated >= expires:
         return FRESHNESS_EXPIRED
     if quote_age_ms is not None and quote_age_ms < max_quote_age_ms:

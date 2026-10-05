@@ -363,6 +363,14 @@ class Settings(BaseSettings):
     # Intra-generation ApprovedEquivalent presence is generation-scoped and
     # is not extended by raising this value.
     paper_universe_current_state_ttl_seconds: int = Field(default=360, ge=60, le=900)
+    # BACKGROUND-priced Opportunity Monitor retention. Not the UNIVERSE TTL.
+    # Default 45 minutes: longer than an ordinary ~629-row BACKGROUND pass
+    # (~21 minutes at ~2s effective wall time) with margin. HOT TTL stays 90s.
+    paper_background_current_state_ttl_seconds: int = Field(default=2700, ge=361, le=14400)
+    # HOT proximity promotion. Percentage points from Min Net Arb, and the
+    # minimum GBP limiting depth from the scan/watchlist economics path.
+    hot_proximity_band_pp: float = Field(default=0.60, gt=0, le=10)
+    hot_minimum_limiting_depth_gbp: float = Field(default=10, ge=0)
     # Lane-specific operator venue defaults. Empty/invalid values keep all three
     # first-class venues on. Persisted operator selections override these.
     paper_hot_venues: Annotated[list[str], NoDecode] = Field(
