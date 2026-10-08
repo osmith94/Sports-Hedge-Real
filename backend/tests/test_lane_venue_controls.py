@@ -196,6 +196,37 @@ async def test_disabled_polymarket_receives_zero_universe_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_disabled_kalshi_receives_zero_universe_calls() -> None:
+    matchbook = CountingMatchbook()
+    polymarket = CountingPolymarket()
+    kalshi = CountingKalshi()
+    kalshi.get_market_calls = []
+
+    async def get_market(ticker: str, **_filters: Any) -> dict[str, Any]:
+        kalshi.get_market_calls.append(str(ticker))
+        raise AssertionError("disabled Kalshi must not get_market")
+
+    kalshi.get_market = get_market  # type: ignore[method-assign]
+    collector = _collector(matchbook, polymarket, kalshi)
+    report = await collector.collect_and_scan(
+        enabled_venues=[VenueName.MATCHBOOK, VenueName.POLYMARKET],
+        venue_costs=matchbook_polymarket_costs(),
+        fx_snapshots=[FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"))],
+        maximum_execution_risk=100,
+        scan_lane=ScanLane.UNIVERSE.value,
+    )
+    assert kalshi.list_events_calls == 0
+    assert kalshi.list_markets_calls == []
+    assert kalshi.book_calls == 0
+    assert kalshi.get_market_calls == []
+    assert matchbook.list_events_calls == 1
+    assert polymarket.list_events_calls == 1
+    assert report.venue_health["kalshi"] == VENUE_HEALTH_DISABLED
+    assert VenueName.KALSHI not in report.matching_venues
+    assert report.enabled_venues == [VenueName.MATCHBOOK, VenueName.POLYMARKET]
+
+
+@pytest.mark.asyncio
 async def test_disabled_matchbook_receives_zero_universe_calls() -> None:
     matchbook = CountingMatchbook()
     polymarket = CountingPolymarket()

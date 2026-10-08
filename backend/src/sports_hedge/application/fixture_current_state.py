@@ -135,6 +135,21 @@ class FixtureRadarRow:
     source_events: tuple[StoredSourceEvent, ...] = ()
 
 
+@dataclass(frozen=True)
+class MarketPriceClock:
+    """Discovery confirmation and the last actual price, kept apart.
+
+    ``discovered_at`` is the evaluated UNIVERSE lane observation. BACKGROUND
+    pricing does not move it. ``priced_at`` is a BACKGROUND price anchor or a
+    HOT slot scan. A discovery observation is not reported as a price.
+    ``price_lane`` is ``background``, ``hot``, or None when no price clock exists.
+    """
+
+    discovered_at: datetime | None
+    priced_at: datetime | None
+    price_lane: str | None
+
+
 def _market_closure_may_restore(fixture: Any, now: datetime) -> bool:
     """A zero-equivalent closure is not a provider terminal tombstone.
 
@@ -876,6 +891,41 @@ class FixtureCurrentStateStore:
             if canonical_market_id in row.paper_market_ids:
                 return row
         return None
+
+    def market_price_clock(
+        self,
+        canonical_market_id: str,
+        now: datetime,
+        *,
+        source_market_ids: tuple[str, ...] = (),
+        **kwargs: Any,
+    ) -> MarketPriceClock:
+        """Market-specific price and discovery clocks already stored in current state.
+
+        Does not call providers. An ambiguous slot match stays unpriced rather
+        than borrowing another market's clock or the fixture discovery time.
+        """
+
+        wanted = canonical_market_id.strip()
+        if not wanted:
+            return MarketPriceClock(None, None, None)
+        sources = {item.strip() for item in source_market_ids if item and str(item).strip()}
+        with self._lock:
+            evaluated = require_aware_instant(now, "now")
+            market_kwargs = self._store_market_kwargs(kwargs)
+            for record in self._rows.values():
+                record.prune_markets(evaluated, **market_kwargs)
+                slots = record.live_market_slots()
+                if not _record_mentions_market(record, slots, wanted):
+                    continue
+                discovered = (
+                    record.universe.last_scanned_at
+                    if record.universe is not None and record.universe.evaluated
+                    else None
+                )
+                slot = _select_market_price_slot(slots, wanted, sources)
+                return _clock_for_slot(discovered, slot, record, sources)
+        return MarketPriceClock(None, None, None)
 
     def hot_identity_scope(self, now: datetime, **kwargs: Any) -> list[str]:
         with self._lock:
@@ -2157,6 +2207,110 @@ def _stamp_fixture(
             "last_seen_at": last_scanned_at,
         }
     )
+
+
+def _record_mentions_market(
+    record: _FixtureRecord,
+    slots: list[CurrentMarketSlot],
+    market_id: str,
+) -> bool:
+    if any(market_id in slot.paper_market_ids for slot in slots):
+        return True
+    for observation in (record.universe, record.hot):
+        if observation is not None and market_id in observation.paper_market_ids:
+            return True
+    return False
+
+
+def _slot_source_market_ids(slot: CurrentMarketSlot) -> set[str]:
+    found: set[str] = set()
+    for facts in (slot.row.matchbook, slot.row.polymarket, slot.row.kalshi):
+        if facts is None:
+            continue
+        source_id = str(getattr(facts, "source_market_id", "") or "").strip()
+        if source_id:
+            found.add(source_id)
+    return found
+
+
+def _select_market_price_slot(
+    slots: list[CurrentMarketSlot],
+    market_id: str,
+    sources: set[str],
+) -> CurrentMarketSlot | None:
+    if sources:
+        matched = [slot for slot in slots if sources & _slot_source_market_ids(slot)]
+        if len(matched) == 1:
+            return matched[0]
+        if len(matched) > 1:
+            return _agreed_price_slot(matched)
+    exact = [slot for slot in slots if tuple(slot.paper_market_ids) == (market_id,)]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        return _agreed_price_slot(exact)
+    containing = [slot for slot in slots if market_id in slot.paper_market_ids]
+    if len(containing) == 1:
+        return containing[0]
+    return _agreed_price_slot(containing)
+
+
+def _price_signature(slot: CurrentMarketSlot) -> tuple[datetime | None, ScanLane, datetime]:
+    return (slot.background_priced_at, slot.scan_lane, slot.last_scanned_at)
+
+
+def _agreed_price_slot(slots: list[CurrentMarketSlot]) -> CurrentMarketSlot | None:
+    priced = [
+        slot
+        for slot in slots
+        if slot.background_priced_at is not None or slot.scan_lane is ScanLane.HOT
+    ]
+    if len(priced) == 1:
+        return priced[0]
+    if priced and len({_price_signature(slot) for slot in priced}) == 1:
+        return priced[0]
+    return None
+
+
+def _clock_for_slot(
+    discovered_at: datetime | None,
+    slot: CurrentMarketSlot | None,
+    record: _FixtureRecord,
+    sources: set[str],
+) -> MarketPriceClock:
+    if slot is not None and slot.scan_lane is not ScanLane.HOT and slot.background_priced_at is not None:
+        return MarketPriceClock(discovered_at, slot.background_priced_at, "background")
+    if slot is not None and slot.scan_lane is ScanLane.HOT:
+        return MarketPriceClock(discovered_at, slot.last_scanned_at, "hot")
+    hot_priced_at = _hot_observation_price_at(record, sources)
+    if hot_priced_at is not None:
+        return MarketPriceClock(discovered_at, hot_priced_at, "hot")
+    return MarketPriceClock(discovered_at, None, None)
+
+
+def _hot_observation_price_at(record: _FixtureRecord, sources: set[str]) -> datetime | None:
+    """Last HOT observation time for this market's source ids only.
+
+    A later UNIVERSE confirm rewrites the slot lane. The HOT observation still
+    holds the price time, but only for markets that observation actually carried.
+    """
+
+    hot = record.hot
+    if hot is None or not hot.evaluated or not sources:
+        return None
+    for row in hot.markets:
+        row_ids = {
+            str(getattr(facts, "source_market_id", "") or "").strip()
+            for facts in (
+                getattr(row, "matchbook", None),
+                getattr(row, "polymarket", None),
+                getattr(row, "kalshi", None),
+            )
+            if facts is not None
+        }
+        if sources & {item for item in row_ids if item}:
+            return hot.last_scanned_at
+    return None
 
 
 def _paper_market_ids_by_fixture(report: CollectionReport) -> dict[str, tuple[str, ...]]:

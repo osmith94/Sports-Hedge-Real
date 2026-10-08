@@ -329,13 +329,13 @@ export function OpportunityMonitor({
         <div className="table-wrap">
           <table>
             <caption className="scan-history-caption">
-              Current radar set from tracked watchlist / FixtureCurrentStateStore. Age uses each
-              row&apos;s last_scanned_at (else last_seen_at), not browser receipt time. State is
-              economic/radar classification; quote freshness stays in Lane / freshness and does not
-              replace the primary badge. Default order is net edge descending. Rows with no solver
-              economics stay below priced rows. Rejected and single-venue rows stay labelled as
-              such. User sorting applies to this loaded
-              current set only.
+              Current radar set from tracked watchlist / FixtureCurrentStateStore. Price age is
+              each row&apos;s last priced time. Last discovered/confirmed stays separate. Quote age
+              is the provider quote at last evaluation. Radar retention is not executable quote
+              freshness. Unknown price clocks stay unknown. State is economic/radar classification
+              and does not replace the primary badge. Default order is net edge descending. Rows
+              with no solver economics stay below priced rows. Rejected and single-venue rows stay
+              labelled as such. User sorting applies to this loaded current set only.
             </caption>
             <thead>
               <tr>
@@ -427,7 +427,7 @@ function OpportunitySummaryStrip({
       value: formatMonitorPercent(summary.bestNetEdge),
     },
     {
-      label: "Newest observation",
+      label: "Newest price observation",
       value: newestObservationAgeLabel(summary, nowMs),
       title: summary.newestObservedAt
         ? observationTimestampTitle(summary.newestObservedAt)
@@ -519,10 +519,13 @@ function MonitorRow({
         <time
           dateTime={row.observedAt ?? undefined}
           suppressHydrationWarning
-          title={observationTimestampTitle(row.observedAt)}
+          title={`Last priced ${observationTimestampTitle(row.observedAt, "unknown")} · Last discovered/confirmed ${observationTimestampTitle(row.discoveredAt, "unknown")} · quote ${row.quoteAgeLabel}`}
         >
           {formatObservationAge(row.observedAt, nowMs)}
         </time>
+        <div className="muted" title={observationTimestampTitle(row.discoveredAt, "discovery unknown")}>
+          discovered {formatObservationAge(row.discoveredAt, nowMs)}
+        </div>
       </td>
       <td className="row-title">
         {row.href ? (
@@ -569,9 +572,10 @@ function MonitorRow({
           {row.state}
         </span>
       </td>
-      <td className="muted">
+      <td className="muted" title="Radar retention is not executable quote freshness">
         {row.laneLabel}
         <div>{row.freshnessLabel}</div>
+        <div>quote {row.quoteAgeLabel}</div>
       </td>
     </tr>
   );
@@ -606,8 +610,13 @@ function OpportunityRowDetail({
     <div className="opportunity-detail">
       <p className="panel-meta">{row.rejectionDetail}</p>
       <p className="panel-meta">
-        Exact observation {observationTimestampTitle(row.observedAt)} · quote {row.quoteAgeLabel}
+        Last priced {observationTimestampTitle(row.observedAt, "unknown")} · Last discovered/confirmed{" "}
+        {observationTimestampTitle(row.discoveredAt, "unknown")} · quote {row.quoteAgeLabel}
       </p>
+      <p className="panel-meta">
+        Radar retention {row.freshnessLabel}. This is not executable quote freshness.
+      </p>
+      {row.economicsNote ? <p className="panel-meta">{row.economicsNote}</p> : null}
       <p className="panel-meta" title={row.mappingTitle}>
         Mapping {row.mappingText}
         {row.offerVerify ? " · Verify available for current evidence" : ""}
@@ -658,7 +667,7 @@ function SortableHeader({
   const indicator = opportunitySortIndicator(column, sort);
   const ariaSort = ariaSortForOpportunityColumn(column, sort);
   const directionLabel = ariaSort === "none" ? "" : `, currently ${ariaSort}`;
-  const ageHint = column === "age" ? ", from last_scanned_at or last_seen_at" : "";
+  const ageHint = column === "age" ? ", from last priced time; unknown stays unknown" : "";
   const loadedHint = ", loaded current set only";
   return (
     <th aria-sort={ariaSort} className="sortable" scope="col">

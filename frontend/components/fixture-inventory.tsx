@@ -20,7 +20,11 @@ import {
   toneClass,
 } from "../lib/fixture-inventory-operator";
 import { PaperDeploymentPreview } from "./paper-deployment-preview";
-import { coverageRowLabel, fixtureCoverageRows } from "../lib/catalogue-coverage-display";
+import {
+  coverageDisplayGroups,
+  coverageRowLabel,
+  fixtureCoverageRows,
+} from "../lib/catalogue-coverage-display";
 
 type KalshiFixtureDetailReadModel = Omit<FixtureDetailReadModel, "fixture" | "markets"> & {
   fixture: FixtureDetailReadModel["fixture"] & { kalshi_matched?: boolean };
@@ -83,9 +87,23 @@ export function FixtureInventoryWorkspace({
       ) : null}
       {fixtureCoverageRows(fixture).length ? (
         <ul className="catalogue-coverage-list">
-          {fixtureCoverageRows(fixture).map((row) => (
-            <li key={`${row.archetype}-${row.line ?? "none"}`}>{coverageRowLabel(row)}</li>
-          ))}
+          {coverageDisplayGroups(fixtureCoverageRows(fixture)).map((group) =>
+            group.rows.length < 2 ? (
+              <li key={group.key}>{group.summary}</li>
+            ) : (
+              <li key={group.key}>
+                {group.summary}
+                <details className="coverage-line-detail">
+                  <summary>Show {group.rows.length} lines</summary>
+                  <ul>
+                    {group.rows.map((row) => (
+                      <li key={`${row.archetype}-${row.line ?? "none"}`}>{coverageRowLabel(row)}</li>
+                    ))}
+                  </ul>
+                </details>
+              </li>
+            ),
+          )}
         </ul>
       ) : null}
       {detail.paper_entries?.length ? (

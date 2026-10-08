@@ -1455,6 +1455,9 @@ export type NearOpportunity = {
   bet_blocked_reason?: string | null;
   scan_lane?: string | null;
   last_scanned_at?: string | null;
+  last_discovered_at?: string | null;
+  last_priced_at?: string | null;
+  price_lane?: "hot" | "background" | string | null;
   next_due_at?: string | null;
   freshness_class?: "executable" | "radar_current" | "expired" | string | null;
   mapping_confidence?: number | null;

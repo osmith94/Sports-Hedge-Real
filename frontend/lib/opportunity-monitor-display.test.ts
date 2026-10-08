@@ -342,7 +342,9 @@ describe("opportunity monitor default ordering and user sort", () => {
         watch({
           opportunity_id: "stale",
           freshness_class: "expired",
-          last_scanned_at: "2026-09-15T12:00:50.000Z",
+          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          last_priced_at: "2026-09-15T12:00:50.000Z",
+          last_discovered_at: "2026-09-15T11:00:00.000Z",
           current_net_edge: 0.04,
         }),
       ),
@@ -350,14 +352,18 @@ describe("opportunity monitor default ordering and user sort", () => {
         watch({
           opportunity_id: "near-old",
           current_net_edge: 0.009,
-          last_scanned_at: "2026-09-15T12:00:10.000Z",
+          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          last_priced_at: "2026-09-15T12:00:10.000Z",
+          last_discovered_at: "2026-09-15T11:00:00.000Z",
         }),
       ),
       opportunityMonitorRow(
         watch({
           opportunity_id: "near-new",
           current_net_edge: 0.009,
-          last_scanned_at: "2026-09-15T12:00:40.000Z",
+          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          last_priced_at: "2026-09-15T12:00:40.000Z",
+          last_discovered_at: "2026-09-15T11:00:00.000Z",
         }),
       ),
       opportunityMonitorRow(
@@ -369,7 +375,9 @@ describe("opportunity monitor default ordering and user sort", () => {
           freshness_class: "executable",
           bet_actionable: true,
           current_net_edge: 0.011,
-          last_scanned_at: "2026-09-15T12:00:30.000Z",
+          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          last_priced_at: "2026-09-15T12:00:30.000Z",
+          last_discovered_at: "2026-09-15T11:00:00.000Z",
         }),
       ),
       opportunityMonitorRow(
@@ -381,14 +389,18 @@ describe("opportunity monitor default ordering and user sort", () => {
           freshness_class: "executable",
           bet_actionable: true,
           current_net_edge: 0.03,
-          last_scanned_at: "2026-09-15T12:00:12.000Z",
+          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          last_priced_at: "2026-09-15T12:00:12.000Z",
+          last_discovered_at: "2026-09-15T11:00:00.000Z",
         }),
       ),
       opportunityMonitorRow(
         watch({
           opportunity_id: "below",
           current_net_edge: -0.002,
-          last_scanned_at: "2026-09-15T12:00:45.000Z",
+          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          last_priced_at: "2026-09-15T12:00:45.000Z",
+          last_discovered_at: "2026-09-15T11:00:00.000Z",
         }),
       ),
     ];
@@ -458,19 +470,51 @@ describe("opportunity monitor default ordering and user sort", () => {
 });
 
 describe("opportunity monitor age, provenance, navigation, legs, empty honesty", () => {
-  it("ages from last_scanned_at with exact timestamp, not browser receipt", () => {
+  it("ages from last_priced_at and does not borrow discovery or economics time", () => {
     const item = watch({
       opportunity_id: "age",
-      last_scanned_at: "2026-09-15T12:00:00.000Z",
+      last_scanned_at: "2026-09-15T11:08:00.000Z",
+      last_discovered_at: "2026-09-15T11:08:00.000Z",
       last_seen_at: "2026-09-15T12:05:00.000Z",
+      last_priced_at: "2026-09-15T12:00:00.000Z",
+      price_lane: "background",
     });
     assert.equal(opportunityObservationTimestamp(item), "2026-09-15T12:00:00.000Z");
+    const unpriced = watch({
+      opportunity_id: "unpriced",
+      last_scanned_at: "2026-09-15T11:08:00.000Z",
+      last_discovered_at: "2026-09-15T11:08:00.000Z",
+      last_seen_at: "2026-09-15T12:05:00.000Z",
+      last_priced_at: null,
+    });
+    assert.equal(opportunityObservationTimestamp(unpriced), null);
+    const row = opportunityMonitorRow(item);
+    assert.equal(row.observedAt, "2026-09-15T12:00:00.000Z");
+    assert.equal(row.discoveredAt, "2026-09-15T11:08:00.000Z");
+    assert.equal(row.laneLabel, "BACKGROUND pricing");
+    assert.match(row.economicsNote ?? "", /newer than the stored price clock/);
+    const lagged = opportunityMonitorRow(
+      watch({
+        opportunity_id: "lag",
+        last_seen_at: "2026-09-15T11:00:00.000Z",
+        last_priced_at: "2026-09-15T12:00:00.000Z",
+        price_lane: "background",
+      }),
+    );
+    assert.match(lagged.economicsNote ?? "", /older than the last price/);
     const origin = Date.parse("2026-09-15T12:00:00.000Z");
-    assert.equal(formatObservationAge(item.last_scanned_at, origin + 12_000), "12s");
-    assert.equal(formatObservationAge(item.last_scanned_at, origin + 48_000), "48s");
-    assert.equal(formatObservationAge(item.last_scanned_at, origin + 60_000), "1m");
-    assert.equal(formatObservationAge(item.last_scanned_at, origin + 180_000), "3m");
+    assert.equal(formatObservationAge(row.observedAt, origin + 12_000), "12s");
+    assert.equal(formatObservationAge(row.observedAt, origin + 48_000), "48s");
+    assert.equal(formatObservationAge(row.observedAt, origin + 60_000), "1m");
+    assert.equal(formatObservationAge(row.observedAt, origin + 180_000), "3m");
+    assert.equal(formatObservationAge(row.discoveredAt, origin), "52m");
     assert.equal(OBSERVATION_AGE_TICK_MS, 1000);
+    const rows = [
+      opportunityMonitorRow(item),
+      opportunityMonitorRow(unpriced),
+    ];
+    const summary = opportunityMonitorSummary(rows, refresh(), true, true, origin + 12_000);
+    assert.equal(summary.newestObservedAt, "2026-09-15T12:00:00.000Z");
   });
 
   it("labels HOT as HOT pricing and UNIVERSE as UNIVERSE discovery", () => {
@@ -692,7 +736,7 @@ describe("opportunity monitor table contract", () => {
   it("uses one shared observation-age timer and accessible sort/navigation", () => {
     assert.match(table, /startSharedObservationAgeTimer\(setNowMs/);
     assert.match(table, /formatObservationAge\(row\.observedAt, nowMs\)/);
-    assert.match(table, /observationTimestampTitle\(row\.observedAt\)/);
+    assert.match(table, /observationTimestampTitle\(row\.observedAt, "unknown"\)/);
     assert.equal([...table.matchAll(/setInterval/g)].length, 0);
     assert.match(table, /type="button"/);
     assert.match(table, /aria-sort=\{ariaSort\}/);

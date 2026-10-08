@@ -118,11 +118,23 @@ def tracked_markets(
         if row.quote_age_ms is not None and row.quote_age_ms < service.max_quote_age_ms:
             freshness = FRESHNESS_EXECUTABLE
         executable = freshness == FRESHNESS_EXECUTABLE
+        source_market_ids = tuple(
+            leg.source_market_id for leg in row.legs if leg.source_market_id
+        )
+        clock = store.market_price_clock(
+            row.canonical_market_id,
+            now,
+            source_market_ids=source_market_ids,
+            **radar_kwargs,
+        )
         annotated.append(
             row.model_copy(
                 update={
                     "scan_lane": meta.observation_lane.value,
                     "last_scanned_at": meta.last_scanned_at,
+                    "last_discovered_at": clock.discovered_at,
+                    "last_priced_at": clock.priced_at,
+                    "price_lane": clock.price_lane,
                     "next_due_at": meta.next_due_at,
                     "freshness_class": freshness,
                     "bet_actionable": bool(row.bet_actionable) and executable,
