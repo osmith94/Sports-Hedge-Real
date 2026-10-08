@@ -7,7 +7,10 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
-from sports_hedge.application.scan_lanes import FRESHNESS_EXECUTABLE
+from sports_hedge.application.scan_lanes import (
+    FRESHNESS_EXECUTABLE,
+    FRESHNESS_RADAR_CURRENT,
+)
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityLifecycleEvent
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
@@ -114,9 +117,14 @@ def tracked_markets(
         meta = store.radar_meta_for_market(row.canonical_market_id, now, **radar_kwargs)
         if meta is None:
             continue
-        freshness = meta.freshness
-        if row.quote_age_ms is not None and row.quote_age_ms < service.max_quote_age_ms:
-            freshness = FRESHNESS_EXECUTABLE
+        # Executable is the persisted economics quote, not the price-slot quote.
+        # A BACKGROUND/HOT refresh can carry a new 80ms provider quote while
+        # the watchlist edge is still the older observation. Unknown stays
+        # non-executable. Expired rows never reach this annotation.
+        economics_executable = (
+            row.quote_age_ms is not None and row.quote_age_ms < service.max_quote_age_ms
+        )
+        freshness = FRESHNESS_EXECUTABLE if economics_executable else FRESHNESS_RADAR_CURRENT
         executable = freshness == FRESHNESS_EXECUTABLE
         source_market_ids = tuple(
             leg.source_market_id for leg in row.legs if leg.source_market_id

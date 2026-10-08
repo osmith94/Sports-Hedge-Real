@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from test_issue200_universe_hot_promotion import (
@@ -26,6 +27,7 @@ from sports_hedge.application.fixture_inventory import (
     VenueMarketFacts,
     VenueQuoteFact,
 )
+from sports_hedge.application.current_market_inventory import slot_freshness
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.scan_lanes import (
     DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS,
@@ -99,7 +101,16 @@ def _observation(market_id: str, sources: tuple[str, str], when) -> WatchObserva
     )
 
 
-def _publish(store, rows, decisions, when, *, pricing_refresh: bool, fixture_status: str | None = None):
+def _publish(
+    store,
+    rows,
+    decisions,
+    when,
+    *,
+    pricing_refresh: bool,
+    fixture_status: str | None = None,
+    scan_lane: ScanLane = ScanLane.UNIVERSE,
+):
     fixture = _fixture(EVENT, when=when, opportunity="near", arb=False, qualifying=0)
     if fixture_status is not None:
         fixture = fixture.model_copy(update={"fixture_status": fixture_status})
@@ -111,7 +122,7 @@ def _publish(store, rows, decisions, when, *, pricing_refresh: bool, fixture_sta
     )
     store.upsert_from_report(
         report,
-        scan_lane=ScanLane.UNIVERSE,
+        scan_lane=scan_lane,
         now=when,
         pricing_refresh=pricing_refresh,
     )
@@ -219,6 +230,7 @@ def test_background_price_clock_advances_without_moving_discovery_or_economics()
         assert retained["mkt-a"]["last_priced_at"].startswith("2026-09-16T12:02:00")
         assert retained["mkt-a"]["freshness_class"] == "radar_current"
         assert retained["mkt-a"]["quote_age_ms"] > 60_000
+        assert retained["mkt-a"]["bet_actionable"] is False
 
         _publish(
             store,
@@ -228,6 +240,200 @@ def test_background_price_clock_advances_without_moving_discovery_or_economics()
             pricing_refresh=True,
             fixture_status="completed",
         )
+        assert client.get("/paper/watchlist/tracked").json() == []
+    finally:
+        app.dependency_overrides.clear()
+        coordinator.reset()
+        repository.close()
+
+
+def test_price_slot_refresh_does_not_make_stale_economics_executable() -> None:
+    """A new provider quote on the price slot must not relabel an old edge.
+
+    The slot carries an 80ms source quote at the price instant, so slot
+    freshness is executable. The watchlist edge was observed earlier and its
+    provider quote has aged past the paper-entry limit. Those clocks stay
+    separate, and the tracked row stays non-executable.
+    """
+
+    assert Settings().sports_hedge_execution_enabled is False
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    repository = SqliteWatchlistRepository()
+    clock = {"at": T0}
+    service = WatchlistService(repository, clock=lambda: clock["at"], max_quote_age_ms=2_000)
+    store = coordinator.fixture_current_state()
+    fresh_quote = _named_row("both_teams_to_score", "mb-a", "pm-a")
+    unknown_row = _named_row("match_result", "mb-b", "pm-b")
+    app.dependency_overrides[get_watchlist_service] = lambda: service
+    client = TestClient(app)
+    provider_calls: list[str] = []
+
+    async def _forbid(self, *args, **kwargs):
+        provider_calls.append(type(self).__name__)
+        raise AssertionError("tracked read must not call a venue")
+
+    try:
+        _publish(store, [fresh_quote, unknown_row], [
+            _decision(EVENT, "mkt-a", when=T0),
+            _decision(EVENT, "mkt-b", when=T0),
+        ], T0, pricing_refresh=False)
+        service.observe(
+            _observation("mkt-a", ("mb-a", "pm-a"), T0).model_copy(
+                update={"quote_age_ms": 1_500, "current_net_edge": Decimal("0.018")}
+            )
+        )
+        service.observe(
+            _observation("mkt-b", ("mb-b", "pm-b"), T0).model_copy(
+                update={"quote_age_ms": None, "quote_age_basis": None, "current_net_edge": Decimal("0.011")}
+            )
+        )
+        with patch("sports_hedge.venues.kalshi.KalshiClient.list_events", _forbid), patch(
+            "sports_hedge.venues.kalshi.KalshiClient.list_markets", _forbid
+        ), patch("sports_hedge.venues.kalshi.KalshiClient.get_market", _forbid), patch(
+            "sports_hedge.venues.kalshi.KalshiClient.get_order_book", _forbid
+        ), patch("sports_hedge.venues.matchbook.MatchbookClient.list_events", _forbid), patch(
+            "sports_hedge.venues.matchbook.MatchbookClient.get_order_book", _forbid
+        ), patch("sports_hedge.venues.polymarket.PolymarketClient.list_events", _forbid), patch(
+            "sports_hedge.venues.polymarket.PolymarketClient.get_order_book", _forbid
+        ), patch(
+            "sports_hedge.application.price_engine.CataloguePriceEngine.run_slice", _forbid
+        ):
+            opened = {row["canonical_market_id"]: row for row in client.get("/paper/watchlist/tracked").json()}
+        assert provider_calls == []
+        assert opened["mkt-a"]["freshness_class"] == "executable"
+        assert opened["mkt-a"]["quote_age_ms"] == 1_500
+        assert opened["mkt-b"]["quote_age_ms"] is None
+        assert opened["mkt-b"]["freshness_class"] == "radar_current"
+        assert opened["mkt-b"]["bet_actionable"] is False
+        assert opened["mkt-b"]["last_priced_at"] is None
+
+        priced_at = T0 + timedelta(seconds=45)
+        _publish(
+            store,
+            [fresh_quote],
+            [_decision(EVENT, "mkt-a", when=priced_at)],
+            priced_at,
+            pricing_refresh=True,
+        )
+        clock["at"] = priced_at
+        slot = next(
+            item
+            for item in store._rows[EVENT].markets.values()
+            if item.row.matchbook is not None and item.row.matchbook.source_market_id == "mb-a"
+        )
+        assert slot.row.matchbook is not None
+        assert slot.row.matchbook.quote_age_ms == 80
+        assert slot_freshness(slot, now=priced_at) == "executable"
+        with patch("sports_hedge.venues.kalshi.KalshiClient.get_order_book", _forbid), patch(
+            "sports_hedge.application.price_engine.CataloguePriceEngine.run_slice", _forbid
+        ):
+            lagged = {row["canonical_market_id"]: row for row in client.get("/paper/watchlist/tracked").json()}
+        assert provider_calls == []
+        aged = lagged["mkt-a"]
+        assert aged["last_priced_at"].startswith("2026-09-16T12:00:45")
+        assert aged["last_discovered_at"].startswith("2026-09-16T12:00:00")
+        assert aged["last_scanned_at"].startswith("2026-09-16T12:00:00")
+        assert aged["last_seen_at"].startswith("2026-09-16T12:00:00")
+        assert Decimal(str(aged["current_net_edge"])) == Decimal("0.018")
+        assert aged["quote_age_basis"] == "source"
+        assert aged["quote_age_ms"] >= 45_000
+        assert aged["quote_age_ms"] != 80
+        assert aged["price_lane"] == "background"
+        assert aged["freshness_class"] == "radar_current"
+        assert aged["bet_actionable"] is False
+        untouched = lagged["mkt-b"]
+        assert untouched["last_priced_at"] is None
+        assert untouched["quote_age_ms"] is None
+        assert untouched["freshness_class"] == "radar_current"
+        assert Decimal(str(untouched["current_net_edge"])) == Decimal("0.011")
+
+        held_at = priced_at + timedelta(seconds=DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS - 30)
+        clock["at"] = held_at
+        held = {row["canonical_market_id"]: row for row in client.get("/paper/watchlist/tracked").json()}
+        assert held["mkt-a"]["last_priced_at"].startswith("2026-09-16T12:00:45")
+        assert held["mkt-a"]["last_seen_at"].startswith("2026-09-16T12:00:00")
+        assert Decimal(str(held["mkt-a"]["current_net_edge"])) == Decimal("0.018")
+        assert held["mkt-a"]["freshness_class"] == "radar_current"
+        assert held["mkt-a"]["bet_actionable"] is False
+        assert held["mkt-a"]["quote_age_ms"] > 2_000
+
+        clock["at"] = priced_at + timedelta(seconds=DEFAULT_BACKGROUND_CURRENT_STATE_TTL_SECONDS + 1)
+        assert client.get("/paper/watchlist/tracked").json() == []
+        assert provider_calls == []
+    finally:
+        app.dependency_overrides.clear()
+        coordinator.reset()
+        repository.close()
+
+
+def test_hot_price_does_not_refresh_stale_economics() -> None:
+    """HOT slot quote freshness is not the persisted edge's executable clock."""
+
+    assert Settings().sports_hedge_execution_enabled is False
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    repository = SqliteWatchlistRepository()
+    clock = {"at": T0}
+    service = WatchlistService(repository, clock=lambda: clock["at"], max_quote_age_ms=2_000)
+    store = coordinator.fixture_current_state()
+    app.dependency_overrides[get_watchlist_service] = lambda: service
+    client = TestClient(app)
+    try:
+        _publish(
+            store,
+            [_named_row("both_teams_to_score", "mb-a", "pm-a")],
+            [_decision(EVENT, "mkt-a", when=T0)],
+            T0,
+            pricing_refresh=False,
+        )
+        service.observe(
+            _observation("mkt-a", ("mb-a", "pm-a"), T0).model_copy(
+                update={"quote_age_ms": 1_500, "current_net_edge": Decimal("0.018")}
+            )
+        )
+        hot_at = T0 + timedelta(seconds=55)
+        hot_quote = _named_row("both_teams_to_score", "mb-a", "pm-a")
+        assert hot_quote.matchbook is not None
+        hot_quote = hot_quote.model_copy(
+            update={"matchbook": hot_quote.matchbook.model_copy(update={"quote_age_ms": 40})}
+        )
+        _publish(
+            store,
+            [hot_quote],
+            [_decision(EVENT, "mkt-a", when=hot_at)],
+            hot_at,
+            pricing_refresh=False,
+            scan_lane=ScanLane.HOT,
+        )
+        clock["at"] = hot_at
+        hot_slot = next(
+            item
+            for item in store._rows[EVENT].markets.values()
+            if item.row.matchbook is not None and item.row.matchbook.source_market_id == "mb-a"
+        )
+        assert hot_slot.scan_lane is ScanLane.HOT
+        assert slot_freshness(hot_slot, now=hot_at) == "executable"
+        rows = {row["canonical_market_id"]: row for row in client.get("/paper/watchlist/tracked").json()}
+        hot = rows["mkt-a"]
+        assert hot["price_lane"] == "hot"
+        assert hot["last_priced_at"].startswith("2026-09-16T12:00:55")
+        assert hot["last_discovered_at"].startswith("2026-09-16T12:00:00")
+        assert hot["last_seen_at"].startswith("2026-09-16T12:00:00")
+        assert Decimal(str(hot["current_net_edge"])) == Decimal("0.018")
+        assert hot["quote_age_ms"] >= 55_000
+        assert hot["freshness_class"] == "radar_current"
+        assert hot["bet_actionable"] is False
+        clock["at"] = hot_at + timedelta(seconds=91)
+        aged = {row["canonical_market_id"]: row for row in client.get("/paper/watchlist/tracked").json()}
+        # Universe discovery TTL still holds the fixture. The expired HOT slot must
+        # not advance the economics quote or mark the old edge executable.
+        assert aged["mkt-a"]["last_priced_at"].startswith("2026-09-16T12:00:55")
+        assert aged["mkt-a"]["last_seen_at"].startswith("2026-09-16T12:00:00")
+        assert aged["mkt-a"]["freshness_class"] == "radar_current"
+        assert aged["mkt-a"]["bet_actionable"] is False
+        assert aged["mkt-a"]["quote_age_ms"] >= 90_000
+        clock["at"] = T0 + timedelta(seconds=360)
         assert client.get("/paper/watchlist/tracked").json() == []
     finally:
         app.dependency_overrides.clear()
