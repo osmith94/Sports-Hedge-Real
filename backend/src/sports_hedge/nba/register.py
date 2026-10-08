@@ -1,8 +1,10 @@
 """Owner-gated NBA register.
 
 Admission is Kalshi↔Polymarket GAME_WINNER only. Spreads, totals, and every
-Matchbook pair stay fail-closed because ordinary full-game/OT game-book
-evidence is not established. Exceptional lifecycle is not the block.
+Matchbook pair stay fail-closed. Matchbook NBA Preseason game books can be
+discovered and normalised; they are not register-admitted because ordinary
+full-game/OT settlement is still not established on those payloads.
+Exceptional lifecycle is not the block. This module does not arm execution.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from sports_hedge.nba.constants import (
     CANONICAL_NBA_GAME_WINNER,
     CANONICAL_NBA_POINT_SPREAD,
     CANONICAL_NBA_TOTAL_POINTS,
+    NBA_PAIR_UNAPPROVED_REASON,
 )
 from sports_hedge.nba.detect import is_nba_canonical_event, is_nba_market_family
 from sports_hedge.nba.markets import is_exact_half_line
@@ -86,6 +89,22 @@ def nba_approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket)
         return False
     venues = {left.source_venue, right.source_venue}
     return venues == NBA_PAPER_APPROVED_VENUES
+
+
+def nba_pair_non_executable_reason(
+    left: CanonicalMarket, right: CanonicalMarket
+) -> str | None:
+    """Diagnostic for an NBA pair outside the registered Kalshi↔Polymarket cell.
+
+    Returns None when the pair is not NBA, and None when the register admits it.
+    Discovery of a Matchbook preseason book does not admit the pair.
+    """
+
+    if not is_nba_canonical_event(left.event) and not is_nba_canonical_event(right.event):
+        return None
+    if nba_registered_canonical_key(left, right) is not None:
+        return None
+    return NBA_PAIR_UNAPPROVED_REASON
 
 
 def nba_registered_canonical_key(

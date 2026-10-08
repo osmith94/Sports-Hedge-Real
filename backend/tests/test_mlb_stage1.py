@@ -497,7 +497,8 @@ def test_matchbook_mlb_only_scope_uses_baseball_sport_and_tag() -> None:
     assert mixed["sport-ids"] == "4,3"
     assert "tag-ids" not in mixed
     nba_only = matchbook_scope_discovery_params(["nba"], basketball_sport_id="4")
-    assert nba_only["tag-ids"] != MATCHBOOK_MLB_COMPETITION_TAG_ID
+    assert nba_only.get("tag-ids") != MATCHBOOK_MLB_COMPETITION_TAG_ID
+    assert MATCHBOOK_MLB_COMPETITION_TAG_ID not in nba_only.get("tag-id-union", "")
     sport_id = select_baseball_sport_id(
         [
             {"id": 9, "name": "Base"},

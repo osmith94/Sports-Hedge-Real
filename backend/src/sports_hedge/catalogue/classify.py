@@ -392,4 +392,10 @@ def _economic_state(
         return CatalogueApprovalState.APPROVED_EQUIVALENT, "approved_equivalent", notes
 
     notes.append("unregistered_pair_is_not_runtime_admitted")
+    from sports_hedge.nba.register import nba_pair_non_executable_reason
+
+    nba_reason = nba_pair_non_executable_reason(left, right)
+    if nba_reason is not None:
+        notes.append(nba_reason)
+        return CatalogueApprovalState.UNSUPPORTED, nba_reason, notes
     return CatalogueApprovalState.UNSUPPORTED, NOT_REGISTERED_REASON, notes

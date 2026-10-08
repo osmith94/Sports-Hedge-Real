@@ -510,13 +510,18 @@ def matchbook_scope_discovery_params(
 ) -> dict[str, str]:
     """Matchbook list_events filters for the selected operator scope.
 
-    NBA-only scopes add the captured NBA competition tag. MLB-only scopes add
-    the captured Major League Baseball tag. Mixed scopes cannot apply either
-    tag without dropping the other sport. NCAAB has no Matchbook competition tag.
+    NBA-only scopes pass ``tag-id-union`` for the NBA competition tag and the
+    NBA Preseason tag. Matchbook ``tag-ids`` is an AND, so one query cannot
+    ask for both. MLB-only scopes add the captured Major League Baseball tag.
+    Mixed scopes cannot apply either tag without dropping the other sport.
+    NCAAB has no Matchbook competition tag.
     """
 
     from sports_hedge.mlb.constants import MATCHBOOK_MLB_COMPETITION_TAG_ID
-    from sports_hedge.nba.constants import MATCHBOOK_NBA_COMPETITION_TAG_ID
+    from sports_hedge.nba.constants import (
+        MATCHBOOK_NBA_COMPETITION_TAG_ID,
+        MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID,
+    )
 
     if (
         not selected_includes_nfl(selected_codes)
@@ -557,7 +562,12 @@ def matchbook_scope_discovery_params(
         and not selected_includes_tennis(selected_codes)
     )
     if nba_only:
-        params["tag-ids"] = MATCHBOOK_NBA_COMPETITION_TAG_ID
+        params["tag-id-union"] = ",".join(
+            (
+                MATCHBOOK_NBA_COMPETITION_TAG_ID,
+                MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID,
+            )
+        )
     elif mlb_only:
         params["tag-ids"] = MATCHBOOK_MLB_COMPETITION_TAG_ID
     return params
@@ -2021,10 +2031,10 @@ class ReadOnlyCrossVenueCollector:
         Soccer-only discovery keeps the historical unfiltered list_events path
         so login/429 handling stays inside that call. NFL/NBA/NCAAB add American
         Football and Basketball (and soccer when also selected) without raising
-        provider concurrency. NBA-only scopes also pass the captured NBA
-        competition tag so discovery does not download the whole basketball
-        slate. Mixed soccer/NFL/NBA/NCAAB scopes cannot apply that tag without
-        dropping football or NCAAB events, so they keep sport-id 4 and reject
+        provider concurrency. NBA-only scopes pass a tag union so the NBA
+        competition tag and the NBA Preseason tag are each queried. Mixed
+        soccer/NFL/NBA/NCAAB scopes cannot apply that union without dropping
+        football or NCAAB events, so they keep sport-id 4 and reject
         WNBA/non-selected basketball downstream.
         """
 

@@ -387,6 +387,10 @@ class MarketMatcher:
             from sports_hedge.mlb.settlement import mlb_pair_non_executable_reason
 
             settlement_reason = mlb_pair_non_executable_reason(left, right)
+            if settlement_reason is None:
+                from sports_hedge.nba.register import nba_pair_non_executable_reason
+
+                settlement_reason = nba_pair_non_executable_reason(left, right)
             reasons = [settlement_reason or NOT_REGISTERED_REASON]
         return MarketMatchResult(
             matched=False,
