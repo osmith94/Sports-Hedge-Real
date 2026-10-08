@@ -116,7 +116,10 @@ describe("opportunity monitor current-vs-audit separation", () => {
   const monitor = readFileSync(join(frontendRoot, "components/opportunity-monitor.tsx"), "utf8");
 
   it("drives the primary table from tracked radar and keeps market-decision audit off the console", () => {
-    assert.match(page, /getTrackedWatchlist\("limit=100"\)/);
+    assert.match(page, /opportunityMonitorTrackedQuery\(\)/);
+    assert.doesNotMatch(page, /getTrackedWatchlist\("limit=100"\)/);
+    assert.doesNotMatch(page, /getTrackedWatchlist\("limit=500"\)/);
+    assert.doesNotMatch(page, /limit=500/);
     assert.match(page, /<OpportunityMonitor/);
     assert.match(page, /items=\{tracked\.available \? tracked\.value : \[\]\}/);
     assert.doesNotMatch(page, /getPaperScans/);
@@ -134,7 +137,15 @@ describe("opportunity monitor current-vs-audit separation", () => {
     assert.ok(treasuryIdx >= 0 && positionsIdx > treasuryIdx && scanIdx > positionsIdx);
     assert.ok(hotIdx > 0 && monitorIdx > hotIdx);
     assert.match(monitor, /Current radar set from tracked watchlist/);
-    assert.match(monitor, /getTrackedWatchlist\("limit=100"\)/);
+    assert.match(monitor, /most recently observed/);
+    assert.match(monitor, /opportunityMonitorTrackedQuery\(displayLimit\)/);
+    assert.match(monitor, /OPPORTUNITY_MONITOR_DEFAULT_LIMIT/);
+    assert.match(monitor, /OPPORTUNITY_MONITOR_MAX_LIMIT/);
+    assert.match(monitor, /20 recent/);
+    assert.match(monitor, /50 recent/);
+    assert.doesNotMatch(monitor, /limit=100/);
+    assert.doesNotMatch(monitor, /limit=500/);
+    assert.match(monitor, /does not mean HOT, BACKGROUND, or UNIVERSE have stopped/);
     assert.match(monitor, /cycleStamp/);
     assert.doesNotMatch(monitor, /getPaperScans/);
     assert.doesNotMatch(monitor, /DEMO_NEAR_ARB/);
@@ -335,81 +346,66 @@ describe("opportunity monitor state badges", () => {
   });
 });
 
+describe("opportunity monitor scanner heartbeat stays independent of an empty snapshot", () => {
+  it("keeps HOT, BACKGROUND, and UNIVERSE copy when the snapshot has no rows", () => {
+    const summary = opportunityMonitorSummary([], refresh(), true, true, Date.parse("2026-09-15T12:01:00.000Z"));
+    assert.equal(summary.qualifyingCount, 0);
+    assert.equal(summary.nearCount, 0);
+    assert.equal(summary.dataClass, "LIVE PAPER");
+    assert.match(summary.fastScan, /HOT/);
+    assert.match(summary.backgroundPricing, /BACKGROUND/);
+    assert.match(summary.fullSweep, /UNIVERSE/);
+    assert.doesNotMatch(summary.fastScan, /^—$/);
+  });
+});
+
 describe("opportunity monitor default ordering and user sort", () => {
-  it("defaults to net edge descending and keeps null economics below priced rows", () => {
+  it("defaults to most recently observed and keeps a large older edge in the loaded set", () => {
     const rows = [
       opportunityMonitorRow(
         watch({
-          opportunity_id: "stale",
-          freshness_class: "expired",
-          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          opportunity_id: "old-high-edge",
+          last_seen_at: "2026-09-15T12:00:05.000Z",
           last_priced_at: "2026-09-15T12:00:50.000Z",
-          last_discovered_at: "2026-09-15T11:00:00.000Z",
           current_net_edge: 0.04,
         }),
       ),
       opportunityMonitorRow(
         watch({
-          opportunity_id: "near-old",
-          current_net_edge: 0.009,
-          last_scanned_at: "2026-09-15T11:00:00.000Z",
+          opportunity_id: "newest-small-edge",
+          last_seen_at: "2026-09-15T12:00:40.000Z",
           last_priced_at: "2026-09-15T12:00:10.000Z",
-          last_discovered_at: "2026-09-15T11:00:00.000Z",
+          current_net_edge: 0.001,
         }),
       ),
       opportunityMonitorRow(
         watch({
-          opportunity_id: "near-new",
+          opportunity_id: "middle",
+          last_seen_at: "2026-09-15T12:00:20.000Z",
           current_net_edge: 0.009,
-          last_scanned_at: "2026-09-15T11:00:00.000Z",
-          last_priced_at: "2026-09-15T12:00:40.000Z",
-          last_discovered_at: "2026-09-15T11:00:00.000Z",
         }),
       ),
       opportunityMonitorRow(
         watch({
-          opportunity_id: "qual-low",
-          status: "TRIGGERED",
-          classification: "triggered_opportunity",
-          is_arbitrage: true,
-          freshness_class: "executable",
-          bet_actionable: true,
-          current_net_edge: 0.011,
-          last_scanned_at: "2026-09-15T11:00:00.000Z",
-          last_priced_at: "2026-09-15T12:00:30.000Z",
-          last_discovered_at: "2026-09-15T11:00:00.000Z",
-        }),
-      ),
-      opportunityMonitorRow(
-        watch({
-          opportunity_id: "qual-high",
-          status: "TRIGGERED",
-          classification: "triggered_opportunity",
-          is_arbitrage: true,
-          freshness_class: "executable",
-          bet_actionable: true,
+          opportunity_id: "missing-seen",
+          last_seen_at: undefined,
           current_net_edge: 0.03,
-          last_scanned_at: "2026-09-15T11:00:00.000Z",
-          last_priced_at: "2026-09-15T12:00:12.000Z",
-          last_discovered_at: "2026-09-15T11:00:00.000Z",
-        }),
-      ),
-      opportunityMonitorRow(
-        watch({
-          opportunity_id: "below",
-          current_net_edge: -0.002,
-          last_scanned_at: "2026-09-15T11:00:00.000Z",
-          last_priced_at: "2026-09-15T12:00:45.000Z",
-          last_discovered_at: "2026-09-15T11:00:00.000Z",
         }),
       ),
     ];
     const sorted = sortOpportunityMonitor(rows, null);
     assert.deepEqual(
       sorted.map((row) => row.id),
-      ["stale", "qual-high", "qual-low", "near-new", "near-old", "below"],
+      ["newest-small-edge", "middle", "old-high-edge", "missing-seen"],
     );
-    assert.equal(compareDefaultOpportunityOrder(rows[4], rows[3]) < 0, true);
+    assert.equal(sorted[0].netEdge, 0.001);
+    assert.equal(sorted[2].netEdge, 0.04);
+    assert.equal(compareDefaultOpportunityOrder(rows[1], rows[0]) < 0, true);
+    const byEdge = sortOpportunityMonitor(rows, { column: "netEdge", direction: "desc" });
+    assert.deepEqual(
+      byEdge.map((row) => row.id),
+      ["old-high-edge", "missing-seen", "middle", "newest-small-edge"],
+    );
   });
 
   it("applies user sorting to the loaded set with nulls last in both directions", () => {

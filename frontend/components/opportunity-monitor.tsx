@@ -11,6 +11,9 @@ import {
   interpretMappingReview,
   LiveRefreshStatus,
   NearOpportunity,
+  OPPORTUNITY_MONITOR_DEFAULT_LIMIT,
+  OPPORTUNITY_MONITOR_MAX_LIMIT,
+  opportunityMonitorTrackedQuery,
 } from "../lib/api";
 import { useLiveStatusOptional } from "./live-status-provider";
 import { MappingVerificationPanel } from "./mapping-verification-panel";
@@ -80,6 +83,7 @@ export function OpportunityMonitor({
   const [trackedItems, setTrackedItems] = useState(items);
   const [trackedAvailable, setTrackedAvailable] = useState(available);
   const [sort, setSort] = useState<OpportunityMonitorSortState | null>(null);
+  const [displayLimit, setDisplayLimit] = useState(OPPORTUNITY_MONITOR_DEFAULT_LIMIT);
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [verifyId, setVerifyId] = useState<string | null>(null);
@@ -99,9 +103,9 @@ export function OpportunityMonitor({
 
   const cycleStamp = live?.cycleStamp;
   useEffect(() => {
-    if (cycleStamp == null) return undefined;
+    if (cycleStamp == null && displayLimit === OPPORTUNITY_MONITOR_DEFAULT_LIMIT) return undefined;
     let cancelled = false;
-    getTrackedWatchlist("limit=100")
+    getTrackedWatchlist(opportunityMonitorTrackedQuery(displayLimit))
       .then((next) => {
         if (cancelled) return;
         setTrackedItems(next);
@@ -113,7 +117,7 @@ export function OpportunityMonitor({
     return () => {
       cancelled = true;
     };
-  }, [cycleStamp]);
+  }, [cycleStamp, displayLimit]);
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -306,9 +310,29 @@ export function OpportunityMonitor({
             append-only scan audit.
           </div>
         </div>
-        <span className={available ? "status-badge" : "demo-chip"}>
-          {available ? (rows.length ? "LIVE PAPER" : "EMPTY") : "UNAVAILABLE"}
-        </span>
+        <div className="panel-header-actions">
+          <label className="panel-meta">
+            Snapshot{" "}
+            <select
+              aria-label="Opportunity snapshot size"
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setDisplayLimit(
+                  next === OPPORTUNITY_MONITOR_MAX_LIMIT
+                    ? OPPORTUNITY_MONITOR_MAX_LIMIT
+                    : OPPORTUNITY_MONITOR_DEFAULT_LIMIT,
+                );
+              }}
+              value={displayLimit}
+            >
+              <option value={OPPORTUNITY_MONITOR_DEFAULT_LIMIT}>20 recent</option>
+              <option value={OPPORTUNITY_MONITOR_MAX_LIMIT}>50 recent</option>
+            </select>
+          </label>
+          <span className={available ? "status-badge" : "demo-chip"}>
+            {available ? (rows.length ? "LIVE PAPER" : "EMPTY") : "UNAVAILABLE"}
+          </span>
+        </div>
       </div>
 
       <OpportunitySummaryStrip summary={summary} nowMs={nowMs} available={available} />
@@ -320,8 +344,7 @@ export function OpportunityMonitor({
       ) : null}
       {available && rows.length === 0 ? (
         <div className="empty-live-compact">
-          No current cross-venue opportunities. Empty current radar is not back-filled from
-          audit history or demo fixtures.
+          No current opportunities in this {displayLimit}-row snapshot. An empty snapshot does not mean HOT, BACKGROUND, or UNIVERSE have stopped. Lane status above is the scanner heartbeat. Empty current radar is not back-filled from audit history or demo fixtures.
         </div>
       ) : null}
 
@@ -329,13 +352,15 @@ export function OpportunityMonitor({
         <div className="table-wrap">
           <table>
             <caption className="scan-history-caption">
-              Current radar set from tracked watchlist / FixtureCurrentStateStore. Price age is
-              each row&apos;s last priced time. Last discovered/confirmed stays separate. Quote age
-              is the provider quote at last evaluation. Radar retention is not executable quote
-              freshness. Unknown price clocks stay unknown. State is economic/radar classification
-              and does not replace the primary badge. Default order is net edge descending. Rows
-              with no solver economics stay below priced rows. Rejected and single-venue rows stay
-              labelled as such. User sorting applies to this loaded current set only.
+              Current radar set from tracked watchlist / FixtureCurrentStateStore. Snapshot of the{" "}
+              {displayLimit} most recently observed current opportunities. The request is limit=
+              {displayLimit}, not a longer list sliced in the browser. Price age is each row&apos;s
+              last priced time. Last discovered/confirmed stays separate. Quote age is the provider
+              quote at last evaluation. Radar retention is not executable quote freshness. Unknown
+              price clocks stay unknown. State is economic/radar classification and does not replace
+              the primary badge. Net edge stays on the row. Default order is most recently observed.
+              Sorting a column reorders this loaded current set only. Rejected and single-venue rows
+              stay labelled as such.
             </caption>
             <thead>
               <tr>

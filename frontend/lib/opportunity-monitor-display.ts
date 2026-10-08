@@ -499,26 +499,12 @@ function isMissing(value: number | string | null | undefined): boolean {
   return typeof value === "number" && !Number.isFinite(value);
 }
 
-function defaultStateRank(state: OpportunityMonitorStateBadge): number {
-  if (state === "QUALIFYING") return 0;
-  if (state === "NEAR") return 1;
-  return 2;
-}
-
 export function compareDefaultOpportunityOrder(
   left: OpportunityMonitorRow,
   right: OpportunityMonitorRow,
 ): number {
-  const leftMissing = left.netEdge === null ? 1 : 0;
-  const rightMissing = right.netEdge === null ? 1 : 0;
-  if (leftMissing !== rightMissing) return leftMissing - rightMissing;
-  if (left.netEdge !== null && right.netEdge !== null && left.netEdge !== right.netEdge) {
-    return right.netEdge - left.netEdge;
-  }
-  const stateDelta = defaultStateRank(left.state) - defaultStateRank(right.state);
-  if (stateDelta !== 0) return stateDelta;
-  const leftAge = parseObservationTimestampMs(left.observedAt);
-  const rightAge = parseObservationTimestampMs(right.observedAt);
+  const leftAge = parseObservationTimestampMs(left.economicsObservedAt);
+  const rightAge = parseObservationTimestampMs(right.economicsObservedAt);
   if (leftAge === null && rightAge === null) return left.id.localeCompare(right.id);
   if (leftAge === null) return 1;
   if (rightAge === null) return -1;

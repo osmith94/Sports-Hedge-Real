@@ -1897,7 +1897,23 @@ export function getTriggeredWatchlist(query = "limit=25"): Promise<NearOpportuni
   return request(`/paper/watchlist/triggered${query ? `?${query}` : ""}`);
 }
 
-export function getTrackedWatchlist(query = "limit=100"): Promise<NearOpportunity[]> {
+export const OPPORTUNITY_MONITOR_DEFAULT_LIMIT = 20;
+export const OPPORTUNITY_MONITOR_MAX_LIMIT = 50;
+
+/** Monitor snapshot query. Only 20 or 50. Any other value stays on the default. */
+export function opportunityMonitorTrackedQuery(
+  limit: number = OPPORTUNITY_MONITOR_DEFAULT_LIMIT,
+): string {
+  const bounded =
+    limit === OPPORTUNITY_MONITOR_MAX_LIMIT
+      ? OPPORTUNITY_MONITOR_MAX_LIMIT
+      : OPPORTUNITY_MONITOR_DEFAULT_LIMIT;
+  return `limit=${bounded}`;
+}
+
+export function getTrackedWatchlist(
+  query = opportunityMonitorTrackedQuery(),
+): Promise<NearOpportunity[]> {
   return request(`/paper/watchlist/tracked${query ? `?${query}` : ""}`);
 }
 

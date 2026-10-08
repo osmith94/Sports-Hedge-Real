@@ -87,7 +87,16 @@ def triggered_opportunities(
 
 @router.get("/tracked", response_model=list[NearOpportunity])
 def tracked_markets(
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=500,
+        description=(
+            "Opportunity Monitor asks for 20, or 50 when the operator expands "
+            "the snapshot. The limit is applied after recency order. Values "
+            "above 50 are engineering stress reads, not the ordinary monitor."
+        ),
+    ),
     competition: str | None = None,
     venue: VenueName | None = None,
     market_family: MarketFamily | None = None,

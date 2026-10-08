@@ -18,6 +18,7 @@ import {
   getPaperTreasury,
   getTrackedWatchlist,
   getWatchlistActivity,
+  opportunityMonitorTrackedQuery,
   NearOpportunity,
   OpportunityLifecycleEvent,
   PaperLiquiditySnapshot,
@@ -60,7 +61,10 @@ export default async function ArbitragePage() {
   let activeTrades: PaperTrade[] = [];
   let tradesAvailable = true;
 
-  const tracked = await settledValue(getTrackedWatchlist("limit=100"), [] as NearOpportunity[]);
+  const tracked = await settledValue(
+    getTrackedWatchlist(opportunityMonitorTrackedQuery()),
+    [] as NearOpportunity[],
+  );
   const activityFetch = await settledValue(
     getWatchlistActivity("limit=100&operator_signal=true"),
     [] as OpportunityLifecycleEvent[],
