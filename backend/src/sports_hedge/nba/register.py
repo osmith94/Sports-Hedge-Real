@@ -94,15 +94,21 @@ def nba_approved_paper_venue_pair(left: CanonicalMarket, right: CanonicalMarket)
 def nba_pair_non_executable_reason(
     left: CanonicalMarket, right: CanonicalMarket
 ) -> str | None:
-    """Diagnostic for an NBA pair outside the registered Kalshi↔Polymarket cell.
+    """Diagnostic for an unsupported Matchbook↔Polymarket NBA pair.
 
-    Returns None when the pair is not NBA, and None when the register admits it.
-    Discovery of a Matchbook preseason book does not admit the pair.
+    Returns None when either side is not NBA, when the register admits the pair,
+    and when the venues are not exactly Matchbook and Polymarket. Other
+    unregistered NBA pairs, including Kalshi↔Polymarket spreads and totals,
+    keep the generic ``not_registered`` reason. Discovering a Matchbook
+    preseason book does not admit the pair.
     """
 
-    if not is_nba_canonical_event(left.event) and not is_nba_canonical_event(right.event):
+    if not is_nba_canonical_event(left.event) or not is_nba_canonical_event(right.event):
         return None
     if nba_registered_canonical_key(left, right) is not None:
+        return None
+    venues = {left.source_venue, right.source_venue}
+    if venues != {VenueName.MATCHBOOK, VenueName.POLYMARKET}:
         return None
     return NBA_PAIR_UNAPPROVED_REASON
 

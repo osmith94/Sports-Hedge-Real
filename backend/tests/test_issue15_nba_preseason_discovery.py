@@ -12,11 +12,15 @@ from pathlib import Path
 
 import httpx
 import pytest
+from test_nba_paper_markets import _normalize_kalshi_game, _normalize_pm_family
+from test_ncaab_paper_onboard import _gw_market, _ncaab_event
 
+from sports_hedge.application.capture_replay import FORBIDDEN_WRITE_METHODS
 from sports_hedge.application.collector import (
     _fixture_from_cluster,
     matchbook_scope_discovery_params,
 )
+from sports_hedge.application.complete_set import scan_eligible_pair
 from sports_hedge.application.fixture_clusters import VenueEvent, cluster_venue_events
 from sports_hedge.application.target_competitions import (
     REJECTED_NON_NCAAB_BASKETBALL,
@@ -26,11 +30,13 @@ from sports_hedge.application.target_competitions import (
     scope_matchbook_event,
 )
 from sports_hedge.catalogue.admission import assess_catalogue_admission
+from sports_hedge.catalogue.classify import classify_pair
 from sports_hedge.config import Settings
+from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
 from sports_hedge.matching.approved_register import registered_canonical_key
 from sports_hedge.matching.events import EventMatcher
-from sports_hedge.matching.markets import MarketMatcher
+from sports_hedge.matching.markets import NOT_REGISTERED_REASON, MarketMatcher
 from sports_hedge.nba.constants import (
     MATCHBOOK_NBA_COMPETITION_TAG_ID,
     MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID,
@@ -42,7 +48,9 @@ from sports_hedge.normalization.venues import (
     PolymarketNormalizer,
     VenueNormalizationError,
 )
+from sports_hedge.venues.kalshi import KalshiClient
 from sports_hedge.venues.matchbook import MATCHBOOK_SESSION_PATH, MatchbookClient
+from sports_hedge.venues.polymarket import PolymarketClient
 
 FIXTURE = (
     Path(__file__).parent
@@ -294,8 +302,10 @@ def test_nba_only_discovery_unions_tags_without_an_and_query() -> None:
 @pytest.mark.asyncio
 async def test_matchbook_tag_union_is_two_gets_inside_one_list_events() -> None:
     seen: list[dict[str, str]] = []
+    methods: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        methods.append((request.method, request.url.path))
         if request.url.path == MATCHBOOK_SESSION_PATH:
             return httpx.Response(200, json={"session-token": "paper-session"})
         if request.url.path == "/edge/rest/events":
@@ -343,3 +353,76 @@ async def test_matchbook_tag_union_is_two_gets_inside_one_list_events() -> None:
     assert all("tag-id-union" not in item for item in seen)
     price_engine = Path(__file__).parents[1] / "src" / "sports_hedge" / "application" / "price_engine.py"
     assert "tag-id-union" not in price_engine.read_text()
+    assert methods == [
+        ("POST", MATCHBOOK_SESSION_PATH),
+        ("GET", "/edge/rest/events"),
+        ("GET", "/edge/rest/events"),
+    ]
+
+
+def test_unapproved_reason_is_only_matchbook_polymarket_nba() -> None:
+    """Discovery can cluster MB↔PM NBA. Solver admission stays closed.
+
+    Kalshi↔Polymarket spreads, Matchbook↔Kalshi, and NCAAB keep not_registered.
+    """
+
+    celtics = _event("Boston Celtics at Cleveland Cavaliers")
+    pm = _load()["polymarket_bos_cle"]
+    event = MatchbookNormalizer().normalize_event(celtics)
+    pm_event = PolymarketNormalizer().normalize_event(pm)
+    moneyline = MatchbookNormalizer().normalize_market(event, _market(celtics, "Moneyline"))
+    pm_market = PolymarketNormalizer().normalize_market(pm_event, pm["markets"][0])
+    match = MarketMatcher().match(moneyline, pm_market)
+    assert match.matched is False
+    assert match.reasons == [NBA_PAIR_UNAPPROVED_REASON]
+    assert scan_eligible_pair(moneyline, pm_market, match) is False
+    assessment = classify_pair(moneyline, pm_market)
+    assert assessment.paper_mode_admitted is False
+    assert assessment.execution_eligible is False
+    assert assessment.reason == NBA_PAIR_UNAPPROVED_REASON
+    assert registered_canonical_key(moneyline, pm_market) is None
+
+    _kalshi_event, kalshi = _normalize_kalshi_game()
+    _pm_spread_event, spread, _raw = _normalize_pm_family("spreads")
+    kalshi_spread = kalshi.model_copy(
+        update={
+            "family": MarketFamily.POINT_SPREAD,
+            "line": spread.line,
+            "runners": spread.runners,
+        }
+    )
+    same_fixture_spread = spread.model_copy(update={"event": kalshi.event})
+    spread_match = MarketMatcher().match(kalshi_spread, same_fixture_spread)
+    spread_assessment = classify_pair(kalshi_spread, same_fixture_spread)
+    assert NBA_PAIR_UNAPPROVED_REASON not in spread_match.reasons
+    assert NOT_REGISTERED_REASON in spread_match.reasons
+    assert spread_assessment.reason == NOT_REGISTERED_REASON
+    assert spread_assessment.paper_mode_admitted is False
+    assert spread_assessment.execution_eligible is False
+
+    kalshi_copy = moneyline.model_copy(
+        update={"source_venue": VenueName.KALSHI, "source_market_id": "KXNBAGAME-synthetic"}
+    )
+    cross = classify_pair(moneyline, kalshi_copy)
+    assert cross.reason == NOT_REGISTERED_REASON
+    assert NBA_PAIR_UNAPPROVED_REASON not in cross.notes
+
+    home, away = "Xavier Musketeers", "Duke Blue Devils"
+    ncaab_left = _gw_market(
+        _ncaab_event(home=home, away=away, venue=VenueName.KALSHI, source_id="k-1"),
+        VenueName.KALSHI,
+        "k-ml",
+    )
+    ncaab_right = _gw_market(
+        _ncaab_event(home=home, away=away, venue=VenueName.POLYMARKET, source_id="pm-1"),
+        VenueName.POLYMARKET,
+        "pm-ml",
+    )
+    ncaab = classify_pair(ncaab_left, ncaab_right)
+    assert ncaab.reason == NOT_REGISTERED_REASON
+    assert ncaab.paper_mode_admitted is False
+
+    for client in (MatchbookClient, PolymarketClient, KalshiClient):
+        for method in FORBIDDEN_WRITE_METHODS:
+            assert not hasattr(client, method)
+    assert Settings.model_fields["sports_hedge_execution_enabled"].default is False
