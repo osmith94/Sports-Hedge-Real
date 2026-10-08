@@ -1,0 +1,121 @@
+name: PR17 Windows validation (temporary)
+
+# Independent validation PR targeting PR17; never merge this test-only PR.
+on:
+  pull_request:
+    branches:
+      - cursor/monitor-freshness-kalshi-diagnostics-c44f
+
+permissions:
+  contents: read
+
+jobs:
+  windows-liveness-matrix:
+    name: Windows 5x main-versus-PR17 liveness
+    runs-on: windows-latest
+    timeout-minutes: 65
+    env:
+      SPORTS_HEDGE_EXECUTION_ENABLED: "false"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout baseline main
+        uses: actions/checkout@v4
+        with:
+          ref: b324d5a31691dd77e6407ed8f64aedb2e2f6b448
+          path: baseline-main
+          persist-credentials: false
+      - name: Checkout PR17 head
+        uses: actions/checkout@v4
+        with:
+          ref: c01782d7c44775bea170627c91cce1cbc17bb9cf
+          path: product-pr17
+          persist-credentials: false
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "./product-pr17/backend[dev]"
+      - name: Five alternating repetitions against both SHAs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $base = $env:GITHUB_WORKSPACE
+          $logs = Join-Path $base "liveness-evidence"
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          $failed = @()
+          Write-Host "OS $([System.Environment]::OSVersion.VersionString)"
+          python --version
+          foreach ($rep in 1..5) {
+            foreach ($label in @("baseline-main", "product-pr17")) {
+              $backend = Join-Path $base "$label/backend"
+              $env:PYTHONPATH = "$(Join-Path $backend 'src');$(Join-Path $backend 'tests')"
+              Push-Location $backend
+              try {
+                Write-Host "BEGIN label=$label repetition=$rep"
+                & python -m pytest -q -rP -o faulthandler_timeout=300 tests/test_issue572_event_loop_stalls.py tests/test_issue517_windows_event_loop_liveness.py tests/test_issue496_event_loop_responsiveness.py 2>&1 | Tee-Object -FilePath (Join-Path $logs "$label-rep$rep.log")
+                $code = $LASTEXITCODE
+                Add-Content -Path (Join-Path $logs "$label-rep$rep.log") -Value "EXIT:$code"
+                Write-Host "END label=$label repetition=$rep exit=$code"
+                if ($code -ne 0) { $failed += "$label repetition=$rep exit=$code" }
+                "- $label repetition $rep exit $code" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              } finally {
+                Pop-Location
+              }
+            }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host ("LIVENESS_MATRIX_FAILED: " + ($failed -join ", "))
+            exit 1
+          }
+          Write-Host "LIVENESS_MATRIX_PASSED: 10 full test suites"
+      - name: Upload liveness logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr17-windows-liveness-matrix
+          path: liveness-evidence/
+          if-no-files-found: warn
+          retention-days: 7
+
+  windows-synthetic-soak:
+    name: Windows 30min synthetic scanner soak
+    runs-on: windows-latest
+    timeout-minutes: 85
+    env:
+      SPORTS_HEDGE_EXECUTION_ENABLED: "false"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout PR17 head
+        uses: actions/checkout@v4
+        with:
+          ref: c01782d7c44775bea170627c91cce1cbc17bb9cf
+          path: product-pr17
+          persist-credentials: false
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "./product-pr17/backend[dev]"
+      - name: Run 1800s synthetic soak, execution disabled
+        shell: pwsh
+        run: |
+          Set-Location product-pr17
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File backend\scripts\windows_reliability_soak.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "windows-soak-result.json")) { throw "soak result JSON missing" }
+      - name: Upload soak evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr17-windows-soak
+          path: product-pr17/windows-soak-result.json
+          if-no-files-found: warn
+          retention-days: 7
