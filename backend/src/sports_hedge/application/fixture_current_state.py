@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Sequence
 
 from sports_hedge.application.collector import (
     CollectionReport,
@@ -926,6 +926,68 @@ class FixtureCurrentStateStore:
                 slot = _select_market_price_slot(slots, wanted, sources)
                 return _clock_for_slot(discovered, slot, record, sources)
         return MarketPriceClock(None, None, None)
+
+    def tracked_annotations(
+        self,
+        specs: Sequence[tuple[str, tuple[str, ...]]],
+        now: datetime,
+        **kwargs: Any,
+    ) -> dict[str, tuple[FixtureRadarRow, MarketPriceClock]]:
+        """Radar meta and price clocks for many markets in one lock hold.
+
+        Each surviving fixture is pruned once. This does not call providers
+        and does not invent a second price authority: clocks use the same
+        slot rules as ``market_price_clock``.
+        """
+
+        sources_by_market: dict[str, set[str]] = {}
+        for market_id, source_market_ids in specs:
+            wanted = market_id.strip()
+            if not wanted or wanted in sources_by_market:
+                continue
+            sources_by_market[wanted] = {
+                item.strip() for item in source_market_ids if item and str(item).strip()
+            }
+        if not sources_by_market:
+            return {}
+        with self._lock:
+            # Already holding the fixture lock. The public radar read would
+            # acquire it again; use the unlocked pass so this stays one hold.
+            radar_rows = self._current_radar_rows_unlocked(now, **kwargs)
+            meta_by_market: dict[str, FixtureRadarRow] = {}
+            for radar in radar_rows:
+                for market_id in radar.paper_market_ids:
+                    if market_id in sources_by_market and market_id not in meta_by_market:
+                        meta_by_market[market_id] = radar
+            pending = {
+                market_id: sources_by_market[market_id] for market_id in meta_by_market
+            }
+            clocks: dict[str, MarketPriceClock] = {}
+            for record in self._rows.values():
+                if not pending:
+                    break
+                slots = record.live_market_slots()
+                discovered = (
+                    record.universe.last_scanned_at
+                    if record.universe is not None and record.universe.evaluated
+                    else None
+                )
+                matched = [
+                    market_id
+                    for market_id in pending
+                    if _record_mentions_market(record, slots, market_id)
+                ]
+                for market_id in matched:
+                    sources = pending.pop(market_id)
+                    slot = _select_market_price_slot(slots, market_id, sources)
+                    clocks[market_id] = _clock_for_slot(discovered, slot, record, sources)
+            return {
+                market_id: (
+                    meta,
+                    clocks.get(market_id, MarketPriceClock(None, None, None)),
+                )
+                for market_id, meta in meta_by_market.items()
+            }
 
     def hot_identity_scope(self, now: datetime, **kwargs: Any) -> list[str]:
         with self._lock:

@@ -113,10 +113,24 @@ def tracked_markets(
         as_of=now,
     )
     annotated: list[NearOpportunity] = []
+    # One catalogue pass for every returned row. Per-row radar and clock scans
+    # re-prune the whole fixture store under the same lock.
+    annotations = store.tracked_annotations(
+        [
+            (
+                row.canonical_market_id,
+                tuple(leg.source_market_id for leg in row.legs if leg.source_market_id),
+            )
+            for row in rows
+        ],
+        now,
+        **radar_kwargs,
+    )
     for row in rows:
-        meta = store.radar_meta_for_market(row.canonical_market_id, now, **radar_kwargs)
-        if meta is None:
+        found = annotations.get(row.canonical_market_id)
+        if found is None:
             continue
+        meta, clock = found
         # Executable is the persisted economics quote, not the price-slot quote.
         # A BACKGROUND/HOT refresh can carry a new 80ms provider quote while
         # the watchlist edge is still the older observation. Unknown stays
@@ -126,15 +140,6 @@ def tracked_markets(
         )
         freshness = FRESHNESS_EXECUTABLE if economics_executable else FRESHNESS_RADAR_CURRENT
         executable = freshness == FRESHNESS_EXECUTABLE
-        source_market_ids = tuple(
-            leg.source_market_id for leg in row.legs if leg.source_market_id
-        )
-        clock = store.market_price_clock(
-            row.canonical_market_id,
-            now,
-            source_market_ids=source_market_ids,
-            **radar_kwargs,
-        )
         annotated.append(
             row.model_copy(
                 update={

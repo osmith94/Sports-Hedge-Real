@@ -110,14 +110,15 @@ def _publish(
     pricing_refresh: bool,
     fixture_status: str | None = None,
     scan_lane: ScanLane = ScanLane.UNIVERSE,
+    event_id: str = EVENT,
 ):
-    fixture = _fixture(EVENT, when=when, opportunity="near", arb=False, qualifying=0)
+    fixture = _fixture(event_id, when=when, opportunity="near", arb=False, qualifying=0)
     if fixture_status is not None:
         fixture = fixture.model_copy(update={"fixture_status": fixture_status})
     report = _report(
         [fixture],
         when=when,
-        markets={EVENT: rows},
+        markets={event_id: rows},
         decisions=decisions,
     )
     store.upsert_from_report(
@@ -436,6 +437,62 @@ def test_hot_price_does_not_refresh_stale_economics() -> None:
         clock["at"] = T0 + timedelta(seconds=360)
         assert client.get("/paper/watchlist/tracked").json() == []
     finally:
+        app.dependency_overrides.clear()
+        coordinator.reset()
+        repository.close()
+
+
+def test_tracked_read_prunes_each_fixture_once_per_pass() -> None:
+    """500-style catalogues must not re-walk the store once per watchlist row."""
+
+    from sports_hedge.application.fixture_current_state import _FixtureRecord
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.reset()
+    repository = SqliteWatchlistRepository()
+    clock = {"at": T0}
+    service = WatchlistService(repository, clock=lambda: clock["at"])
+    store = coordinator.fixture_current_state()
+    app.dependency_overrides[get_watchlist_service] = lambda: service
+    client = TestClient(app)
+    fixture_count = 40
+    watched = 25
+    calls = {"n": 0}
+    real_prune = _FixtureRecord.prune_markets
+
+    def counted(self, *args, **kwargs):
+        calls["n"] += 1
+        return real_prune(self, *args, **kwargs)
+
+    try:
+        for index in range(fixture_count):
+            event_id = f"scale-{index}"
+            _publish(
+                store,
+                [_named_row("both_teams_to_score", f"mb-{index}", f"pm-{index}")],
+                [_decision(event_id, f"mkt-{index}", when=T0)],
+                T0,
+                pricing_refresh=index < watched,
+                event_id=event_id,
+            )
+            if index < watched:
+                service.observe(
+                    _observation(f"mkt-{index}", (f"mb-{index}", f"pm-{index}"), T0).model_copy(
+                        update={"canonical_event_id": event_id}
+                    )
+                )
+        _FixtureRecord.prune_markets = counted
+        calls["n"] = 0
+        body = client.get("/paper/watchlist/tracked?limit=500").json()
+        assert len(body) == watched
+        assert all(row["last_priced_at"] for row in body)
+        # Cohort pass plus one annotation pass. Each pass prunes during
+        # eviction and again while building the radar. Per-row scans would
+        # prune about watched × fixture_count times.
+        assert calls["n"] <= fixture_count * 8
+        assert calls["n"] < watched * fixture_count
+    finally:
+        _FixtureRecord.prune_markets = real_prune
         app.dependency_overrides.clear()
         coordinator.reset()
         repository.close()
