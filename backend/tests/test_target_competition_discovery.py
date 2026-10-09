@@ -185,6 +185,7 @@ VARIANT_LABELS = {
         "Liga Profesional",
         "Argentine Primera",
         "Primera División Argentina",
+        "Argentina Liga Profesional de Fútbol",
     ),
     TargetCompetitionCode.COPA_LIBERTADORES: (
         "Copa Libertadores",
@@ -256,6 +257,11 @@ REJECTED_LABELS = (
     "NCAAW",
     "Women's College Basketball",
     "NCAA Women's Basketball",
+    "Argentina Primera B Metropolitana",
+    "Argentina Primera Nacional",
+    "Copa Argentina",
+    "Argentina Copa de la Liga",
+    "Argentina",
 )
 
 
@@ -345,7 +351,15 @@ def test_matchbook_scope_rejects_out_of_scope_and_near_neighbors(label: str) -> 
 
 @pytest.mark.parametrize(
     "label",
-    ("League One", "League Two", "EFL League One", "Ligue 1", "MLS", "US Major League Soccer"),
+    (
+        "League One",
+        "League Two",
+        "EFL League One",
+        "Ligue 1",
+        "MLS",
+        "US Major League Soccer",
+        "Argentina Liga Profesional de Fútbol",
+    ),
 )
 def test_unselected_registered_competitions_are_out_of_scope(label: str) -> None:
     decision = scope_matchbook_event(
