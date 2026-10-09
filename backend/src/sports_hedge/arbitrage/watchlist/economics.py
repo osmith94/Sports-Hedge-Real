@@ -54,6 +54,8 @@ NEAR_ELIGIBLE_REASONS = (
 )
 # Quote age is an execution/paper-entry gate, not an economic radar status.
 FRESHNESS_NONBLOCKING_REASONS = frozenset({"stale_quote", "unknown_quote_age"})
+# Optional execution-risk score construction. Not a hard admission or radar veto.
+INFORMATIONAL_NONBLOCKING_REASONS = frozenset({"missing_risk_evidence"})
 COST_CLOCK_REASONS = (
     "future_fee_snapshot",
     "future_fx_snapshot",
@@ -443,6 +445,7 @@ def classify_status(
         for reason in reasons
         if reason not in NEAR_ELIGIBLE_REASONS
         and reason not in FRESHNESS_NONBLOCKING_REASONS
+        and reason not in INFORMATIONAL_NONBLOCKING_REASONS
     ]
     if leftover:
         return OpportunityStatus.REJECTED, _dedupe(reasons)

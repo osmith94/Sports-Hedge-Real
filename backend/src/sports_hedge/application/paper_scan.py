@@ -29,6 +29,7 @@ from sports_hedge.arbitrage.min_net_threshold import (
     OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED,
     resolve_min_net_threshold,
 )
+from sports_hedge.arbitrage.watchlist.economics import INFORMATIONAL_NONBLOCKING_REASONS
 from sports_hedge.arbitrage.payoff_scan import (
     DepthAwarePayoffScanner,
     PayoffScanResult,
@@ -857,13 +858,10 @@ def _dedupe(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-_INFORMATIONAL_REJECTION_REASONS = frozenset({"missing_risk_evidence"})
-
-
 def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
     """Every remaining rejection blocks. Optional risk-score evidence does not."""
 
-    return [reason for reason in reasons if reason not in _INFORMATIONAL_REJECTION_REASONS]
+    return [reason for reason in reasons if reason not in INFORMATIONAL_NONBLOCKING_REASONS]
 
 
 def _default_execution_mode(venue: VenueName) -> LegExecutionMode:

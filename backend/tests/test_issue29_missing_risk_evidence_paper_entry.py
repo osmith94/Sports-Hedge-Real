@@ -14,25 +14,51 @@ from pathlib import Path
 import pytest
 
 from sports_hedge.application.complete_set import SOLVER_MODEL_SIMPLE, generalized_state_model
+from sports_hedge.application.current_market_inventory import (
+    PROMOTION_FAIL_CLOSED_REASONS,
+    stored_row_proves_qualifying_executable,
+)
 from sports_hedge.application.execution_reprice import (
+    EXECUTION_REPRICE_SKEW,
+    capture_with_execution_reprice,
     execution_entry_block,
     execution_reprice_permitted,
 )
-from sports_hedge.application.executable_liquidity import decision_is_solver_arbitrage, decision_net_edge
+from sports_hedge.application.executable_liquidity import (
+    HARD_NON_EXECUTABLE_REASONS,
+    FixtureHeadlineCandidate,
+    HeadlineBand,
+    LiquidityRole,
+    decision_is_solver_arbitrage,
+    decision_net_edge,
+    headline_band_for,
+)
 from sports_hedge.application.market_observation import (
     KalshiObservationBuilder,
     MatchbookObservationBuilder,
     PolymarketObservationBuilder,
 )
 from sports_hedge.application.paper_scan import PaperScanService, _paper_blocking_reasons
+from sports_hedge.application.price_engine import CataloguePriceEngine
+from sports_hedge.arbitrage.allocation.engine import allocate
 from sports_hedge.arbitrage.models import PayoffSolution
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
+from sports_hedge.arbitrage.priority_alerts.qualification import qualify_priority_alert
+from sports_hedge.arbitrage.watchlist.economics import (
+    INFORMATIONAL_NONBLOCKING_REASONS,
+    NET_PROXIMITY_BAND_PP,
+    classify_status,
+)
+from sports_hedge.arbitrage.watchlist.models import OpportunityStatus
 from sports_hedge.config import Settings
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.venues import KalshiClient, MatchbookClient, PolymarketClient
+from test_issue200_universe_hot_promotion import _market_row
+from test_near_arbitrage_watchlist import _observation
+from test_placement_thresholds import _request
 from test_execution_reprice_before_paper_entry import (
     _book,
     _close,
@@ -424,6 +450,278 @@ def test_missing_risk_evidence_is_informational_not_a_paper_block() -> None:
     assert _paper_blocking_reasons(["no_positive_edge", "missing_risk_evidence"]) == [
         "no_positive_edge",
     ]
+
+
+def test_combined_no_positive_edge_and_missing_risk_evidence_still_rejects_price2() -> None:
+    """Solver no-arb remains the economic veto. Leftover risk label is not a substitute."""
+
+    blocked = _decision(
+        eligible_for_paper_simulation=False,
+        rejection_reasons=["no_positive_edge", "missing_risk_evidence"],
+        payoff_scan=PayoffScanResult(
+            solution=PayoffSolution(is_arbitrage=False, roi=Decimal("-0.12"))
+        ),
+    )
+    assert decision_is_solver_arbitrage(blocked) is False
+    assert "no_positive_edge" in _paper_blocking_reasons(list(blocked.rejection_reasons))
+    assert execution_reprice_permitted(blocked) is False
+    assert execution_entry_block(blocked) is not None
+
+
+def test_complete_btts_and_1x2_books_score_optional_risk_when_inputs_exist() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    service = PaperScanService(MarketIntelligenceService(repository))
+    try:
+        mb_btts = MatchbookObservationBuilder().build(
+            BVB_MB_EVENT,
+            {
+                "id": 7102,
+                "name": "Both Teams To Score",
+                "runners": [
+                    {"id": 11, "name": "Yes", "prices": [{"side": "back", "odds": "1.80", "available-amount": "400"}]},
+                    {"id": 12, "name": "No", "prices": [{"side": "back", "odds": "2.20", "available-amount": "400"}]},
+                ],
+            },
+            observed_at=NOW,
+            quote_age_ms=110,
+        )
+        pm_btts = PolymarketObservationBuilder().build(
+            BVB_PM_EVENT,
+            {
+                "id": "pm-btts-29",
+                "question": "Both teams to score?",
+                "sportsMarketType": "both teams to score",
+                "outcomes": '["Yes", "No"]',
+                "clobTokenIds": '["yes", "no"]',
+                "description": "Resolves based on 90 minutes of regulation time.",
+            },
+            {
+                "yes": {"asset_id": "yes", "asks": [{"price": "0.22", "size": "500"}], "bids": [{"price": "0.20", "size": "500"}]},
+                "no": {"asset_id": "no", "asks": [{"price": "0.62", "size": "500"}], "bids": [{"price": "0.60", "size": "500"}]},
+            },
+            observed_at=NOW,
+            quote_age_ms=130,
+        )
+        btts = service.scan_pair(
+            mb_btts, pm_btts, venue_costs=matchbook_polymarket_costs(), fx_snapshots=_fx()
+        )
+        mb_1x2 = MatchbookObservationBuilder().build(
+            BVB_MB_EVENT,
+            {
+                "id": 7101,
+                "name": "Match Odds",
+                "runners": [
+                    {"id": 1, "name": "Borussia Dortmund", "prices": [{"side": "back", "odds": "1.70", "available-amount": "400"}]},
+                    {"id": 2, "name": "Draw", "prices": [{"side": "back", "odds": "4.20", "available-amount": "400"}]},
+                    {"id": 3, "name": "Werder Bremen", "prices": [{"side": "back", "odds": "5.50", "available-amount": "400"}]},
+                ],
+            },
+            observed_at=NOW,
+            quote_age_ms=90,
+        )
+        pm_1x2 = PolymarketObservationBuilder().build(
+            BVB_PM_EVENT,
+            {
+                "id": "pm-1x2-29",
+                "question": "Match result?",
+                "sportsMarketType": "moneyline",
+                "outcomes": '["Borussia Dortmund", "Draw", "Werder Bremen"]',
+                "clobTokenIds": '["h", "d", "a"]',
+                "description": "Resolves based on 90 minutes of regulation time.",
+            },
+            {
+                "h": {"asset_id": "h", "asks": [{"price": "0.20", "size": "500"}], "bids": [{"price": "0.18", "size": "500"}]},
+                "d": {"asset_id": "d", "asks": [{"price": "0.18", "size": "500"}], "bids": [{"price": "0.16", "size": "500"}]},
+                "a": {"asset_id": "a", "asks": [{"price": "0.45", "size": "500"}], "bids": [{"price": "0.43", "size": "500"}]},
+            },
+            observed_at=NOW,
+            quote_age_ms=95,
+        )
+        match_odds = service.scan_pair(
+            mb_1x2, pm_1x2, venue_costs=matchbook_polymarket_costs(), fx_snapshots=_fx()
+        )
+    finally:
+        repository.close()
+
+    assert mb_btts.market.family is MarketFamily.BOTH_TEAMS_TO_SCORE
+    assert btts.market_match.matched is True
+    assert btts.solver_model == SOLVER_MODEL_SIMPLE
+    assert decision_is_solver_arbitrage(btts) is True
+    assert btts.execution_risk_inputs is not None
+    assert btts.execution_risk is not None
+    assert "missing_risk_evidence" not in btts.rejection_reasons
+    assert mb_1x2.market.family is MarketFamily.MATCH_RESULT
+    assert match_odds.market_match.matched is True
+    assert match_odds.solver_model == SOLVER_MODEL_SIMPLE
+    assert decision_is_solver_arbitrage(match_odds) is True
+    assert match_odds.execution_risk_inputs is not None
+    assert "missing_risk_evidence" not in match_odds.rejection_reasons
+
+
+def test_optional_risk_reason_is_not_a_second_hard_display_or_promotion_gate() -> None:
+    assert "missing_risk_evidence" not in HARD_NON_EXECUTABLE_REASONS
+    assert "missing_risk_evidence" not in PROMOTION_FAIL_CLOSED_REASONS
+    assert "missing_risk_evidence" in INFORMATIONAL_NONBLOCKING_REASONS
+    candidate = FixtureHeadlineCandidate(
+        family="total_goals",
+        line=Decimal("2.5"),
+        selection="over",
+        current_net_edge=Decimal("0.041"),
+        trigger_net_edge=Decimal("0.01"),
+        eligible_for_paper_simulation=True,
+        solver_is_arbitrage=True,
+        rejection_reasons=["missing_risk_evidence"],
+        liquidity_role=LiquidityRole.TAKER,
+        quote_age_ms=80,
+    )
+    assert headline_band_for(candidate) is HeadlineBand.QUALIFYING
+    status, reasons = classify_status(
+        _observation(
+            edge=Decimal("0.015"),
+            eligible=True,
+            quote_age_ms=80,
+            solver_is_arbitrage=True,
+            rejection_reasons=["missing_risk_evidence"],
+        ),
+        approaching_band_pp=NET_PROXIMITY_BAND_PP,
+        max_quote_age_ms=2000,
+    )
+    assert status is OpportunityStatus.TRIGGERED
+    assert "missing_risk_evidence" in reasons
+    row = _market_row(rejection_reasons=["missing_risk_evidence"])
+    assert stored_row_proves_qualifying_executable(row) is True
+    combined, _combined_reasons = classify_status(
+        _observation(
+            edge=Decimal("0.015"),
+            eligible=False,
+            quote_age_ms=80,
+            solver_is_arbitrage=False,
+            rejection_reasons=["no_positive_edge", "missing_risk_evidence"],
+        ),
+        approaching_band_pp=NET_PROXIMITY_BAND_PP,
+        max_quote_age_ms=2000,
+    )
+    assert combined is OpportunityStatus.REJECTED
+
+
+def test_priority_alerts_and_max_risk_do_not_gate_price1_price2_paper_entry() -> None:
+    scan_src = inspect.getsource(PaperScanService.scan_pair)
+    reprice_src = inspect.getsource(capture_with_execution_reprice)
+    finish_src = inspect.getsource(CataloguePriceEngine._finish_execution_reprice)
+    qualify_src = inspect.getsource(qualify_priority_alert)
+    assert "qualify_priority_alert" not in scan_src
+    assert "qualify_priority_alert" not in reprice_src
+    assert "qualify_priority_alert" not in finish_src
+    assert "execution_risk_above_priority_threshold" in qualify_src
+    assert "fill_confidence_below_priority_threshold" in qualify_src
+    assert "execution_risk_above_priority_threshold" not in scan_src
+    assert "fill_confidence_below_priority_threshold" not in scan_src
+    low = allocate(_request(execution_risk_score=0))
+    high = allocate(_request(execution_risk_score=99))
+    assert low.accepted and high.accepted
+    assert high.maximum_validated_capital == low.maximum_validated_capital
+    assert high.recommended_committed_capital == high.maximum_validated_capital
+    assert EXECUTION_REPRICE_SKEW == "execution_reprice_skew"
+    assert "EXECUTION_REPRICE_SKEW" in finish_src
+    assert "skew_exceeded" in finish_src
+
+
+def test_deterministic_funnel_separates_sole_risk_from_solver_no_arb() -> None:
+    repository = SqliteMarketIntelligenceRepository()
+    service = PaperScanService(MarketIntelligenceService(repository))
+    hidden = OptionalRiskUnavailableScan(MarketIntelligenceService(repository))
+    try:
+        qualifying, _, _ = _scan_pair(service)
+        sole_risk, _, _ = _scan_pair(hidden)
+        below = service.scan_pair(
+            MatchbookObservationBuilder().build(
+                BVB_MB_EVENT, _half_line_totals_payloads()[0], observed_at=NOW, quote_age_ms=120
+            ),
+            PolymarketObservationBuilder().build(
+                BVB_PM_EVENT,
+                _half_line_totals_payloads()[1],
+                _half_line_totals_payloads()[2],
+                observed_at=NOW,
+                quote_age_ms=150,
+            ),
+            venue_costs=matchbook_polymarket_costs(),
+            fx_snapshots=_fx(),
+            minimum_net_edge=Decimal("0.90"),
+        )
+        mb_event, mb_market = matchbook_payloads()
+        matchbook = MatchbookObservationBuilder().build(
+            mb_event, mb_market, observed_at=OBSERVED, quote_age_ms=120
+        )
+        event, market, _books, series = kalshi_btts_payloads()
+        expensive = {
+            market["ticker"]: {
+                "orderbook_fp": {
+                    "yes_dollars": [["0.01", "10.00"]],
+                    "no_dollars": [["0.01", "10.00"]],
+                }
+            }
+        }
+        kalshi = KalshiObservationBuilder().build(
+            event,
+            market,
+            expensive,
+            series=series,
+            observed_at=OBSERVED,
+            quote_age_ms=80,
+            quote_age_basis="retrieval",
+            fee_snapshot={"fee_type": "quadratic", "fee_multiplier": "1"},
+        )
+        no_arb = service.scan_pair(
+            matchbook,
+            kalshi,
+            venue_costs=matchbook_kalshi_costs("0.02"),
+            fx_snapshots=_fx(),
+        )
+    finally:
+        repository.close()
+
+    leftover_both = _decision(
+        canonical_market_id="hist-both",
+        eligible_for_paper_simulation=False,
+        rejection_reasons=["no_positive_edge", "missing_risk_evidence"],
+        payoff_scan=PayoffScanResult(
+            solution=PayoffSolution(is_arbitrage=False, roi=Decimal("-0.04"))
+        ),
+    )
+    repeated = [
+        ("totals-complete", qualifying),
+        ("totals-complete", qualifying),
+        ("totals-hidden-optional-risk", sole_risk),
+        ("totals-below-min", below),
+        ("btts-no-arb", no_arb),
+        ("hist-both", leftover_both),
+    ]
+    unique = dict(repeated)
+    buckets = {"sole_optional_risk": 0, "risk_plus_hard": 0, "other_blocker": 0, "price2_permitted": 0}
+    for item in unique.values():
+        blocking = _paper_blocking_reasons(list(item.rejection_reasons))
+        arb = decision_is_solver_arbitrage(item)
+        if execution_reprice_permitted(item):
+            buckets["price2_permitted"] += 1
+        elif "missing_risk_evidence" in item.rejection_reasons and not arb:
+            buckets["risk_plus_hard"] += 1
+        elif arb and not blocking:
+            buckets["sole_optional_risk"] += 1
+        else:
+            buckets["other_blocker"] += 1
+
+    assert len(unique) == 5
+    assert buckets["price2_permitted"] >= 1
+    assert buckets["risk_plus_hard"] == 1
+    assert buckets["other_blocker"] >= 1
+    assert no_arb.eligible_for_paper_simulation is False
+    assert "no_arbitrage" in no_arb.rejection_reasons or "no_positive_edge" in no_arb.rejection_reasons
+    assert "missing_risk_evidence" not in no_arb.rejection_reasons
+    assert execution_reprice_permitted(no_arb) is False
+    assert below.eligible_for_paper_simulation is False
+    assert "net_edge_below_threshold" in below.rejection_reasons
+    assert execution_reprice_permitted(qualifying) is True
+    assert execution_reprice_permitted(sole_risk) is True
 
 
 @pytest.mark.asyncio

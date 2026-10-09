@@ -6,6 +6,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from sports_hedge.arbitrage.watchlist.economics import (
+    INFORMATIONAL_NONBLOCKING_REASONS,
     NEAR_ELIGIBLE_REASONS,
     quantized_edge,
 )
@@ -63,7 +64,6 @@ HARD_NON_EXECUTABLE_REASONS = frozenset(
         "execution_risk_above_threshold",
         "fill_confidence_below_threshold",
         "insufficient_depth",
-        "missing_risk_evidence",
     }
 )
 
@@ -233,7 +233,12 @@ def headline_band_for(candidate: FixtureHeadlineCandidate) -> HeadlineBand:
     )
     if qualifying:
         return HeadlineBand.QUALIFYING
-    leftover = [reason for reason in reasons if reason not in NEAR_ELIGIBLE_REASONS]
+    leftover = [
+        reason
+        for reason in reasons
+        if reason not in NEAR_ELIGIBLE_REASONS
+        and reason not in INFORMATIONAL_NONBLOCKING_REASONS
+    ]
     if leftover:
         return HeadlineBand.OBSERVED_NOT_EXECUTABLE
     if candidate.trigger_net_edge is not None and candidate.current_net_edge < candidate.trigger_net_edge:
