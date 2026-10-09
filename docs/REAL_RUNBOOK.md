@@ -55,7 +55,7 @@ The launcher does not print `Sports Hedge Real is running` unless `GET http://12
 - `execution_enabled` is `false`
 - `live_refresh.server_loop_enabled` is `true`
 
-It also prints `scanner_stopped`, `universe_scans_paused`, `background_pricing_paused`, `settlement_scans_paused`, and the Git branch and SHA.
+It also prints `scanner_stopped`, `universe_scans_paused`, `hot_pricing_paused`, `background_pricing_paused`, `settlement_scans_paused`, and the Git branch and SHA.
 
 Persisted operator controls are reported only. The launcher does not POST resume or unpause endpoints. If a control is paused, startup prints a warning such as:
 

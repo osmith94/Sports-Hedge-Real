@@ -1240,6 +1240,28 @@ def resume_universe_schedule(
     return _operations_heartbeat(coordinator)
 
 
+@router.post("/scanner/hot-pricing/pause", response_model=OperationsHeartbeat)
+def pause_hot_pricing(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> OperationsHeartbeat:
+    """Stop new HOT Price-1 slices. In-flight calls finish. Cursor stays."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_hot_pricing_paused(True)
+    return _operations_heartbeat(coordinator)
+
+
+@router.post("/scanner/hot-pricing/resume", response_model=OperationsHeartbeat)
+def resume_hot_pricing(
+    repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),
+) -> OperationsHeartbeat:
+    """Resume HOT from the existing coverage cursor. No catch-up burst."""
+
+    coordinator = get_live_refresh_coordinator()
+    coordinator.apply_hot_pricing_paused(False)
+    return _operations_heartbeat(coordinator)
+
+
 @router.post("/scanner/background-pricing/pause", response_model=OperationsHeartbeat)
 def pause_background_pricing(
     repository: SqlitePaperScanRepository = Depends(get_paper_audit_repository),

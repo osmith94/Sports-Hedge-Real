@@ -422,6 +422,7 @@ class LiveRefreshStatus(BaseModel):
     paper_auto_unwind_enabled: bool = False
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
+    hot_pricing_paused: bool = False
     background_pricing_paused: bool = False
     settlement_scans_paused: bool = False
     settlement_operator_summary: str | None = None
@@ -505,6 +506,7 @@ class OperationsHeartbeat(BaseModel):
     paper_auto_unwind_enabled: bool = False
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
+    hot_pricing_paused: bool = False
     background_pricing_paused: bool = False
     settlement_scans_paused: bool = False
     settlement_operator_summary: str | None = None
@@ -717,6 +719,7 @@ class LiveRefreshCoordinator:
         self._control = asyncio.Event()
         self._operator_scanner_stopped = False
         self._universe_scans_paused = False
+        self._hot_pricing_paused = False
         self._background_pricing_paused = False
         self._settlement_scans_paused = False
         self._universe_oneshot_pending = True
@@ -1098,6 +1101,7 @@ class LiveRefreshCoordinator:
             self._pending_participation = pending
             self._operator_scanner_stopped = operator.scanner_stopped
             self._universe_scans_paused = operator.universe_scans_paused
+            self._hot_pricing_paused = operator.hot_pricing_paused
             self._background_pricing_paused = operator.background_pricing_paused
             self._settlement_scans_paused = operator.settlement_scans_paused
             self.status = self.status.model_copy(
@@ -1107,6 +1111,7 @@ class LiveRefreshCoordinator:
                     "paper_auto_unwind_enabled": resolved.paper_auto_unwind_enabled,
                     "scanner_stopped": operator.scanner_stopped,
                     "universe_scans_paused": operator.universe_scans_paused,
+                    "hot_pricing_paused": operator.hot_pricing_paused,
                     "background_pricing_paused": operator.background_pricing_paused,
                     "settlement_scans_paused": operator.settlement_scans_paused,
                     "settlement_operator_summary": _settlement_operator_summary(
@@ -1139,7 +1144,18 @@ class LiveRefreshCoordinator:
                                     ),
                                 }
                                 if operator.scanner_stopped
-                                else {}
+                                else (
+                                    {
+                                        "last_plan_reason": "hot_paused",
+                                        "worker_state": WORKER_WAITING,
+                                        "operator_summary": (
+                                            f"{OPERATOR_HOT_PRICING_LABEL} · paused by operator · "
+                                            "cursor preserved · no new pricing slice"
+                                        ),
+                                    }
+                                    if operator.hot_pricing_paused
+                                    else {}
+                                )
                             ),
                         }
                     ),
@@ -1728,6 +1744,63 @@ class LiveRefreshCoordinator:
         self._pulse_control()
         return saved
 
+    def apply_hot_pricing_paused(self, paused: bool) -> OperatorScannerSettings:
+        """Pause or resume new HOT Price-1 slices.
+
+        Does not cancel in-flight provider calls, reset the coverage cursor,
+        clear roster/promotion/retry, or touch BACKGROUND, ACTIVE TRADE,
+        UNIVERSE, or Price-2 work already underway.
+        """
+
+        store = self._resolved_operator_store()
+        saved = store.save_hot_pricing_paused(paused)
+        with self._state_lock:
+            self._apply_operator_settings_unlocked(saved, cadence_changed=False)
+            if saved.hot_pricing_paused:
+                hot = self.status.hot.model_copy(
+                    update={
+                        "last_plan_reason": "hot_paused",
+                        "worker_state": WORKER_WAITING
+                        if not self._hot_in_progress
+                        else self.status.hot.worker_state,
+                        "degraded": False
+                        if not self._hot_in_progress
+                        else self.status.hot.degraded,
+                        "operator_summary": (
+                            f"{OPERATOR_HOT_PRICING_LABEL} · paused by operator · "
+                            "cursor preserved · no new pricing slice"
+                        ),
+                    }
+                )
+                self.status = self.status.model_copy(
+                    update={
+                        "hot_pricing_paused": True,
+                        "hot": hot,
+                    }
+                )
+            else:
+                in_progress = self._hot_in_progress or self._manual_hot_in_progress
+                hot = self.status.hot.model_copy(
+                    update={
+                        "last_plan_reason": "waiting",
+                        "worker_state": WORKER_RUNNING if in_progress else WORKER_WAITING,
+                        "operator_summary": (
+                            f"{OPERATOR_HOT_PRICING_LABEL} · resumed · "
+                            f"{'in progress' if in_progress else 'waiting'} · "
+                            "cursor preserved"
+                        ),
+                    }
+                )
+                self.status = self.status.model_copy(
+                    update={
+                        "hot_pricing_paused": False,
+                        "hot": hot,
+                    }
+                )
+        self._sync_hot_provider_admission(saved.hot_pricing_paused)
+        self._pulse_control()
+        return saved
+
     def apply_background_pricing_paused(self, paused: bool) -> OperatorScannerSettings:
         """Pause or resume new BACKGROUND pricing slices.
 
@@ -1827,6 +1900,24 @@ class LiveRefreshCoordinator:
         for layer in layers:
             layer.set_background_admission_paused(paused)
 
+    def _sync_hot_provider_admission(self, paused: bool) -> None:
+        """Refuse ungranted HOT leases while paused. Granted calls finish.
+
+        Slot caps and HOT quota formulas are unchanged. In-flight HOT still
+        occupies slots; due-but-blocked HOT does not keep HOT demand.
+        """
+
+        layers = []
+        engine = self._price_engine
+        engine_layer = None if engine is None else engine.provider_access
+        if engine_layer is not None:
+            layers.append(engine_layer)
+        shared = get_shared_provider_access()
+        if shared not in layers:
+            layers.append(shared)
+        for layer in layers:
+            layer.set_hot_admission_paused(paused)
+
     def note_hot_scheduler_idle(self, disposition: str) -> None:
         """Advance HOT health for a no-work wake without a pricing-history row."""
 
@@ -1890,6 +1981,10 @@ class LiveRefreshCoordinator:
         return self._universe_scans_paused
 
     @property
+    def hot_pricing_paused(self) -> bool:
+        return self._hot_pricing_paused
+
+    @property
     def background_pricing_paused(self) -> bool:
         return self._background_pricing_paused
 
@@ -1935,6 +2030,7 @@ class LiveRefreshCoordinator:
     ) -> None:
         self._operator_scanner_stopped = operator.scanner_stopped
         self._universe_scans_paused = operator.universe_scans_paused
+        self._hot_pricing_paused = operator.hot_pricing_paused
         self._background_pricing_paused = operator.background_pricing_paused
         self._settlement_scans_paused = operator.settlement_scans_paused
         hot_changed = cadence_changed if hot_cadence_changed is None else hot_cadence_changed
@@ -2019,10 +2115,24 @@ class LiveRefreshCoordinator:
             active_update = {}
         else:
             active_update = {}
+        if operator.hot_pricing_paused and not operator.scanner_stopped:
+            hot_update.update(
+                {
+                    "last_plan_reason": "hot_paused",
+                    "worker_state": WORKER_WAITING
+                    if not self._hot_in_progress
+                    else self.status.hot.worker_state,
+                    "operator_summary": (
+                        f"{OPERATOR_HOT_PRICING_LABEL} · paused by operator · "
+                        "cursor preserved · no new pricing slice"
+                    ),
+                }
+            )
         self.status = self.status.model_copy(
             update={
                 "scanner_stopped": operator.scanner_stopped,
                 "universe_scans_paused": operator.universe_scans_paused,
+                "hot_pricing_paused": operator.hot_pricing_paused,
                 "background_pricing_paused": operator.background_pricing_paused,
                 "settlement_scans_paused": operator.settlement_scans_paused,
                 "settlement_operator_summary": _settlement_operator_summary(
@@ -2545,6 +2655,8 @@ class LiveRefreshCoordinator:
                 self._pulse_control()
             if self._startup_pricing_gated_unlocked():
                 return self._gated_pricing_plan()
+            if self._hot_pricing_paused:
+                return DualCadencePlan(lane="idle", reason="hot_paused")
             if self._hot_in_progress or self._manual_hot_in_progress:
                 return DualCadencePlan(lane="idle", reason="hot_in_progress")
             next_hot_due = self._next_hot_due
@@ -2624,6 +2736,10 @@ class LiveRefreshCoordinator:
         engine.observability = self._observability
         if engine.catalogue_store is None:
             engine.catalogue_store = self._catalogue_store
+        if self._hot_pricing_paused:
+            self._sync_hot_provider_admission(True)
+        if self._background_pricing_paused:
+            self._sync_background_provider_admission(True)
 
     def price_engine(self) -> CataloguePriceEngine:
         if self._price_engine is None:
@@ -2796,6 +2912,15 @@ class LiveRefreshCoordinator:
                 leftover=tier.not_started_this_cadence,
                 in_progress=self._background_in_progress,
             )
+        elif priority is PriceEnginePriority.HOT and self._hot_pricing_paused:
+            lane_update["last_plan_reason"] = "hot_paused"
+            lane_update["operator_summary"] = (
+                f"{OPERATOR_HOT_PRICING_LABEL} · paused by operator · "
+                "cursor preserved · no new pricing slice"
+            )
+            if not self._hot_in_progress:
+                lane_update["worker_state"] = WORKER_WAITING
+                lane_update["degraded"] = False
         with self._state_lock:
             if priority is PriceEnginePriority.HOT:
                 hot = self.status.hot.model_copy(update=lane_update)
@@ -3150,6 +3275,8 @@ class LiveRefreshCoordinator:
 
         if self._operator_scanner_stopped:
             raise ExplicitCollectBusy(SCANNER_STOPPED_BY_OPERATOR)
+        if self._hot_pricing_paused:
+            raise ExplicitCollectBusy("HOT pricing paused")
         if self._startup_pricing_gated_unlocked():
             raise ExplicitCollectBusy("startup universe pending")
         if self._manual_hot_in_progress:
@@ -3426,8 +3553,12 @@ class LiveRefreshCoordinator:
                                 "fixture_count": hot_count,
                                 "lifecycle_hot_count": lifecycle_hot,
                                 "promoted_hot_count": promoted_hot,
-                                "degraded": degraded,
-                                "worker_state": WORKER_DEGRADED if degraded else WORKER_IDLE,
+                                "degraded": False if self._hot_pricing_paused else degraded,
+                                "worker_state": (
+                                    WORKER_WAITING
+                                    if self._hot_pricing_paused
+                                    else (WORKER_DEGRADED if degraded else WORKER_IDLE)
+                                ),
                                 "last_error": None,
                                 "last_persist_error": None,
                                 "persist_ok": None,
@@ -3435,15 +3566,25 @@ class LiveRefreshCoordinator:
                                 "next_due_at": self._next_hot_due,
                                 "venue_health": _frozen_venue_health(report.venue_health),
                                 "operation_health": dict(report.operation_health or {}),
-                                "operator_summary": _hot_operator_summary(
-                                    report.completed_at,
-                                    duration_ms,
-                                    self._next_hot_due,
-                                    hot_count,
-                                    leftover_n,
-                                    degraded,
-                                    venue_health=report.venue_health,
-                                    active_venues=self.status.hot.active_venues,
+                                "last_plan_reason": (
+                                    "hot_paused"
+                                    if self._hot_pricing_paused
+                                    else self.status.hot.last_plan_reason
+                                ),
+                                "operator_summary": (
+                                    f"{OPERATOR_HOT_PRICING_LABEL} · paused by operator · "
+                                    "cursor preserved · no new pricing slice"
+                                    if self._hot_pricing_paused
+                                    else _hot_operator_summary(
+                                        report.completed_at,
+                                        duration_ms,
+                                        self._next_hot_due,
+                                        hot_count,
+                                        leftover_n,
+                                        degraded,
+                                        venue_health=report.venue_health,
+                                        active_venues=self.status.hot.active_venues,
+                                    )
                                 ),
                             }
                         )
@@ -4869,6 +5010,7 @@ class LiveRefreshCoordinator:
             "paper_autofill_enabled": status.paper_autofill_enabled,
             "scanner_stopped": status.scanner_stopped,
             "universe_scans_paused": status.universe_scans_paused,
+            "hot_pricing_paused": status.hot_pricing_paused,
             "background_pricing_paused": status.background_pricing_paused,
             "settlement_scans_paused": status.settlement_scans_paused,
             "settlement_operator_summary": status.settlement_operator_summary,
@@ -5849,6 +5991,7 @@ class LiveRefreshCoordinator:
                     or self._manual_background_in_progress,
                     "scanner_stopped": self._operator_scanner_stopped,
                     "universe_scans_paused": self._universe_scans_paused,
+                    "hot_pricing_paused": self._hot_pricing_paused,
                     "background_pricing_paused": self._background_pricing_paused,
                     "settlement_scans_paused": self._settlement_scans_paused,
                     "settlement_operator_summary": _settlement_operator_summary(
@@ -6085,6 +6228,14 @@ class LiveRefreshCoordinator:
                     hot_update["cycle_in_progress"] = False
                     hot_update["operator_summary"] = (
                         f"{OPERATOR_HOT_PRICING_LABEL} · stopped by operator · no provider call"
+                    )
+                elif plan.reason == "hot_paused":
+                    hot_update["worker_state"] = WORKER_WAITING
+                    hot_update["cycle_in_progress"] = False
+                    hot_update["degraded"] = False
+                    hot_update["operator_summary"] = (
+                        f"{OPERATOR_HOT_PRICING_LABEL} · paused by operator · "
+                        "cursor preserved · no new pricing slice"
                     )
                 elif plan.reason == "hot_scope_empty":
                     hot_update["worker_state"] = WORKER_WAITING
@@ -6916,6 +7067,8 @@ class LiveRefreshCoordinator:
             return STARTUP_PRICING_GATED_SLEEP_SECONDS
         if self._hot_in_progress:
             return 0.25
+        if self._hot_pricing_paused:
+            return 2.0
         if self._next_hot_due is None:
             return 0.05
         return max(0.05, (self._next_hot_due - now).total_seconds())

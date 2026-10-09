@@ -31,6 +31,7 @@ REAL_ENV = {
 RESUME_ENDPOINTS = (
     "/scanner/resume",
     "/scanner/universe-schedule/resume",
+    "/scanner/hot-pricing/resume",
     "/scanner/background-pricing/resume",
     "/scanner/settlement-scans/resume",
 )
@@ -151,6 +152,7 @@ def test_real_startup_wording_and_process_shape() -> None:
     assert "http://127.0.0.1:3000/" in script
     assert "scanner_stopped=" in script
     assert "universe_scans_paused=" in script
+    assert "hot_pricing_paused=" in script
     assert "background_pricing_paused=" in script
     assert "settlement_scans_paused=" in script
     assert "Serving Git branch:" in script

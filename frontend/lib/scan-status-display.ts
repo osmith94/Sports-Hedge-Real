@@ -51,6 +51,12 @@ export function hotPricingCopy(
       detail: "waiting for startup universe",
     };
   }
+  if (status?.hot_pricing_paused || hot.last_plan_reason === "hot_paused") {
+    return {
+      label: HOT_PRICING_LABEL,
+      detail: "paused by operator · cursor preserved · no new pricing slice",
+    };
+  }
   if (hot.cycle_in_progress) {
     return { label: HOT_PRICING_LABEL, detail: `in progress${venueSuffix}` };
   }

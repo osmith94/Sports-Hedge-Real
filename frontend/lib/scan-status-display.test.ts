@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { LaneRefreshStatus, LiveRefreshStatus } from "./api";
-import { BACKGROUND_PRICING_LABEL, HOT_PRICING_LABEL, UNIVERSE_DISCOVERY_LABEL, autoSettleCopy, backgroundPriceCopy, dualScanStatusLines, fastScanCopy, fullSweepCopy } from "./scan-status-display";
+import { BACKGROUND_PRICING_LABEL, HOT_PRICING_LABEL, UNIVERSE_DISCOVERY_LABEL, autoSettleCopy, backgroundPriceCopy, dualScanStatusLines, fastScanCopy, fullSweepCopy, hotPricingCopy } from "./scan-status-display";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
@@ -100,6 +100,34 @@ describe("dual cadence operator copy", () => {
     assert.match(
       backgroundPriceCopy(backgroundPaused, now).detail,
       /paused by operator · cursor preserved/,
+    );
+    const hotPaused = status({
+      hot_pricing_paused: true,
+      hot: {
+        cadence_seconds: 10,
+        last_plan_reason: "hot_paused",
+        worker_state: "waiting",
+        last_completed_at: "2026-09-14T12:00:00Z",
+        next_due_at: "2026-09-14T12:00:18Z",
+      },
+    });
+    assert.match(
+      hotPricingCopy(hotPaused, now).detail,
+      /paused by operator · cursor preserved · no new pricing slice/,
+    );
+    assert.doesNotMatch(hotPricingCopy(hotPaused, now).detail, /degraded|crash|scan_cycle_timeout/);
+    const hotResumed = status({
+      hot_pricing_paused: false,
+      hot: {
+        cadence_seconds: 10,
+        last_plan_reason: "waiting",
+        last_completed_at: "2026-09-14T12:00:00Z",
+        next_due_at: "2026-09-14T12:00:18Z",
+      },
+    });
+    assert.doesNotMatch(
+      hotPricingCopy(hotResumed, now).detail,
+      /paused by operator/,
     );
     const backgroundResumed = status({
       background_pricing_paused: false,
@@ -522,6 +550,11 @@ describe("dual cadence operator copy", () => {
       pulse,
       /ACTIVE TRADE \/ HOT pricing \/ BACKGROUND pricing \/ UNIVERSE discovery paused/,
     );
+    assert.match(scan, /Pause HOT/);
+    assert.match(scan, /Resume HOT/);
+    assert.match(scan, /pauseHotPricing/);
+    assert.match(scan, /resumeHotPricing/);
+    assert.match(scan, /HOT PAUSED/);
     assert.match(scan, /Pause scheduled UNIVERSE/);
     assert.match(scan, /Resume scheduled UNIVERSE/);
     assert.match(scan, /pauseUniverseSchedule/);
@@ -532,6 +565,8 @@ describe("dual cadence operator copy", () => {
     assert.match(scan, /How scanning works/);
     assert.match(scan, /<details className="scan-help">/);
     assert.match(scan, /status-badge status-badge-stopped/);
+    assert.match(api, /\/paper\/scanner\/hot-pricing\/pause/);
+    assert.match(api, /\/paper\/scanner\/hot-pricing\/resume/);
     assert.match(api, /\/paper\/scanner\/universe-schedule\/pause/);
     assert.match(api, /\/paper\/scanner\/universe-schedule\/resume/);
     assert.doesNotMatch(scan, /Refresh interval/);

@@ -105,6 +105,7 @@ function Write-RealOperatorPauseReport {
     $liveRefresh = $Health.live_refresh
     Write-Host "scanner_stopped=$($liveRefresh.scanner_stopped)"
     Write-Host "universe_scans_paused=$($liveRefresh.universe_scans_paused)"
+    Write-Host "hot_pricing_paused=$($liveRefresh.hot_pricing_paused)"
     Write-Host "background_pricing_paused=$($liveRefresh.background_pricing_paused)"
     Write-Host "settlement_scans_paused=$($liveRefresh.settlement_scans_paused)"
     if ($liveRefresh.scanner_stopped -eq $true) {
@@ -113,13 +114,16 @@ function Write-RealOperatorPauseReport {
     if ($liveRefresh.universe_scans_paused -eq $true) {
         Write-Host "UNIVERSE schedule is persisted as paused by operator." -ForegroundColor Yellow
     }
+    if ($liveRefresh.hot_pricing_paused -eq $true) {
+        Write-Host "HOT pricing is persisted as paused by operator." -ForegroundColor Yellow
+    }
     if ($liveRefresh.background_pricing_paused -eq $true) {
         Write-Host "BACKGROUND pricing is persisted as paused by operator." -ForegroundColor Yellow
     }
     if ($liveRefresh.settlement_scans_paused -eq $true) {
         Write-Host "SETTLEMENT scans are persisted as paused by operator." -ForegroundColor Yellow
     }
-    Write-Host "Persisted operator pauses were reported only. This launcher does not resume scanner, universe schedule, background pricing, or settlement."
+    Write-Host "Persisted operator pauses were reported only. This launcher does not resume scanner, universe schedule, HOT pricing, background pricing, or settlement."
 }
 
 $Root = Get-RepoRoot

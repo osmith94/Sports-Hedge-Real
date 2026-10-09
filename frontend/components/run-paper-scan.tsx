@@ -14,10 +14,12 @@ import {
   clearPaperUniverse,
   getEconomicsStatus,
   pauseBackgroundPricing,
+  pauseHotPricing,
   pauseSettlementScans,
   pauseUniverseSchedule,
   resetMatchbookFee,
   resumeBackgroundPricing,
+  resumeHotPricing,
   resumePaperScanner,
   resumeSettlementScans,
   resumeUniverseSchedule,
@@ -246,6 +248,7 @@ export function RunPaperScan() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [scannerControlBusy, setScannerControlBusy] = useState(false);
   const [universeScheduleBusy, setUniverseScheduleBusy] = useState(false);
+  const [hotPauseBusy, setHotPauseBusy] = useState(false);
   const [backgroundPauseBusy, setBackgroundPauseBusy] = useState(false);
   const [settlementPauseBusy, setSettlementPauseBusy] = useState(false);
   const [universeRunMode, setUniverseRunMode] = useState<UniverseRunMode>("update");
@@ -500,6 +503,23 @@ export function RunPaperScan() {
     }
   }
 
+  async function toggleHotPricingPaused() {
+    setHotPauseBusy(true);
+    setSettingsMessage(null);
+    try {
+      const status = liveRefresh?.hot_pricing_paused
+        ? await resumeHotPricing()
+        : await pauseHotPricing();
+      applyLiveRefresh(status, { forceSettings: true });
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error ? error.message : "Could not change HOT pricing pause.",
+      );
+    } finally {
+      setHotPauseBusy(false);
+    }
+  }
+
   async function toggleBackgroundPricingPaused() {
     setBackgroundPauseBusy(true);
     setSettingsMessage(null);
@@ -716,6 +736,7 @@ export function RunPaperScan() {
   const serverOwned = Boolean(liveRefresh?.server_loop_enabled);
   const scannerStopped = Boolean(liveRefresh?.scanner_stopped);
   const universeScansPaused = Boolean(liveRefresh?.universe_scans_paused);
+  const hotPricingPaused = Boolean(liveRefresh?.hot_pricing_paused);
   const backgroundPricingPaused = Boolean(liveRefresh?.background_pricing_paused);
   const settlementScansPaused = Boolean(liveRefresh?.settlement_scans_paused);
   const nextHotMs = liveRefresh?.hot?.next_due_at
@@ -1007,6 +1028,28 @@ export function RunPaperScan() {
                 : "Pause scheduled UNIVERSE"}
           </button>
           <button
+            className={hotPricingPaused ? "scan-button" : "scan-button-secondary"}
+            type="button"
+            disabled={hotPauseBusy || loading || scannerStopped}
+            onClick={() => void toggleHotPricingPaused()}
+            aria-label={hotPricingPaused ? "Resume HOT" : "Pause HOT"}
+            title={
+              scannerStopped
+                ? "Scanner stopped by operator"
+                : hotPricingPaused
+                  ? "Resume HOT from the existing cursor. Does not restart at row 1 or catch up missed slices."
+                  : "Stop new HOT pricing slices. In-flight calls finish. UNIVERSE, BACKGROUND and ACTIVE TRADE continue."
+            }
+          >
+            {hotPauseBusy
+              ? hotPricingPaused
+                ? "Resuming HOT…"
+                : "Pausing HOT…"
+              : hotPricingPaused
+                ? "Resume HOT"
+                : "Pause HOT"}
+          </button>
+          <button
             className={backgroundPricingPaused ? "scan-button" : "scan-button-secondary"}
             type="button"
             disabled={backgroundPauseBusy || loading || scannerStopped}
@@ -1090,6 +1133,11 @@ export function RunPaperScan() {
               BACKGROUND PAUSED · cursor preserved · HOT / ACTIVE / UNIVERSE continue
             </span>
           ) : null}
+          {hotPricingPaused && !scannerStopped ? (
+            <span className="status-badge" role="status">
+              HOT PAUSED · cursor preserved · no new pricing slice · UNIVERSE / BACKGROUND / ACTIVE TRADE continue
+            </span>
+          ) : null}
           {settlementScansPaused ? (
             <span className="status-badge" role="status">
               AUTO SETTLE paused by operator · HOT / BACKGROUND / UNIVERSE / ACTIVE TRADE continue
@@ -1113,6 +1161,7 @@ export function RunPaperScan() {
             Clear universe clears live UNIVERSE current-state, active generation and checkpoint only.
             Clears the live UNIVERSE working set only. History, catalogue, PAPER trades and Treasury are preserved.
             Pause scheduled UNIVERSE stops the periodic timer only; it does not fake a huge discovery refresh, and the stored discovery refresh stays editable for resume.
+            Pause HOT stops new HOT Price-1 slices only. In-flight HOT provider calls finish, the coverage cursor stays, and UNIVERSE, BACKGROUND and ACTIVE TRADE continue. Pause is not instantaneous cancellation. Resume continues from that cursor without a catch-up burst.
             Pause BACKGROUND stops new BACKGROUND pricing slices only. In-flight provider calls finish, the coverage cursor stays, and HOT, ACTIVE and UNIVERSE continue. Resume continues from that cursor.
             Pause AUTO SETTLE stops new 30-second PaperSettlementAgent scans only. An in-flight settlement call may finish. HOT, BACKGROUND, UNIVERSE and ACTIVE TRADE continue. Manual settlement and reverse-book unwind stay available. The pause does not change trade state, delete history, release treasury, or infer a result. Resume restores automatic scanning.
             Update saves Min Net Arb, Outright Min Net Arb, Max Risk, HOT target refresh and UNIVERSE discovery refresh
