@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -22,6 +22,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttemptStatus,
     WatchLeg,
     attempt_id_from_lifecycle_event,
+    fixture_label_from_teams,
 )
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import MarketScope, VenueName
@@ -194,6 +195,8 @@ class SqliteWatchlistRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_execution_snapshot_audits_opportunity
                 ON execution_snapshot_audits(opportunity_id, occurred_at);
+            CREATE INDEX IF NOT EXISTS idx_execution_snapshot_audits_occurred
+                ON execution_snapshot_audits(occurred_at);
             """
         )
         self._migrate_execution_snapshot_audits()
@@ -494,6 +497,10 @@ class SqliteWatchlistRepository:
                 self._connection.execute(
                     f"ALTER TABLE execution_snapshot_audits ADD COLUMN {name} {ddl}"
                 )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_execution_snapshot_audits_occurred "
+            "ON execution_snapshot_audits(occurred_at)"
+        )
 
     def next_execution_cycle(self, opportunity_id: str | None) -> int:
         """Next 1-based Price-2 cycle for one opportunity. Unscoped attempts start at 1."""
@@ -638,6 +645,137 @@ class SqliteWatchlistRepository:
                 ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_price2_activity_sources(
+        self,
+        opportunity_ids: Sequence[str] | None = None,
+        *,
+        since: datetime | None = None,
+        limit: int = 200,
+        include_recent: bool = False,
+        recent_limit: int = 50,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[OpportunityLifecycleEvent],
+        dict[str, dict[str, str | None]],
+    ]:
+        """Bounded Price-2 feed reads. Never lists audits without id or time bounds."""
+
+        ids = list(opportunity_ids or [])
+        if not ids and since is None:
+            raise ValueError("opportunity_ids or since is required")
+        if limit <= 0 or recent_limit <= 0:
+            raise ValueError("limit must be positive")
+        audit_columns = (
+            "snapshot_id, opportunity_id, canonical_market_id, occurred_at, "
+            "accepted, rejection_reason, execution_cycle, trade_id, tranche_id, "
+            "cycle_outcome, snapshot_json, diagnostics_json"
+        )
+        audit_rows: list[Any] = []
+        rejection_rows: list[Any] = []
+        label_ids = list(ids)
+        with self.exclusive():
+            if ids:
+                placeholders = ", ".join("?" for _ in ids)
+                audit_sql = (
+                    f"SELECT {audit_columns} FROM execution_snapshot_audits "
+                    f"WHERE opportunity_id IN ({placeholders})"
+                )
+                rejection_sql = (
+                    "SELECT watchlist_lifecycle_events.*, "
+                    "watchlist_lifecycle_events.rowid AS append_seq "
+                    "FROM watchlist_lifecycle_events "
+                    f"WHERE opportunity_id IN ({placeholders}) "
+                    "AND event_type = ? AND detail LIKE ?"
+                )
+                audit_params: list[Any] = list(ids)
+                rejection_params: list[Any] = [
+                    *ids,
+                    LifecycleEventType.PAPER_FILL_REJECTED.value,
+                    "execution_reprice_%",
+                ]
+                if since is not None:
+                    audit_sql += " AND occurred_at >= ?"
+                    rejection_sql += " AND occurred_at >= ?"
+                    stamp = since.isoformat()
+                    audit_params.append(stamp)
+                    rejection_params.append(stamp)
+                audit_sql += " ORDER BY occurred_at DESC, snapshot_id DESC LIMIT ?"
+                rejection_sql += " ORDER BY occurred_at DESC, append_seq DESC LIMIT ?"
+                audit_params.append(limit)
+                rejection_params.append(limit)
+                audit_rows.extend(self._connection.execute(audit_sql, audit_params).fetchall())
+                rejection_rows.extend(
+                    self._connection.execute(rejection_sql, rejection_params).fetchall()
+                )
+            if include_recent and since is not None:
+                recent_audits = self._connection.execute(
+                    f"SELECT {audit_columns} FROM execution_snapshot_audits "
+                    "WHERE occurred_at >= ? "
+                    "ORDER BY occurred_at DESC, snapshot_id DESC LIMIT ?",
+                    (since.isoformat(), recent_limit),
+                ).fetchall()
+                recent_rejections = self._connection.execute(
+                    "SELECT watchlist_lifecycle_events.*, "
+                    "watchlist_lifecycle_events.rowid AS append_seq "
+                    "FROM watchlist_lifecycle_events "
+                    "WHERE event_type = ? AND detail LIKE ? AND occurred_at >= ? "
+                    "ORDER BY occurred_at DESC, append_seq DESC LIMIT ?",
+                    (
+                        LifecycleEventType.PAPER_FILL_REJECTED.value,
+                        "execution_reprice_%",
+                        since.isoformat(),
+                        recent_limit,
+                    ),
+                ).fetchall()
+                audit_rows.extend(recent_audits)
+                rejection_rows.extend(recent_rejections)
+                for row in recent_audits:
+                    opp = row["opportunity_id"]
+                    if opp and opp not in label_ids:
+                        label_ids.append(str(opp))
+                for row in recent_rejections:
+                    opp = row["opportunity_id"]
+                    if opp and opp not in label_ids:
+                        label_ids.append(str(opp))
+            labels: dict[str, dict[str, str | None]] = {}
+            if label_ids:
+                placeholders = ", ".join("?" for _ in label_ids)
+                label_rows = self._connection.execute(
+                    "SELECT opportunity_id, home_team, away_team, market_family, "
+                    "canonical_event_id, canonical_market_id "
+                    "FROM watchlist_opportunities "
+                    f"WHERE opportunity_id IN ({placeholders})",
+                    label_ids,
+                ).fetchall()
+                for row in label_rows:
+                    home = row["home_team"]
+                    away = row["away_team"]
+                    labels[str(row["opportunity_id"])] = {
+                        "fixture_label": fixture_label_from_teams(home, away) or home or away,
+                        "market_family": row["market_family"],
+                        "canonical_event_id": row["canonical_event_id"],
+                        "canonical_market_id": row["canonical_market_id"],
+                    }
+        seen_snapshots: set[str] = set()
+        unique_audits: list[dict[str, Any]] = []
+        for row in audit_rows:
+            payload = dict(row)
+            snapshot_id = str(payload.get("snapshot_id") or "")
+            if snapshot_id and snapshot_id in seen_snapshots:
+                continue
+            if snapshot_id:
+                seen_snapshots.add(snapshot_id)
+            unique_audits.append(payload)
+        seen_events: set[str] = set()
+        unique_rejections: list[OpportunityLifecycleEvent] = []
+        for row in rejection_rows:
+            event = _event_from_row(row)
+            if event.event_id in seen_events:
+                continue
+            seen_events.add(event.event_id)
+            unique_rejections.append(event)
+        return unique_audits, unique_rejections, labels
+
     def append_observation(self, point: OpportunityObservationPoint) -> None:
         with self.exclusive():
             self._connection.execute(
@@ -745,7 +883,7 @@ class SqliteWatchlistRepository:
         parameters.append(limit)
         with self.exclusive():
             rows = self._connection.execute(
-                f"SELECT watchlist_lifecycle_events.*, "  # noqa: S608
+                f"SELECT watchlist_lifecycle_events.*, "
                 "watchlist_lifecycle_events.rowid AS append_seq "
                 f"FROM watchlist_lifecycle_events{where} "
                 "ORDER BY occurred_at DESC, append_seq DESC LIMIT ?",

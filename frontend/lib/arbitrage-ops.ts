@@ -71,6 +71,50 @@ export type ArbitrageOpportunity = {
     betBlockedReason?: string | null;
 };
 
+export type ActivityPrice2Leg = {
+  venue: string | null;
+  outcome: string | null;
+  displayedOdds: string | null;
+  requestedStake: string | null;
+  stakeCurrency: string | null;
+  retrievedAt: string | null;
+  quoteAgeMs: number | null;
+  slotWaitMs: number | null;
+  ioMs: number | null;
+  timingMatch: "native_id" | null;
+};
+
+export type ActivityPrice2VenueTiming = {
+  venue: string;
+  slotWaitMs: number | null;
+  ioMs: number | null;
+  callCount: number;
+};
+
+export type ActivityPrice2 = {
+  snapshotId: string | null;
+  executionCycle: number | null;
+  cycleOutcome: string | null;
+  tradeId: string | null;
+  status: "accepted" | "rejected" | "incomplete_unavailable";
+  filled: boolean;
+  tradeLinked: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  elapsedMs: number | null;
+  netEdge: string | number | null;
+  guaranteedProfit: string | number | null;
+  executionSize: string | number | null;
+  executionSizeCurrency: string | null;
+  oldestQuoteAgeMs: number | null;
+  skewMs: number | null;
+  rejectionReason: string | null;
+  source: "execution_snapshot_audit" | "lifecycle_rejection";
+  dataKind: "historical_recorded";
+  legs: ActivityPrice2Leg[];
+  venueTimings: ActivityPrice2VenueTiming[];
+};
+
 export type ActivityEvent = {
   id: string;
   provenance: DataProvenance;
@@ -87,6 +131,7 @@ export type ActivityEvent = {
   canonicalEventId?: string | null;
   canonicalMarketId?: string | null;
   attemptId?: string | null;
+  price2?: ActivityPrice2 | null;
 };
 
 export type CapitalSnapshot = {

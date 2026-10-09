@@ -180,7 +180,7 @@ describe("signal-only Activity feed", () => {
     assert.match(feed, /Promoted to HOT/);
     assert.match(
       feed,
-      /Qualifying opportunity, radar expired, Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited/,
+      /Qualifying opportunity, radar expired, Promoted to HOT, paper eligible, trigger lost, trade entered, trade exited, Price-2 attempts/,
     );
     assert.match(feed, /data-missed-trigger-event-id/);
     assert.match(feed, /feed-subject/);

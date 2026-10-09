@@ -34,6 +34,7 @@ export default defineConfig({
       "lib/runtime-mode.test.ts",
       "lib/active-trade-timeline-display.test.ts",
       "lib/activity-feed-display.test.ts",
+      "lib/price2-activity-feed.test.ts",
       "lib/opportunity-history-display.test.ts",
       "lib/active-trade-exit-display.test.ts",
     ],

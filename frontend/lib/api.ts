@@ -1949,6 +1949,66 @@ export function getWatchlistActivity(query = "limit=100"): Promise<OpportunityLi
   return request(`/paper/watchlist/activity${query ? `?${query}` : ""}`);
 }
 
+export type Price2AttemptStatus = "accepted" | "rejected" | "incomplete_unavailable";
+
+export type Price2LegProjection = {
+  venue?: string | null;
+  outcome?: string | null;
+  displayed_odds?: string | number | null;
+  requested_stake?: string | number | null;
+  stake_currency?: string | null;
+  retrieved_at?: string | null;
+  quote_age_ms?: number | null;
+  slot_wait_ms?: number | null;
+  io_ms?: number | null;
+  timing_match?: "native_id" | null;
+};
+
+export type Price2VenueTiming = {
+  venue: string;
+  slot_wait_ms?: number | null;
+  io_ms?: number | null;
+  call_count?: number;
+  aggregation?: "venue_max";
+};
+
+export type Price2ActivityObservation = {
+  observation_id: string;
+  source: "execution_snapshot_audit" | "lifecycle_rejection";
+  opportunity_id: string;
+  snapshot_id?: string | null;
+  execution_cycle?: number | null;
+  cycle_outcome?: string | null;
+  trade_id?: string | null;
+  tranche_id?: string | null;
+  occurred_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  elapsed_ms?: number | null;
+  status: Price2AttemptStatus;
+  accepted?: boolean | null;
+  filled: boolean;
+  trade_linked?: boolean;
+  net_edge?: string | number | null;
+  guaranteed_profit?: string | number | null;
+  execution_size?: string | number | null;
+  execution_size_currency?: string | null;
+  oldest_quote_age_ms?: number | null;
+  skew_ms?: number | null;
+  rejection_reason?: string | null;
+  fixture_label?: string | null;
+  market_family?: string | null;
+  canonical_event_id?: string | null;
+  canonical_market_id?: string | null;
+  legs: Price2LegProjection[];
+  venue_timings?: Price2VenueTiming[];
+  data_kind: "historical_recorded";
+};
+
+export function getPrice2ActivityAttempts(query: string): Promise<Price2ActivityObservation[]> {
+  return request(`/paper/watchlist/price2-attempts${query ? `?${query}` : ""}`);
+}
+
 export type MappingPromptBundle = {
   prompt_text: string;
   candidate: NonNullable<NearOpportunity["mapping_review_candidate"]>;
