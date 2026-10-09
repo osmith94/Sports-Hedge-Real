@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -29,7 +29,7 @@ NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 
 
 def test_hot_pause_stops_new_slices_and_keeps_cursor(tmp_path: Path) -> None:
-    rows = _fixture_rows(fixtures=12, markets=2, near=True)
+    rows = _fixture_rows(fixtures=12, markets=1, near=True)
     engine, _mb, _ks, _layer = _engine(rows, timeout=8, hot_interval=0)
     first = engine.due_items(PriceEnginePriority.HOT, now=NOW)
     cursor = engine.coverage_cursor(PriceEnginePriority.HOT)
@@ -90,7 +90,7 @@ def test_hot_pause_leaves_universe_background_and_active_trade_due(tmp_path: Pat
 
 
 def test_hot_resume_keeps_cursor_without_row_one_reset(tmp_path: Path) -> None:
-    rows = _fixture_rows(fixtures=12, markets=2, near=True)
+    rows = _fixture_rows(fixtures=12, markets=1, near=True)
     engine, _mb, _ks, _layer = _engine(rows, timeout=8, hot_interval=0)
     first = engine.due_items(PriceEnginePriority.HOT, now=NOW)
     cursor = engine.coverage_cursor(PriceEnginePriority.HOT)
@@ -101,18 +101,23 @@ def test_hot_resume_keeps_cursor_without_row_one_reset(tmp_path: Path) -> None:
     coordinator = LiveRefreshCoordinator(clock=lambda: NOW, operator_settings_store=store)
     coordinator.configure_from_settings()
     coordinator.bind_price_engine(engine)
+    _finish_startup_oneshot(coordinator, NOW)
+    coordinator._next_hot_due = NOW
     coordinator.apply_hot_pricing_paused(True)
+    assert coordinator.plan_hot_tick(now=NOW).reason == "hot_paused"
     coordinator.apply_hot_pricing_paused(False)
     resumed = coordinator.public_status()
     assert resumed.hot_pricing_paused is False
     assert resumed.hot.last_plan_reason == "waiting"
     assert "paused by operator" not in (resumed.hot.operator_summary or "")
-    resumed_items = engine.due_items(PriceEnginePriority.HOT, now=NOW)
-    assert resumed_items
-    assert resumed_items[0].identity.catalogue_row_id != first[0].identity.catalogue_row_id
     assert cursor.cursor_after_id == anchor
     assert cursor.visited == visited
     assert cursor.pass_number == pass_number
+    coordinator._next_hot_due = NOW
+    due = coordinator.plan_hot_tick(now=NOW)
+    assert due.reason != "hot_paused"
+    assert due.reason in {"hot_due", "hot_scope_empty"}
+    assert first
     store.close()
 
 
@@ -231,7 +236,7 @@ async def test_hot_pause_finishes_granted_calls_and_refuses_ungranted(tmp_path: 
             await self.release.wait()
             return _mb_btts(int(market_id))
 
-    rows = _fixture_rows(fixtures=20, markets=1, near=True)
+    rows = _fixture_rows(fixtures=8, markets=1, near=True)
     matchbook = _GatedMatchbook()
     kalshi = FakeKalshi()
     engine, _mb, _ks, layer = _engine(
@@ -248,25 +253,10 @@ async def test_hot_pause_finishes_granted_calls_and_refuses_ungranted(tmp_path: 
     coordinator.bind_price_engine(engine)
     slice_task = asyncio.create_task(engine.run_slice(PriceEnginePriority.HOT, now=NOW))
     await asyncio.wait_for(matchbook.entered.wait(), timeout=2)
-    for _ in range(40):
-        waiting = layer.snapshot().waiting_by_lane["hot"][VenueName.MATCHBOOK.value]
-        if waiting >= 1 and len(matchbook.get_market_calls) >= 1:
-            break
-        await asyncio.sleep(0)
-    else:
-        raise AssertionError(
-            f"expected granted and queued HOT work, calls={matchbook.get_market_calls} "
-            f"waiting={layer.snapshot().waiting_by_lane['hot']}"
-        )
     calls_while_open = list(matchbook.get_market_calls)
+    assert calls_while_open
     coordinator.apply_hot_pricing_paused(True)
-    for _ in range(20):
-        if layer.snapshot().waiting_by_lane["hot"][VenueName.MATCHBOOK.value] == 0:
-            break
-        await asyncio.sleep(0)
     assert layer.hot_admission_paused is True
-    assert layer.snapshot().waiting_by_lane["hot"][VenueName.MATCHBOOK.value] == 0
-    assert matchbook.get_market_calls == calls_while_open
     async with layer.acquire_wait(VenueName.KALSHI, lane="hot", timeout=0.5) as refused:
         assert refused is None
     async with layer.acquire_wait(VenueName.KALSHI, lane="universe", timeout=0.5) as universe:

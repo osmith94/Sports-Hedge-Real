@@ -1984,6 +1984,7 @@ class LiveRefreshCoordinator:
     def hot_pricing_paused(self) -> bool:
         return self._hot_pricing_paused
 
+    @property
     def background_pricing_paused(self) -> bool:
         return self._background_pricing_paused
 
