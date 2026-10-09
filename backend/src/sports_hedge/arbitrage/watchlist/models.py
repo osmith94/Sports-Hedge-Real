@@ -243,6 +243,10 @@ class NearOpportunity(BaseModel):
     bet_blocked_reason: str | None = None
     scan_lane: str | None = None
     last_scanned_at: datetime | None = None
+    # Read-model clocks. Not persisted. Discovery is not a price observation.
+    last_discovered_at: datetime | None = None
+    last_priced_at: datetime | None = None
+    price_lane: str | None = None
     next_due_at: datetime | None = None
     freshness_class: str | None = None
     mapping_confidence: float | None = Field(default=None, ge=0.0, le=1.0)

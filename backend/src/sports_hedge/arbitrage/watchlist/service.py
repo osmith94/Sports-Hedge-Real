@@ -44,8 +44,8 @@ from sports_hedge.arbitrage.watchlist.ranking import (
     filter_tracked_to_cohort,
     opportunity_id_for_canonical_market,
     rank_near_opportunities,
-    rank_tracked_opportunities,
     rank_triggered_opportunities,
+    select_recent_tracked_opportunities,
 )
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.domain.football import MarketFamily
@@ -899,15 +899,18 @@ class WatchlistService:
     def tracked(
         self,
         *,
-        limit: int = 100,
+        limit: int = 20,
         competition: str | None = None,
         venue: VenueName | None = None,
         market_family: MarketFamily | None = None,
         as_of: datetime | None = None,
         collection_cohort_ids: set[str] | None = None,
     ) -> list[NearOpportunity]:
-        """Current radar board from the dual-cadence current-state merge.
+        """Current snapshot of the most recently observed radar rows.
 
+        The limit is applied after ``last_seen_at`` order, so a large older
+        net edge cannot push a newer observation out of a 20- or 50-row
+        snapshot. Column sorting in the monitor reorders only that snapshot.
         Pass `collection_cohort_ids` from FixtureCurrentStateStore radar
         identities. An empty set is an honest empty current snapshot. Omit
         the argument only for unit tests of ranking/freshness against persisted
@@ -929,7 +932,7 @@ class WatchlistService:
         for item in items:
             effective = effective_quote_age_ms(item.quote_age_ms, item.last_seen_at, evaluated)
             presented.append(item.model_copy(update={"quote_age_ms": effective}))
-        return rank_tracked_opportunities(presented, limit=limit)
+        return select_recent_tracked_opportunities(presented, limit=limit)
 
     def activity(
         self,

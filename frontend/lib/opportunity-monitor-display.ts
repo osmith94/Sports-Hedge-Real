@@ -37,7 +37,7 @@ export type OpportunityMonitorSortState = {
 };
 
 export const OPPORTUNITY_MONITOR_SORT_LABELS: Record<OpportunityMonitorSortColumn, string> = {
-  age: "Age",
+  age: "Price age",
   event: "Event",
   market: "Market",
   venues: "Venue legs",
@@ -95,6 +95,9 @@ export type OpportunityMonitorRow = {
   laneLabel: string;
   freshnessLabel: string;
   quoteAgeLabel: string;
+  discoveredAt: string | null;
+  economicsObservedAt: string | null;
+  economicsNote: string | null;
   rejectionDetail: string;
   legs: OpportunityMonitorLegView[];
 };
@@ -129,8 +132,37 @@ const CAPTURED_LIFECYCLE_STATUSES = new Set(["PAPER_FILLING", "PARTIAL"]);
 export const MAPPING_UNAVAILABLE_TITLE =
   "Current mapping confidence/provenance is not on this radar observation";
 
+const ECONOMICS_CLOCK_TOLERANCE_MS = 2000;
+
 export function opportunityObservationTimestamp(item: NearOpportunity): string | null {
-  return item.last_scanned_at || item.last_seen_at || null;
+  // Price age is the last HOT/BACKGROUND price clock. Discovery and the
+  // scheduler lane scan are different facts and must not fill this in.
+  return item.last_priced_at || null;
+}
+
+export function opportunityDiscoveredTimestamp(item: NearOpportunity): string | null {
+  return item.last_discovered_at || null;
+}
+
+export function monitorLaneLabel(item: NearOpportunity): string {
+  const priceLane = (item.price_lane || "").trim().toLowerCase();
+  if (priceLane === "hot" || priceLane === "background") return scanLaneLabel(priceLane);
+  return scanLaneLabel(item.scan_lane);
+}
+
+export function persistedEconomicsNote(
+  pricedAt: string | null,
+  economicsObservedAt: string | null,
+): string | null {
+  const priced = parseObservationTimestampMs(pricedAt);
+  const seen = parseObservationTimestampMs(economicsObservedAt);
+  if (priced === null || seen === null) return null;
+  const delta = priced - seen;
+  if (Math.abs(delta) <= ECONOMICS_CLOCK_TOLERANCE_MS) return null;
+  if (delta > 0) {
+    return "Persisted economics are older than the last price. The edge on this row is the stored economics observation, not a newer unpersisted price.";
+  }
+  return "Persisted economics are newer than the stored price clock. Price age is not moved forward to match them.";
 }
 
 export function opportunityMarketLabel(item: NearOpportunity): string {
@@ -332,6 +364,12 @@ export function opportunityMonitorRow(item: NearOpportunity): OpportunityMonitor
     canonicalEventId: item.canonical_event_id || null,
     href: trackedMarketHref(item.canonical_event_id),
     observedAt: opportunityObservationTimestamp(item),
+    discoveredAt: opportunityDiscoveredTimestamp(item),
+    economicsObservedAt: item.last_seen_at || null,
+    economicsNote: persistedEconomicsNote(
+      opportunityObservationTimestamp(item),
+      item.last_seen_at || null,
+    ),
     eventLabel: opportunityEventLabel(item),
     marketLabel: opportunityMarketLabel(item),
     venuesLabel: venueLegsLabel(item),
@@ -349,7 +387,7 @@ export function opportunityMonitorRow(item: NearOpportunity): OpportunityMonitor
     mappingProvenance: mapping.provenance,
     state: opportunityMonitorState(item),
     stateTitle: opportunityMonitorStateTitle(item),
-    laneLabel: scanLaneLabel(item.scan_lane),
+    laneLabel: monitorLaneLabel(item),
     freshnessLabel: freshnessLabel(item.freshness_class),
     quoteAgeLabel: quoteAgeLabel(item),
     rejectionDetail: opportunityMonitorStateTitle(item),
@@ -461,26 +499,12 @@ function isMissing(value: number | string | null | undefined): boolean {
   return typeof value === "number" && !Number.isFinite(value);
 }
 
-function defaultStateRank(state: OpportunityMonitorStateBadge): number {
-  if (state === "QUALIFYING") return 0;
-  if (state === "NEAR") return 1;
-  return 2;
-}
-
 export function compareDefaultOpportunityOrder(
   left: OpportunityMonitorRow,
   right: OpportunityMonitorRow,
 ): number {
-  const leftMissing = left.netEdge === null ? 1 : 0;
-  const rightMissing = right.netEdge === null ? 1 : 0;
-  if (leftMissing !== rightMissing) return leftMissing - rightMissing;
-  if (left.netEdge !== null && right.netEdge !== null && left.netEdge !== right.netEdge) {
-    return right.netEdge - left.netEdge;
-  }
-  const stateDelta = defaultStateRank(left.state) - defaultStateRank(right.state);
-  if (stateDelta !== 0) return stateDelta;
-  const leftAge = parseObservationTimestampMs(left.observedAt);
-  const rightAge = parseObservationTimestampMs(right.observedAt);
+  const leftAge = parseObservationTimestampMs(left.economicsObservedAt);
+  const rightAge = parseObservationTimestampMs(right.economicsObservedAt);
   if (leftAge === null && rightAge === null) return left.id.localeCompare(right.id);
   if (leftAge === null) return 1;
   if (rightAge === null) return -1;

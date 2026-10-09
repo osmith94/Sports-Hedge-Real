@@ -311,10 +311,10 @@ def _state_from_hits(hits: list[Any]) -> tuple[CatalogueCoverageState, str, bool
             or "incomplete_settlement" in token_blob
             or "review_required" in token_blob
         ):
-            return CatalogueCoverageState.REVIEW_REQUIRED, _human_review_reason(raw_reason), False
+            return CatalogueCoverageState.REVIEW_REQUIRED, _human_review_reason(raw_reason, hits), False
     first = hits[0]
     raw_reason = str(getattr(first, "reason", None) or "catalogue_not_approved")
-    return CatalogueCoverageState.REVIEW_REQUIRED, _human_review_reason(raw_reason), False
+    return CatalogueCoverageState.REVIEW_REQUIRED, _human_review_reason(raw_reason, hits), False
 
 
 def _parameter_mismatch_from_hits(
@@ -354,11 +354,50 @@ def _line_token(row: Any) -> str:
     return "" if line is None else str(line)
 
 
-def _human_review_reason(reason: str) -> str:
+def _human_review_reason(reason: str, hits: list[Any]) -> str:
+    """Venue-accurate review copy. Generic review is not a Kalshi outage.
+
+    ``Kalshi settlement proof missing`` is used only when a Kalshi payload on
+    these hits itself lacks settlement proof. Matchbook/Polymarket review rows,
+    including operator-disabled Kalshi, keep the underlying reason and the
+    venues that are actually present.
+    """
+
     folded = reason.casefold()
-    if "incomplete_settlement" in folded or "catalogue_review_required" in folded:
+    incomplete = "incomplete_settlement" in folded
+    generic_review = "catalogue_review_required" in folded
+    if not incomplete and not generic_review:
+        return reason
+    if incomplete and _kalshi_settlement_gap(hits):
         return "Kalshi settlement proof missing"
-    return reason
+    venues = _present_venue_names(hits)
+    listed = ", ".join(venues) if venues else "no venue payload"
+    if incomplete:
+        return f"incomplete settlement ({listed})"
+    return f"catalogue review required ({listed})"
+
+
+def _present_venue_names(hits: list[Any]) -> tuple[str, ...]:
+    names: list[str] = []
+    if any(getattr(row, "matchbook", None) is not None for row in hits):
+        names.append("matchbook")
+    if any(getattr(row, "polymarket", None) is not None for row in hits):
+        names.append("polymarket")
+    if any(getattr(row, "kalshi", None) is not None for row in hits):
+        names.append("kalshi")
+    return tuple(names)
+
+
+def _kalshi_settlement_gap(hits: list[Any]) -> bool:
+    for row in hits:
+        kalshi = getattr(row, "kalshi", None)
+        if kalshi is None:
+            continue
+        if getattr(kalshi, "settlement_complete", None) is False:
+            return True
+        if not getattr(kalshi, "settlement_key", None):
+            return True
+    return False
 
 
 _NFL_COVERAGE_SPECS: tuple[tuple[str, str, MarketFamily, bool], ...] = (

@@ -327,3 +327,43 @@ def test_default_tracked_ranking_puts_strongest_actionable_first() -> None:
     assert ranked[0].current_net_edge == Decimal("0.03")
     assert ranked[-1].status == OpportunityStatus.REJECTED
     repository.close()
+
+
+def test_tracked_snapshot_keeps_newest_observations_inside_the_limit() -> None:
+    """A stronger older edge must not crowd a newer row out of the snapshot."""
+
+    repository = SqliteWatchlistRepository()
+    latest = OBSERVED + timedelta(seconds=24)
+    service = WatchlistService(repository, clock=lambda: latest)
+    for index in range(25):
+        service.observe(
+            _observation(
+                market_id=f"mkt-{index:02d}",
+                edge=Decimal("0.05") if index == 0 else Decimal("0.001"),
+                observed_at=OBSERVED + timedelta(seconds=index),
+            )
+        )
+    newest = service.tracked(limit=20)
+    assert len(newest) == 20
+    assert [item.canonical_market_id for item in newest[:3]] == ["mkt-24", "mkt-23", "mkt-22"]
+    assert "mkt-00" not in {item.canonical_market_id for item in newest}
+    assert newest[0].current_net_edge == Decimal("0.001")
+    assert newest[0].status not in {OpportunityStatus.CLOSED, OpportunityStatus.EXPIRED}
+    widened = service.tracked(limit=50)
+    assert len(widened) == 25
+    oldest = widened[-1]
+    assert oldest.canonical_market_id == "mkt-00"
+    assert oldest.current_net_edge == Decimal("0.05")
+    assert service.tracked() == newest
+    repository.close()
+
+
+def test_tracked_route_defaults_to_twenty_and_allows_fifty() -> None:
+    from sports_hedge.api.watchlist import tracked_markets
+    import inspect
+
+    limit = inspect.signature(tracked_markets).parameters["limit"].default
+    bounds = {type(item).__name__: item for item in limit.metadata}
+    assert limit.default == 20
+    assert bounds["Ge"].ge == 1
+    assert bounds["Le"].le == 500

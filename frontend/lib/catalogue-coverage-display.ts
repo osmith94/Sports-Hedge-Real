@@ -25,6 +25,51 @@ export function coverageRowLabel(row: FixtureArchetypeCoverage): string {
   return `${label}${coverageStateLabel(row.state)} — ${row.reason.replaceAll("_", " ")}`;
 }
 
+export type CoverageDisplayGroup = {
+  key: string;
+  summary: string;
+  rows: FixtureArchetypeCoverage[];
+};
+
+function coverageGroupKey(row: FixtureArchetypeCoverage): string | null {
+  if (row.line == null || row.line === "") return null;
+  return `${row.archetype}|${row.state}|${row.reason}`;
+}
+
+export function coverageDisplayGroups(rows: readonly FixtureArchetypeCoverage[]): CoverageDisplayGroup[] {
+  const groups: CoverageDisplayGroup[] = [];
+  const indexByKey = new Map<string, number>();
+  rows.forEach((row, index) => {
+    const groupKey = coverageGroupKey(row);
+    if (groupKey === null) {
+      groups.push({
+        key: `${row.archetype}-${row.line ?? "none"}-${index}`,
+        summary: coverageRowLabel(row),
+        rows: [row],
+      });
+      return;
+    }
+    const existing = indexByKey.get(groupKey);
+    if (existing === undefined) {
+      indexByKey.set(groupKey, groups.length);
+      groups.push({ key: groupKey, summary: "", rows: [row] });
+      return;
+    }
+    groups[existing].rows.push(row);
+  });
+  return groups.map((group) => {
+    if (group.rows.length < 2) {
+      return { ...group, summary: coverageRowLabel(group.rows[0]) };
+    }
+    const sample = group.rows[0];
+    const family = (sample.display_label || sample.archetype).replace(/\s+[-+]?\d+(?:\.\d+)?$/, "");
+    return {
+      ...group,
+      summary: `${family} · ${group.rows.length} lines · ${coverageStateLabel(sample.state)} — ${sample.reason.replaceAll("_", " ")}`,
+    };
+  });
+}
+
 export function fixtureCoverageRows(
   item: DiscoveredFixture | { catalogue_coverage?: FixtureCatalogueCoverage | null },
 ): FixtureArchetypeCoverage[] {

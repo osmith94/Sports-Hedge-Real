@@ -77,6 +77,33 @@ def rank_triggered_opportunities(
     return ordered[:limit]
 
 
+def select_recent_tracked_opportunities(
+    opportunities: list[NearOpportunity],
+    *,
+    limit: int,
+) -> list[NearOpportunity]:
+    """Newest current observations, capped after that order.
+
+    ``last_seen_at`` is the economics observation time. A missing timestamp
+    sorts last. Net edge, status, classification, and quote age stay on the
+    row. This does not rank by edge, and it does not drop a row for being
+    below break-even or rejected.
+    """
+
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    eligible = [item for item in opportunities if item.status not in TRACKED_EXCLUDED]
+    ordered = sorted(eligible, key=_recent_tracked_key)
+    return ordered[:limit]
+
+
+def _recent_tracked_key(item: NearOpportunity) -> tuple:
+    missing = item.last_seen_at is None
+    # Negate the POSIX timestamp so the newest observation sorts first.
+    observed = 0.0 if item.last_seen_at is None else -item.last_seen_at.timestamp()
+    return (missing, observed, item.opportunity_id)
+
+
 def rank_tracked_opportunities(
     opportunities: list[NearOpportunity],
     *,

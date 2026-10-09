@@ -7,7 +7,10 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
-from sports_hedge.application.scan_lanes import FRESHNESS_EXECUTABLE
+from sports_hedge.application.scan_lanes import (
+    FRESHNESS_EXECUTABLE,
+    FRESHNESS_RADAR_CURRENT,
+)
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityLifecycleEvent
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
@@ -84,7 +87,16 @@ def triggered_opportunities(
 
 @router.get("/tracked", response_model=list[NearOpportunity])
 def tracked_markets(
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=500,
+        description=(
+            "Opportunity Monitor asks for 20, or 50 when the operator expands "
+            "the snapshot. The limit is applied after recency order. Values "
+            "above 50 are engineering stress reads, not the ordinary monitor."
+        ),
+    ),
     competition: str | None = None,
     venue: VenueName | None = None,
     market_family: MarketFamily | None = None,
@@ -110,19 +122,41 @@ def tracked_markets(
         as_of=now,
     )
     annotated: list[NearOpportunity] = []
+    # One catalogue pass for every returned row. Per-row radar and clock scans
+    # re-prune the whole fixture store under the same lock.
+    annotations = store.tracked_annotations(
+        [
+            (
+                row.canonical_market_id,
+                tuple(leg.source_market_id for leg in row.legs if leg.source_market_id),
+            )
+            for row in rows
+        ],
+        now,
+        **radar_kwargs,
+    )
     for row in rows:
-        meta = store.radar_meta_for_market(row.canonical_market_id, now, **radar_kwargs)
-        if meta is None:
+        found = annotations.get(row.canonical_market_id)
+        if found is None:
             continue
-        freshness = meta.freshness
-        if row.quote_age_ms is not None and row.quote_age_ms < service.max_quote_age_ms:
-            freshness = FRESHNESS_EXECUTABLE
+        meta, clock = found
+        # Executable is the persisted economics quote, not the price-slot quote.
+        # A BACKGROUND/HOT refresh can carry a new 80ms provider quote while
+        # the watchlist edge is still the older observation. Unknown stays
+        # non-executable. Expired rows never reach this annotation.
+        economics_executable = (
+            row.quote_age_ms is not None and row.quote_age_ms < service.max_quote_age_ms
+        )
+        freshness = FRESHNESS_EXECUTABLE if economics_executable else FRESHNESS_RADAR_CURRENT
         executable = freshness == FRESHNESS_EXECUTABLE
         annotated.append(
             row.model_copy(
                 update={
                     "scan_lane": meta.observation_lane.value,
                     "last_scanned_at": meta.last_scanned_at,
+                    "last_discovered_at": clock.discovered_at,
+                    "last_priced_at": clock.priced_at,
+                    "price_lane": clock.price_lane,
                     "next_due_at": meta.next_due_at,
                     "freshness_class": freshness,
                     "bet_actionable": bool(row.bet_actionable) and executable,

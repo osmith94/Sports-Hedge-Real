@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { DiscoveredFixture, LiveRefreshStatus } from "./api";
 import {
+  coverageDisplayGroups,
   coverageRowLabel,
   universeArchetypeSummaryLines,
 } from "./catalogue-coverage-display";
@@ -111,5 +112,38 @@ describe("catalogue coverage display", () => {
     assert.ok(lines.some((line) => line.includes("1 registered equivalent")));
     assert.ok(lines.some((line) => line.startsWith("both_teams_to_score:")));
     assert.ok(lines.some((line) => line.includes("1 approved")));
+  });
+
+  it("collapses repeated lined diagnostics and keeps each line available", () => {
+    const reason = "incomplete settlement (matchbook, polymarket)";
+    const spreads = ["-3.5", "-2.5", "-7.5", "3.5"].map((line) => ({
+      archetype: "nfl_point_spread",
+      display_label: `Point Spread ${line}`,
+      state: "review_required",
+      reason,
+      line,
+      matchbook_present: true,
+      polymarket_present: true,
+      kalshi_present: false,
+    }));
+    const winner = {
+      archetype: "nfl_game_winner",
+      display_label: "Game Winner",
+      state: "approved_equivalent",
+      reason: "approved_equivalent",
+    };
+    const groups = coverageDisplayGroups([winner, ...spreads]);
+    assert.equal(groups.length, 2);
+    assert.match(groups[0].summary, /Game Winner/);
+    assert.equal(groups[0].rows.length, 1);
+    assert.match(groups[1].summary, /Point Spread · 4 lines/);
+    assert.match(groups[1].summary, /REVIEW_REQUIRED/);
+    assert.match(groups[1].summary, /incomplete settlement \(matchbook, polymarket\)/);
+    assert.doesNotMatch(groups[1].summary, /Kalshi settlement proof missing/);
+    assert.deepEqual(
+      groups[1].rows.map((row) => row.line),
+      ["-3.5", "-2.5", "-7.5", "3.5"],
+    );
+    assert.match(coverageRowLabel(groups[1].rows[0]), /Point Spread -3\.5/);
   });
 });

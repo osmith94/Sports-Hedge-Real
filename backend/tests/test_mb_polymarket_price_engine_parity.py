@@ -245,8 +245,13 @@ class RecordingPolymarket:
 class RecordingKalshi:
     def __init__(self) -> None:
         self.book_calls: list[str] = []
+        self.get_market_calls: list[str] = []
         self.list_events_calls = 0
         self.list_markets_calls: list[str] = []
+
+    async def get_market(self, ticker: str, **_filters: Any) -> dict[str, Any]:
+        self.get_market_calls.append(str(ticker))
+        raise AssertionError("Kalshi get_market must not run when Kalshi is off")
 
     async def list_events(self, **_filters: Any) -> dict[str, Any]:
         self.list_events_calls += 1
@@ -314,6 +319,7 @@ async def _price(
     polymarket_books: dict[str, dict[str, Any]],
     enabled: tuple[VenueName, ...] = ENABLED,
     include_fx: bool = True,
+    priority: PriceEnginePriority = PriceEnginePriority.BACKGROUND,
 ) -> dict[str, Any]:
     if include_fx:
         service, repository = _scan_service()
@@ -352,7 +358,7 @@ async def _price(
             background_interval_seconds=0,
         )
         engine.set_enabled_venues(enabled)
-        result = await engine.run_slice(PriceEnginePriority.BACKGROUND, now=NOW)
+        result = await engine.run_slice(priority, now=NOW)
         await engine.observability.drain()
         detail = state.detail(canonical_event_id, now=NOW)
         return {
@@ -397,6 +403,7 @@ def _assert_no_discovery_or_kalshi(priced: dict[str, Any]) -> None:
     assert priced["polymarket"].list_events_calls == 0
     assert priced["polymarket"].list_markets_calls == []
     assert priced["kalshi"].book_calls == []
+    assert priced["kalshi"].get_market_calls == []
     assert priced["kalshi"].list_events_calls == 0
     assert priced["kalshi"].list_markets_calls == []
 
@@ -473,6 +480,44 @@ async def test_football_match_result_prices_without_kalshi() -> None:
     assert market.polymarket.fee_status == "known"
     assert market.polymarket.fee_label == "fee disabled · known zero"
     assert market.entered_solver or market.reason or market.rejection_reasons
+
+
+@pytest.mark.asyncio
+async def test_hot_slice_prices_without_kalshi_requests() -> None:
+    matchbook, polymarket = _football_markets()
+    identity = pair_identity_from_markets(
+        matchbook,
+        polymarket,
+        polymarket_market_payload={
+            "id": polymarket.source_market_id,
+            **PM_DISABLED,
+        },
+    )
+    assert identity is not None
+    store = SqliteApprovedMarketCatalogueStore(":memory:")
+    try:
+        _persist(
+            store,
+            [identity],
+            canonical_event_id="evt-brentford-hot",
+            competition="Premier League",
+            home=HOME,
+            away=AWAY,
+            kickoff=NOW + timedelta(minutes=20),
+        )
+        priced = await _price(
+            store,
+            canonical_event_id="evt-brentford-hot",
+            matchbook_payloads={"41001": _football_match_odds()},
+            polymarket_books=_pm_books([TOKEN_HOME, TOKEN_DRAW, TOKEN_AWAY]),
+            priority=PriceEnginePriority.HOT,
+        )
+    finally:
+        store.close()
+    assert priced["result"].evaluated
+    assert priced["matchbook"].get_market_calls == [("8801", "41001")]
+    assert priced["polymarket"].book_calls
+    _assert_no_discovery_or_kalshi(priced)
 
 
 @pytest.mark.asyncio
