@@ -790,6 +790,9 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "pro basketball",
             "pro basketball (m)",
             "nba basketball",
+            # Exact Matchbook competition label captured 2026-10-08. Not
+            # Summer League, G League, WNBA, or unlabeled exhibition.
+            "nba preseason",
         ),
         polymarket_gamma_series_id="10345",
         polymarket_gamma_sport="nba",

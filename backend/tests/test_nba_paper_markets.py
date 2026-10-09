@@ -72,6 +72,7 @@ from sports_hedge.nba.constants import (
     CANONICAL_NBA_POINT_SPREAD,
     CANONICAL_NBA_TOTAL_POINTS,
     MATCHBOOK_NBA_COMPETITION_TAG_ID,
+    MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID,
     NBA_EXCEPTIONAL_SETTLEMENT_CAVEAT,
     NBA_POLYMARKET_EVIDENCE_REQUIRED,
     NBA_SPORT,
@@ -718,7 +719,10 @@ def test_matchbook_nba_only_scope_uses_competition_tag() -> None:
         american_football_sport_id="1",
     )
     assert nba_only["sport-ids"] == "4"
-    assert nba_only["tag-ids"] == MATCHBOOK_NBA_COMPETITION_TAG_ID
+    assert nba_only["tag-id-union"] == (
+        f"{MATCHBOOK_NBA_COMPETITION_TAG_ID},{MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID}"
+    )
+    assert "tag-ids" not in nba_only
     mixed = matchbook_scope_discovery_params(
         ["nba", "premier_league", "nfl"],
         basketball_sport_id="4",

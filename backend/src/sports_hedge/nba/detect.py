@@ -8,6 +8,8 @@ from sports_hedge.domain.football import CanonicalEvent, MarketFamily
 from sports_hedge.nba.constants import (
     MATCHBOOK_BASKETBALL_SPORT_ID,
     MATCHBOOK_NBA_COMPETITION_TAG_ID,
+    MATCHBOOK_NBA_PRESEASON_COMPETITION_NAME,
+    MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID,
     NBA_KALSHI_APPROVED_SERIES,
     NBA_SPORT,
     POLYMARKET_NBA_SERIES_ID,
@@ -90,6 +92,45 @@ def is_nba_market_family(family: MarketFamily | str | None) -> bool:
     return value in NBA_MARKET_FAMILIES
 
 
+def _matchbook_tag_rows(payload: dict[str, Any]) -> list[tuple[str, str, str]]:
+    meta = payload.get("meta-tags") or payload.get("meta_tags") or []
+    rows: list[tuple[str, str, str]] = []
+    if not isinstance(meta, list):
+        return rows
+    for tag in meta:
+        if not isinstance(tag, dict):
+            continue
+        name = normalize_text(str(tag.get("name") or ""))
+        tag_type = normalize_text(str(tag.get("type") or ""))
+        tag_id = str(tag.get("id") or "").strip()
+        rows.append((name, tag_type, tag_id))
+    return rows
+
+
+def matchbook_nba_listing_phase(payload: dict[str, Any] | None) -> str | None:
+    """Exact Matchbook competition phase. ``None`` is not NBA.
+
+    ``preseason`` is the captured game-book tag. ``nba`` is the regular NBA
+    competition tag, including the championship outright. Summer League, G
+    League, WNBA and unlabeled exhibition basketball stay ``None``.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    phase: str | None = None
+    for name, tag_type, tag_id in _matchbook_tag_rows(payload):
+        if name in _NON_NBA_BASKETBALL:
+            return None
+        competition = tag_type in {"competition", "league"}
+        if tag_id == MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID or (
+            competition and name == MATCHBOOK_NBA_PRESEASON_COMPETITION_NAME
+        ):
+            phase = "preseason"
+        elif tag_id == MATCHBOOK_NBA_COMPETITION_TAG_ID or (competition and name == "nba"):
+            phase = phase or "nba"
+    return phase
+
+
 def is_nba_payload(payload: dict[str, Any] | None) -> bool:
     """True when a raw venue payload is NBA basketball, not WNBA/NCAAB/NFL."""
 
@@ -122,26 +163,14 @@ def is_nba_payload(payload: dict[str, Any] | None) -> bool:
             return False
         return True
     sport_id = str(payload.get("sport-id") or payload.get("sport_id") or "").strip()
-    meta = payload.get("meta-tags") or payload.get("meta_tags") or []
-    tag_names: list[tuple[str, str, str]] = []
-    if isinstance(meta, list):
-        for tag in meta:
-            if not isinstance(tag, dict):
-                continue
-            name = normalize_text(str(tag.get("name") or ""))
-            tag_type = normalize_text(str(tag.get("type") or ""))
-            tag_id = str(tag.get("id") or "").strip()
-            tag_names.append((name, tag_type, tag_id))
-            if name in _NON_NBA_BASKETBALL:
-                return False
+    tag_names = _matchbook_tag_rows(payload)
+    for name, _tag_type, _tag_id in tag_names:
+        if name in _NON_NBA_BASKETBALL:
+            return False
     if sport_id == MATCHBOOK_BASKETBALL_SPORT_ID or any(
         name == "basketball" and tag_type == "sport" for name, tag_type, _ in tag_names
     ):
-        if any(
-            tag_id == MATCHBOOK_NBA_COMPETITION_TAG_ID
-            or (name == "nba" and tag_type in {"competition", "league"})
-            for name, tag_type, tag_id in tag_names
-        ):
+        if matchbook_nba_listing_phase(payload) is not None:
             return True
         sport_name = normalize_text(
             str(payload.get("sport-name") or payload.get("sport_name") or payload.get("sport") or "")

@@ -42,6 +42,7 @@ _EXCLUDED_BASKETBALL = frozenset(
         "nba g league",
         "summer league",
         "nba summer league",
+        "nba preseason",
         "ncaaw",
         "ncaa women",
         "womens college basketball",
@@ -167,10 +168,16 @@ def matchbook_excluded_basketball_reason(payload: dict[str, Any] | None) -> str 
 
     if not isinstance(payload, dict):
         return None
+    from sports_hedge.nba.constants import MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID
+
     for name, _tag_type, tag_id in _tag_rows(payload):
-        if tag_id in {MATCHBOOK_WNBA_COMPETITION_TAG_ID, MATCHBOOK_NBA_COMPETITION_TAG_ID}:
+        if tag_id in {
+            MATCHBOOK_WNBA_COMPETITION_TAG_ID,
+            MATCHBOOK_NBA_COMPETITION_TAG_ID,
+            MATCHBOOK_NBA_PRESEASON_COMPETITION_TAG_ID,
+        }:
             return REJECTED_NON_NCAAB_BASKETBALL
-        if name in _EXCLUDED_BASKETBALL or name in {"wnba", "nba"}:
+        if name in _EXCLUDED_BASKETBALL or name in {"wnba", "nba", "nba preseason"}:
             return REJECTED_NON_NCAAB_BASKETBALL
     title = normalize_text(str(payload.get("name") or payload.get("title") or ""))
     if any(token in title for token in ("wnba", "nba championship", "nba finals")):

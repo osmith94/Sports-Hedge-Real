@@ -47,9 +47,9 @@ Automatic PAPER settlement for the admitted Kalshi↔Polymarket GAME_WINNER cell
 
 ## Matchbook discovery load
 
-NBA-only UNIVERSE scopes pass Matchbook `sport-ids=4` **and** competition tag `406202315670010`, so discovery does not download the whole basketball slate.
+NBA-only UNIVERSE scopes pass Matchbook `sport-ids=4` and `tag-id-union` of competition tag `406202315670010` (NBA, including the championship outright) and `931295691050041` (NBA Preseason game books, captured 2026-10-08). Matchbook `tag-ids` is an AND: one query with both ids returned zero events. The client therefore reads each tag sequentially inside the same `list_events` call and merges by event id. That union is discovery only. HOT refresh still uses known native ids and does not add a provider call.
 
-Mixed soccer/NFL/NBA scopes cannot apply that NBA tag without dropping football events. Those scopes keep basketball sport-id 4 on the same Matchbook `list_events` call (no extra concurrency slot) and reject WNBA/NCAAB/championship-outright payloads in the NBA normaliser. Follow-up: a second sequential NBA-tagged Matchbook query for mixed scopes, still on the existing Matchbook concurrency slot.
+Mixed soccer/NFL/NBA scopes cannot apply that union without dropping football events. Those scopes keep basketball sport-id 4 on the same Matchbook `list_events` call (no extra concurrency slot). NBA Preseason is admitted to discovery by the exact competition tag or the exact label `NBA Preseason`. WNBA, NCAAB, Euroleague, G League, Summer League, and unlabeled exhibition basketball stay out. Championship outrights still fail the game-book normaliser. Matchbook↔Polymarket NBA pairs stay off the Approved Match Register. Catalogue and matcher diagnostics for that venue pair use `nba_venue_pair_family_not_evidence_backed`. Other unregistered NBA pairs, including Kalshi↔Polymarket spreads and totals, stay `not_registered`. Matchbook↔Kalshi stays `not_registered` as well.
 
 ## Fees and concurrency
 

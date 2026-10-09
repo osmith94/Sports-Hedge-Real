@@ -453,8 +453,19 @@ class MatchbookClient(ReadOnlyVenue):
         if "before" not in filters:
             params["before"] = before_window
         params["per-page"] = per_page
+        tag_union = str(params.pop("tag-id-union", "") or "").strip()
+        if tag_union:
+            # Provider tag-ids is an AND. A comma of NBA + NBA Preseason
+            # returned zero events (2026-10-08). Query each tag in this same
+            # list_events call. HOT refresh does not pass tag-id-union.
+            params.pop("tag-ids", None)
+            return await self._list_events_for_tag_union(params, tag_union, per_page=per_page)
+        return await self._list_events_single_filter(params, per_page=per_page)
 
-        if "offset" in filters:
+    async def _list_events_single_filter(
+        self, params: dict[str, Any], *, per_page: int
+    ) -> dict[str, Any]:
+        if "offset" in params:
             page = await self._get("/edge/rest/events", params=params)
             events = _extract_items(page, "events")
             return {
@@ -462,8 +473,51 @@ class MatchbookClient(ReadOnlyVenue):
                 "events": events,
                 "truncated": False,
             }
-
         return await self._paginate_events(params, per_page=per_page)
+
+    async def _list_events_for_tag_union(
+        self,
+        params: dict[str, Any],
+        tag_union: str,
+        *,
+        per_page: int,
+    ) -> dict[str, Any]:
+        tag_ids = [part.strip() for part in tag_union.split(",") if part.strip()]
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        truncated = False
+        details: list[str] = []
+        provider_total = 0
+        for tag_id in tag_ids:
+            page = await self._list_events_single_filter(
+                {**params, "tag-ids": tag_id},
+                per_page=per_page,
+            )
+            if page.get("truncated"):
+                truncated = True
+                detail = page.get("truncation-detail")
+                if detail:
+                    details.append(str(detail))
+            reported = _optional_int(page.get("total"))
+            if reported is not None:
+                provider_total += reported
+            for item in page.get("events") or []:
+                if not isinstance(item, dict):
+                    continue
+                event_id = str(item.get("id", "")).strip()
+                if event_id and event_id in seen_ids:
+                    continue
+                if event_id:
+                    seen_ids.add(event_id)
+                merged.append(item)
+        return {
+            "offset": 0,
+            "per-page": per_page,
+            "total": provider_total if truncated else len(merged),
+            "events": merged,
+            "truncated": truncated,
+            "truncation-detail": "; ".join(details) if details else None,
+        }
 
     async def resolve_football_sport_id(self) -> int:
         if self._football_sport_id is not None:
