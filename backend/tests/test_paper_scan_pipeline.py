@@ -453,7 +453,7 @@ def test_complete_below_threshold_candidate_scores_risk_from_stakes() -> None:
         repository.close()
 
 
-def test_negative_margin_without_stakes_rejects_missing_risk_evidence() -> None:
+def test_negative_margin_without_stakes_rejects_no_arbitrage_not_missing_risk_evidence() -> None:
     repository = SqliteMarketIntelligenceRepository()
     intelligence = MarketIntelligenceService(repository)
     service = PaperScanService(intelligence)
@@ -496,7 +496,7 @@ def test_negative_margin_without_stakes_rejects_missing_risk_evidence() -> None:
         assert decision.execution_risk is None
         assert decision.eligible_for_paper_simulation is False
         assert "no_arbitrage" in decision.rejection_reasons or "no_positive_edge" in decision.rejection_reasons
-        assert "missing_risk_evidence" in decision.rejection_reasons
+        assert "missing_risk_evidence" not in decision.rejection_reasons
         assert "execution_risk_above_threshold" not in decision.rejection_reasons
     finally:
         repository.close()

@@ -9,6 +9,9 @@ from __future__ import annotations
 import inspect
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
+
+import pytest
 
 from sports_hedge.application.complete_set import SOLVER_MODEL_SIMPLE, generalized_state_model
 from sports_hedge.application.execution_reprice import (
@@ -30,7 +33,15 @@ from sports_hedge.market_intelligence.repository import SqliteMarketIntelligence
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import FxRateSnapshot
 from sports_hedge.venues import KalshiClient, MatchbookClient, PolymarketClient
-from test_execution_reprice_before_paper_entry import _decision
+from test_execution_reprice_before_paper_entry import (
+    _book,
+    _close,
+    _decision,
+    _fresh,
+    _market,
+    _open_trade,
+    _run,
+)
 from test_paper_scan_pipeline import kalshi_btts_payloads, matchbook_payloads
 from test_step7_safe_market_expansion import OBSERVED
 from venue_cost_helpers import matchbook_kalshi_costs, matchbook_polymarket_costs
@@ -273,24 +284,45 @@ def test_hard_gates_still_reject_without_using_risk_evidence() -> None:
             fx_snapshots=_fx(),
             minimum_net_edge=Decimal("0.90"),
         )
-        stale = PaperScanService(
-            MarketIntelligenceService(SqliteMarketIntelligenceRepository()),
-            settings=Settings(paper_entry_max_quote_age_ms=50),
-        ).scan_pair(
-            matchbook,
-            polymarket,
+        stale_mb = MatchbookObservationBuilder().build(
+            BVB_MB_EVENT, mb_market, observed_at=NOW, quote_age_ms=3000
+        )
+        stale_pm = PolymarketObservationBuilder().build(
+            BVB_PM_EVENT, pm_market, books, observed_at=NOW, quote_age_ms=3100
+        )
+        stale = service.scan_pair(
+            stale_mb,
+            stale_pm,
             venue_costs=matchbook_polymarket_costs(),
             fx_snapshots=_fx(),
         )
+        mb_no_under = {
+            "id": 84226,
+            "name": "Over/Under 2.5 Goals",
+            "runners": [
+                {
+                    "id": 1,
+                    "name": "Over 2.5",
+                    "prices": [
+                        {"side": "back", "odds": "1.90", "available-amount": "400"},
+                        {"side": "lay", "odds": "1.92", "available-amount": "400"},
+                    ],
+                },
+                {"id": 2, "name": "Under 2.5", "prices": [{"side": "lay", "odds": "2.42", "available-amount": "400"}]},
+            ],
+        }
         empty_under = {
             "o25": books["o25"],
             "u25": {"asset_id": "u25", "asks": [], "bids": [{"price": "0.53", "size": "500"}]},
         }
+        thin_mb = MatchbookObservationBuilder().build(
+            BVB_MB_EVENT, mb_no_under, observed_at=NOW, quote_age_ms=120
+        )
         thin_pm = PolymarketObservationBuilder().build(
             BVB_PM_EVENT, pm_market, empty_under, observed_at=NOW, quote_age_ms=150
         )
         missing_depth = service.scan_pair(
-            matchbook, thin_pm, venue_costs=matchbook_polymarket_costs(), fx_snapshots=_fx()
+            thin_mb, thin_pm, venue_costs=matchbook_polymarket_costs(), fx_snapshots=_fx()
         )
         integer_mb = MatchbookObservationBuilder().build(
             BVB_MB_EVENT,
@@ -392,3 +424,38 @@ def test_missing_risk_evidence_is_informational_not_a_paper_block() -> None:
     assert _paper_blocking_reasons(["no_positive_edge", "missing_risk_evidence"]) == [
         "no_positive_edge",
     ]
+
+
+@pytest.mark.asyncio
+async def test_absent_optional_risk_still_invokes_price2_and_records_authoritative_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = PaperScanService._risk_inputs
+
+    def hide(self, *args: object, **kwargs: object):
+        original(self, *args, **kwargs)
+        return None
+
+    monkeypatch.setattr(PaperScanService, "_risk_inputs", hide)
+    rich = _market()
+    book = _book("0.20", "0.70")
+    bundle = await _run(
+        tmp_path,
+        monkeypatch,
+        name="issue29-price2",
+        matchbook_payloads=[_fresh(rich), _fresh(rich)],
+        kalshi_books=[book, book],
+    )
+    try:
+        assert len(bundle.scan.seen) >= 2
+        discovery, execution = bundle.scan.seen[0], bundle.scan.seen[1]
+        assert discovery.execution_risk is None
+        assert "missing_risk_evidence" not in discovery.rejection_reasons
+        assert execution_reprice_permitted(discovery) is True
+        assert execution.eligible_for_paper_simulation is True
+        trade = _open_trade(bundle)
+        assert trade.paper_only is True
+        assert trade.places_orders is False
+        assert bundle.settings.sports_hedge_execution_enabled is False
+    finally:
+        _close(bundle)

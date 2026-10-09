@@ -502,6 +502,7 @@ class PaperScanService:
         risk_inputs = None
         risk = None
         if not liquidity_rejections:
+            # Optional heuristic score. Absence is telemetry, not a paper-entry veto.
             risk_inputs = self._risk_inputs(
                 left,
                 right,
@@ -511,9 +512,7 @@ class PaperScanService:
                 recent_volatility_bps=recent_volatility_bps,
                 quote_age_ms=quote_age_ms if quote_age_ms is not None else 10**9,
             )
-            if risk_inputs is None:
-                rejections.append("missing_risk_evidence")
-            else:
+            if risk_inputs is not None:
                 risk = self.risk_scorer.score(risk_inputs)
 
         execution_modes = {
@@ -858,10 +857,13 @@ def _dedupe(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
-    """Every remaining rejection blocks. Diagnostic labels are not rejections."""
+_INFORMATIONAL_REJECTION_REASONS = frozenset({"missing_risk_evidence"})
 
-    return list(reasons)
+
+def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
+    """Every remaining rejection blocks. Optional risk-score evidence does not."""
+
+    return [reason for reason in reasons if reason not in _INFORMATIONAL_REJECTION_REASONS]
 
 
 def _default_execution_mode(venue: VenueName) -> LegExecutionMode:
