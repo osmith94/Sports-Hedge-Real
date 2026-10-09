@@ -33,6 +33,7 @@ import {
   activityFromWatchlist,
   mergeOperatorActivity,
   oldestVisibleOccurredAt,
+  price2ActivityQuery,
   visibleOpportunityIds,
 } from "../lib/watchlist";
 
@@ -82,14 +83,10 @@ export default async function ArbitragePage() {
   const oldest = activityFetch.available
     ? oldestVisibleOccurredAt(activityFetch.value)
     : null;
-  const price2Query = opportunityIds.length
-    ? `opportunity_ids=${encodeURIComponent(opportunityIds.join(","))}&limit=200${
-        oldest ? `&since=${encodeURIComponent(oldest)}` : ""
-      }`
-    : "";
-  const price2Fetch = opportunityIds.length
-    ? await settledValue(getPrice2ActivityAttempts(price2Query), [] as Price2ActivityObservation[])
-    : { value: [] as Price2ActivityObservation[], available: true };
+  const price2Fetch = await settledValue(
+    getPrice2ActivityAttempts(price2ActivityQuery(opportunityIds, oldest)),
+    [] as Price2ActivityObservation[],
+  );
 
   try {
     livePriorityCount = (await getLivePriorityAlerts()).length;

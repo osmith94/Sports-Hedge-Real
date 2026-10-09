@@ -1933,6 +1933,15 @@ export type Price2LegProjection = {
   quote_age_ms?: number | null;
   slot_wait_ms?: number | null;
   io_ms?: number | null;
+  timing_match?: "native_id" | null;
+};
+
+export type Price2VenueTiming = {
+  venue: string;
+  slot_wait_ms?: number | null;
+  io_ms?: number | null;
+  call_count?: number;
+  aggregation?: "venue_max";
 };
 
 export type Price2ActivityObservation = {
@@ -1951,6 +1960,7 @@ export type Price2ActivityObservation = {
   status: Price2AttemptStatus;
   accepted?: boolean | null;
   filled: boolean;
+  trade_linked?: boolean;
   net_edge?: string | number | null;
   guaranteed_profit?: string | number | null;
   execution_size?: string | number | null;
@@ -1963,6 +1973,7 @@ export type Price2ActivityObservation = {
   canonical_event_id?: string | null;
   canonical_market_id?: string | null;
   legs: Price2LegProjection[];
+  venue_timings?: Price2VenueTiming[];
   data_kind: "historical_recorded";
 };
 

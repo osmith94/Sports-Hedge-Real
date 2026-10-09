@@ -349,6 +349,8 @@ export function price2CompactDetail(item: Price2ActivityObservation): string {
     parts.push(item.rejection_reason?.trim() || "rejection reason not recorded");
   } else if (item.filled) {
     parts.push("paper fill recorded separately");
+  } else if (item.trade_linked) {
+    parts.push("trade linked · fill not recorded");
   } else {
     parts.push("accepted · not a fill");
   }
@@ -356,12 +358,42 @@ export function price2CompactDetail(item: Price2ActivityObservation): string {
   return parts.join(" · ");
 }
 
-export function price2TimingLine(item: Pick<ActivityPrice2, "finishedAt" | "elapsedMs">, nowMs?: number | null): string {
-  const clock = item.finishedAt
+export function price2TimingLine(
+  item: Pick<ActivityPrice2, "startedAt" | "finishedAt" | "elapsedMs"> & { occurredAt?: string | null },
+  nowMs?: number | null,
+): string {
+  const evaluated = item.finishedAt
     ? requireLocalClock(item.finishedAt, nowMs)
-    : "time not recorded";
-  const elapsed = item.elapsedMs == null ? "elapsed not recorded" : `${item.elapsedMs} ms`;
-  return `Price-2 ${clock} · ${elapsed}`;
+    : "evaluation time not recorded";
+  const elapsed =
+    item.elapsedMs == null
+      ? "quote evaluation duration not recorded"
+      : `quote evaluation ${item.elapsedMs} ms`;
+  const audit = item.occurredAt
+    ? `audit ${requireLocalClock(item.occurredAt, nowMs)}`
+    : "audit time not recorded";
+  return `Price-2 ${evaluated} · ${elapsed} · ${audit}`;
+}
+
+export const PRICE2_RECENT_HORIZON_MS = 45 * 60 * 1000;
+
+export function price2ActivityQuery(
+  opportunityIds: string[],
+  oldestOccurredAt: string | null,
+  nowMs: number = Date.now(),
+): string {
+  const floor = nowMs - PRICE2_RECENT_HORIZON_MS;
+  const oldestMs = oldestOccurredAt ? Date.parse(oldestOccurredAt) : Number.NaN;
+  const sinceMs = Number.isFinite(oldestMs) ? Math.min(oldestMs, floor) : floor;
+  const params = new URLSearchParams({
+    since: new Date(sinceMs).toISOString(),
+    limit: "200",
+    include_recent: "true",
+  });
+  if (opportunityIds.length) {
+    params.set("opportunity_ids", opportunityIds.join(","));
+  }
+  return params.toString();
 }
 
 function requireLocalClock(iso: string, nowMs?: number | null): string {
@@ -379,8 +411,9 @@ export function activityFromPrice2(item: Price2ActivityObservation): ActivityEve
     tradeId: item.trade_id ?? null,
     status: item.status,
     filled: item.filled,
+    tradeLinked: item.trade_linked === true,
     startedAt: item.started_at ?? null,
-    finishedAt: item.finished_at ?? item.occurred_at,
+    finishedAt: item.finished_at ?? null,
     elapsedMs: item.elapsed_ms ?? null,
     netEdge: item.net_edge ?? null,
     guaranteedProfit: item.guaranteed_profit ?? null,
@@ -399,8 +432,15 @@ export function activityFromPrice2(item: Price2ActivityObservation): ActivityEve
       stakeCurrency: leg.stake_currency ?? null,
       retrievedAt: leg.retrieved_at ?? null,
       quoteAgeMs: leg.quote_age_ms ?? null,
-      slotWaitMs: leg.slot_wait_ms ?? null,
-      ioMs: leg.io_ms ?? null,
+      slotWaitMs: leg.timing_match === "native_id" ? (leg.slot_wait_ms ?? null) : null,
+      ioMs: leg.timing_match === "native_id" ? (leg.io_ms ?? null) : null,
+      timingMatch: leg.timing_match === "native_id" ? "native_id" : null,
+    })),
+    venueTimings: (item.venue_timings ?? []).map((timing) => ({
+      venue: timing.venue,
+      slotWaitMs: timing.slot_wait_ms ?? null,
+      ioMs: timing.io_ms ?? null,
+      callCount: timing.call_count ?? 0,
     })),
   };
   return {

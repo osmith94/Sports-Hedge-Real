@@ -134,6 +134,8 @@ def _snapshot_json(
                 "displayed_odds": "2.04",
                 "available_depth": "80",
                 "requested_stake": "3",
+                "native_market_id": "mb-1",
+                "retrieval_native_id": "mb-1",
                 "quote_age_ms": 120,
                 "retrieved_at": PRICE2_START.isoformat(),
             },
@@ -143,6 +145,8 @@ def _snapshot_json(
                 "displayed_odds": "1.90",
                 "available_depth": "50",
                 "requested_stake": "4",
+                "native_market_id": "pm-1",
+                "retrieval_native_id": "pm-1",
                 "quote_age_ms": 180,
                 "retrieved_at": (PRICE2_START + timedelta(milliseconds=40)).isoformat(),
             },
@@ -291,6 +295,9 @@ def test_price2_accepted_is_not_a_fill_and_keeps_price1_edge_separate() -> None:
         assert row["net_edge"] == "0.012"
         assert row["net_edge"] != "0.6631"
         assert row["elapsed_ms"] == 812
+        assert row["filled"] is False
+        assert row["trade_linked"] is False
+        assert row["finished_at"].startswith("2026-10-09T19:11:42.521")
         assert row["legs"][0]["displayed_odds"] == "2.04"
         assert row["legs"][0]["displayed_odds"] != "2.10"
         assert "available_depth" not in row["legs"][0]
@@ -593,6 +600,7 @@ def test_bounded_indexed_read_is_not_n_plus_one_or_table_sweep() -> None:
             opportunity_ids=["watch:visible-a", "watch:visible-b"],
             since=OBSERVED,
             limit=200,
+            include_recent=False,
         )
         repository._connection.set_trace_callback(None)
         assert {item.snapshot_id for item in rows} == {"exec:vis-a", "exec:vis-b"}
@@ -613,6 +621,192 @@ def test_bounded_indexed_read_is_not_n_plus_one_or_table_sweep() -> None:
         assert "idx_execution_snapshot_audits_opportunity" in plan_text
         assert "SCAN TABLE execution_snapshot_audits" not in plan_text
     finally:
+        repository.close()
+
+
+def test_two_polymarket_token_calls_are_not_copied_onto_every_leg() -> None:
+    row = project_audit_row(
+        {
+            "snapshot_id": "exec:pm-two",
+            "opportunity_id": "watch:mkt-pm",
+            "occurred_at": (PRICE2_END + timedelta(seconds=5)).isoformat(),
+            "accepted": 1,
+            "cycle_outcome": "accepted",
+            "snapshot_json": json.dumps(
+                {
+                    "started_at": PRICE2_START.isoformat(),
+                    "evaluated_at": PRICE2_END.isoformat(),
+                    "legs": [
+                        {
+                            "venue": "polymarket",
+                            "outcome": "yes",
+                            "displayed_odds": "1.90",
+                            "requested_stake": "4",
+                            "retrieval_native_id": "token-yes",
+                            "native_market_id": "token-yes",
+                        },
+                        {
+                            "venue": "polymarket",
+                            "outcome": "no",
+                            "displayed_odds": "2.10",
+                            "requested_stake": "4",
+                            "retrieval_native_id": "token-no",
+                            "native_market_id": "token-no",
+                        },
+                    ],
+                    "timing": {
+                        "assembly_ms": 900,
+                        "calls": [
+                            {
+                                "venue": "polymarket",
+                                "source_id": "token-yes",
+                                "slot_wait_ms": 5,
+                                "io_ms": 20,
+                            },
+                            {
+                                "venue": "polymarket",
+                                "source_id": "token-no",
+                                "slot_wait_ms": 40,
+                                "io_ms": 80,
+                            },
+                        ],
+                    },
+                }
+            ),
+            "diagnostics_json": None,
+        }
+    )
+    assert [leg.io_ms for leg in row.legs] == [20, 80]
+    assert [leg.slot_wait_ms for leg in row.legs] == [5, 40]
+    assert all(leg.timing_match == "native_id" for leg in row.legs)
+    assert len(row.venue_timings) == 1
+    assert row.venue_timings[0].venue == "polymarket"
+    assert row.venue_timings[0].io_ms == 80
+    assert row.venue_timings[0].slot_wait_ms == 40
+    assert row.venue_timings[0].call_count == 2
+    assert row.venue_timings[0].aggregation == "venue_max"
+
+
+def test_trade_id_without_filled_cycle_is_linked_not_filled() -> None:
+    row = project_audit_row(
+        {
+            "snapshot_id": "exec:linked",
+            "opportunity_id": "watch:mkt-link",
+            "occurred_at": PRICE2_END.isoformat(),
+            "accepted": 1,
+            "trade_id": "trade-partial-1",
+            "cycle_outcome": "accepted",
+            "snapshot_json": json.dumps(
+                {
+                    "started_at": PRICE2_START.isoformat(),
+                    "evaluated_at": PRICE2_END.isoformat(),
+                    "trade_id": "trade-partial-1",
+                    "cycle_outcome": "accepted",
+                }
+            ),
+            "diagnostics_json": None,
+        }
+    )
+    assert row.filled is False
+    assert row.trade_linked is True
+    filled = project_audit_row(
+        {
+            "snapshot_id": "exec:filled",
+            "opportunity_id": "watch:mkt-link",
+            "occurred_at": PRICE2_END.isoformat(),
+            "accepted": 1,
+            "trade_id": "trade-filled-1",
+            "cycle_outcome": "filled",
+            "snapshot_json": "{}",
+            "diagnostics_json": None,
+        }
+    )
+    assert filled.filled is True
+    assert filled.trade_linked is True
+
+
+def test_quote_evaluation_elapsed_does_not_use_audit_or_assembly_fallback() -> None:
+    later_audit = PRICE2_END + timedelta(seconds=3)
+    row = project_audit_row(
+        {
+            "snapshot_id": "exec:no-eval",
+            "opportunity_id": "watch:mkt-time",
+            "occurred_at": later_audit.isoformat(),
+            "accepted": 0,
+            "snapshot_json": json.dumps(
+                {
+                    "started_at": PRICE2_START.isoformat(),
+                    "timing": {"assembly_ms": 812},
+                }
+            ),
+            "diagnostics_json": json.dumps({"assembly_ms": 812}),
+        }
+    )
+    assert row.finished_at is None
+    assert row.elapsed_ms is None
+    assert row.occurred_at == later_audit
+    complete = project_audit_row(
+        {
+            "snapshot_id": "exec:eval",
+            "opportunity_id": "watch:mkt-time",
+            "occurred_at": later_audit.isoformat(),
+            "accepted": 1,
+            "snapshot_json": json.dumps(
+                {
+                    "started_at": PRICE2_START.isoformat(),
+                    "evaluated_at": PRICE2_END.isoformat(),
+                    "timing": {"assembly_ms": 1},
+                }
+            ),
+            "diagnostics_json": None,
+        }
+    )
+    assert complete.elapsed_ms == 812
+    assert complete.finished_at == PRICE2_END
+
+
+def test_recent_window_includes_price2_without_price1_operator_event() -> None:
+    repository = SqliteWatchlistRepository()
+    service = WatchlistService(repository, clock=lambda: OBSERVED)
+    client = _client(service)
+    try:
+        _observe(service, "mkt-standalone")
+        for index in range(120):
+            _record_audit(
+                service,
+                snapshot_id=f"exec:old-{index}",
+                opportunity_id=f"watch:old-{index}",
+                accepted=False,
+                occurred_at=OBSERVED - timedelta(hours=2, seconds=index),
+                market_id=f"old-{index}",
+            )
+        _record_audit(
+            service,
+            snapshot_id="exec:standalone",
+            opportunity_id="watch:mkt-standalone",
+            accepted=True,
+            occurred_at=PRICE2_END,
+            market_id="mkt-standalone",
+        )
+        rows = client.get(
+            "/paper/watchlist/price2-attempts",
+            params={
+                "since": OBSERVED.isoformat(),
+                "include_recent": True,
+                "limit": 50,
+            },
+        ).json()
+        assert any(item["snapshot_id"] == "exec:standalone" for item in rows)
+        plan = repository._connection.execute(
+            "EXPLAIN QUERY PLAN SELECT snapshot_id FROM execution_snapshot_audits "
+            "WHERE occurred_at >= ? ORDER BY occurred_at DESC LIMIT ?",
+            (OBSERVED.isoformat(), 50),
+        ).fetchall()
+        plan_text = " ".join(" ".join(str(part) for part in row) for row in plan)
+        assert "idx_execution_snapshot_audits_occurred" in plan_text
+        assert "SCAN TABLE execution_snapshot_audits" not in plan_text
+    finally:
+        app.dependency_overrides.clear()
         repository.close()
 
 

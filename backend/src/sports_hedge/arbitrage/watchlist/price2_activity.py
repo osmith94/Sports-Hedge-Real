@@ -21,6 +21,7 @@ from sports_hedge.arbitrage.watchlist.models import OpportunityLifecycleEvent
 PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS = 100
 PRICE2_ACTIVITY_DEFAULT_LIMIT = 200
 PRICE2_ACTIVITY_MAX_LIMIT = 500
+PRICE2_ACTIVITY_RECENT_LIMIT = 50
 
 Price2AttemptStatus = Literal["accepted", "rejected", "incomplete_unavailable"]
 Price2Source = Literal["execution_snapshot_audit", "lifecycle_rejection"]
@@ -38,6 +39,17 @@ class Price2LegProjection(BaseModel):
     quote_age_ms: int | None = None
     slot_wait_ms: int | None = None
     io_ms: int | None = None
+    timing_match: Literal["native_id"] | None = None
+
+
+class Price2VenueTiming(BaseModel):
+    """Max slot wait/I/O across provider calls for one venue. Not a per-leg fact."""
+
+    venue: str
+    slot_wait_ms: int | None = None
+    io_ms: int | None = None
+    call_count: int = 0
+    aggregation: Literal["venue_max"] = "venue_max"
 
 
 class Price2ActivityObservation(BaseModel):
@@ -58,6 +70,7 @@ class Price2ActivityObservation(BaseModel):
     status: Price2AttemptStatus
     accepted: bool | None = None
     filled: bool = False
+    trade_linked: bool = False
     net_edge: str | None = None
     guaranteed_profit: str | None = None
     execution_size: str | None = None
@@ -70,14 +83,17 @@ class Price2ActivityObservation(BaseModel):
     canonical_event_id: str | None = None
     canonical_market_id: str | None = None
     legs: list[Price2LegProjection] = Field(default_factory=list)
+    venue_timings: list[Price2VenueTiming] = Field(default_factory=list)
     data_kind: Literal["historical_recorded"] = "historical_recorded"
 
 
-def normalize_opportunity_ids(raw: str | None) -> list[str]:
-    """Deduplicate, cap, and reject a missing list so the reader cannot scan globally."""
+def normalize_opportunity_ids(raw: str | None, *, required: bool = True) -> list[str]:
+    """Deduplicate and cap. Empty is allowed when a bounded recent window is used."""
 
-    if raw is None:
-        raise ValueError("opportunity_ids is required")
+    if raw is None or not raw.strip():
+        if required:
+            raise ValueError("opportunity_ids is required")
+        return []
     seen: set[str] = set()
     ids: list[str] = []
     for part in raw.split(","):
@@ -90,7 +106,7 @@ def normalize_opportunity_ids(raw: str | None) -> list[str]:
             raise ValueError(
                 f"at most {PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS} opportunity_ids"
             )
-    if not ids:
+    if required and not ids:
         raise ValueError("opportunity_ids is required")
     return ids
 
@@ -101,8 +117,8 @@ def project_audit_row(row: dict[str, Any]) -> Price2ActivityObservation:
     snapshot = _object(_parse_json(row.get("snapshot_json")))
     diagnostics = _object(_parse_json(row.get("diagnostics_json")))
     started_at = _instant(snapshot.get("started_at")) or _instant(diagnostics.get("started_at"))
-    finished_at = _instant(snapshot.get("evaluated_at")) or _instant(row.get("occurred_at"))
-    occurred_at = _instant(row.get("occurred_at")) or finished_at or started_at
+    evaluated_at = _instant(snapshot.get("evaluated_at"))
+    occurred_at = _instant(row.get("occurred_at")) or started_at
     if occurred_at is None:
         raise ValueError("execution snapshot audit missing occurred_at")
     accepted = _as_bool(row.get("accepted"))
@@ -110,12 +126,9 @@ def project_audit_row(row: dict[str, Any]) -> Price2ActivityObservation:
     trade_id = _text(row.get("trade_id") or snapshot.get("trade_id"))
     frozen = snapshot.get("frozen_orders") if isinstance(snapshot.get("frozen_orders"), list) else []
     timing = snapshot.get("timing") if isinstance(snapshot.get("timing"), dict) else {}
-    calls = _timing_calls(timing, diagnostics)
+    calls = _provider_calls(timing, diagnostics)
     legs = _project_legs(snapshot.get("legs"), frozen, calls)
     size, size_currency = _execution_size(legs)
-    assembly_ms = _int(timing.get("assembly_ms"))
-    if assembly_ms is None:
-        assembly_ms = _int(diagnostics.get("assembly_ms"))
     return Price2ActivityObservation(
         observation_id=str(row.get("snapshot_id") or snapshot.get("snapshot_id") or ""),
         source="execution_snapshot_audit",
@@ -127,11 +140,12 @@ def project_audit_row(row: dict[str, Any]) -> Price2ActivityObservation:
         tranche_id=_text(row.get("tranche_id") or snapshot.get("tranche_id")),
         occurred_at=occurred_at,
         started_at=started_at,
-        finished_at=finished_at,
-        elapsed_ms=_elapsed_ms(started_at, finished_at, assembly_ms),
+        finished_at=evaluated_at,
+        elapsed_ms=_quote_evaluation_elapsed_ms(started_at, evaluated_at),
         status="accepted" if accepted else "rejected",
         accepted=accepted,
-        filled=_filled(cycle_outcome, trade_id),
+        filled=_filled(cycle_outcome),
+        trade_linked=bool(trade_id),
         net_edge=_text(snapshot.get("net_edge")),
         guaranteed_profit=_text(snapshot.get("guaranteed_profit")),
         execution_size=size,
@@ -141,6 +155,7 @@ def project_audit_row(row: dict[str, Any]) -> Price2ActivityObservation:
         rejection_reason=_text(row.get("rejection_reason") or snapshot.get("rejection_reason")),
         canonical_market_id=_text(row.get("canonical_market_id") or snapshot.get("canonical_market_id")),
         legs=legs,
+        venue_timings=_venue_timings(calls),
     )
 
 
@@ -162,6 +177,7 @@ def project_lifecycle_rejection(
         status="incomplete_unavailable",
         accepted=False,
         filled=False,
+        trade_linked=False,
         rejection_reason=reason,
         fixture_label=event.fixture_label,
         market_family=event.market_family,
@@ -211,7 +227,7 @@ def _lifecycle_reprice_reason(detail: str | None) -> str | None:
 def _project_legs(
     raw_legs: Any,
     frozen_orders: list[Any],
-    calls: dict[str, tuple[int | None, int | None]],
+    calls: list[dict[str, Any]],
 ) -> list[Price2LegProjection]:
     if not isinstance(raw_legs, list):
         return []
@@ -221,7 +237,7 @@ def _project_legs(
         if not isinstance(item, dict):
             continue
         venue = _text(item.get("venue"))
-        wait_io = calls.get(venue or "")
+        matched = _call_for_leg(item, calls)
         retrieved = _instant(item.get("retrieved_at"))
         legs.append(
             Price2LegProjection(
@@ -232,8 +248,9 @@ def _project_legs(
                 stake_currency=currencies.get(venue or "") or _text(item.get("currency")),
                 retrieved_at=retrieved,
                 quote_age_ms=_int(item.get("quote_age_ms")),
-                slot_wait_ms=None if wait_io is None else wait_io[0],
-                io_ms=None if wait_io is None else wait_io[1],
+                slot_wait_ms=None if matched is None else _int(matched.get("slot_wait_ms")),
+                io_ms=None if matched is None else _int(matched.get("io_ms")),
+                timing_match=None if matched is None else "native_id",
             )
         )
     return legs
@@ -251,30 +268,80 @@ def _currencies_by_venue(frozen_orders: list[Any]) -> dict[str, str]:
     return found
 
 
-def _timing_calls(timing: dict[str, Any], diagnostics: dict[str, Any]) -> dict[str, tuple[int | None, int | None]]:
+def _provider_calls(timing: dict[str, Any], diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
     rows = timing.get("calls")
     if not isinstance(rows, list):
         rows = diagnostics.get("calls")
-    by_venue: dict[str, tuple[int | None, int | None]] = {}
     if not isinstance(rows, list):
-        return by_venue
-    for item in rows:
-        if not isinstance(item, dict):
+        return []
+    return [item for item in rows if isinstance(item, dict)]
+
+
+def _call_for_leg(leg: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any] | None:
+    identities = {
+        value
+        for value in (
+            _text(leg.get("retrieval_native_id")),
+            _text(leg.get("native_market_id")),
+            _text(leg.get("native_runner_id")),
+        )
+        if value
+    }
+    if not identities:
+        return None
+    matches: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for call in calls:
+        source_id = _text(call.get("source_id"))
+        if source_id is None:
             continue
-        venue = _text(item.get("venue"))
+        if not _source_matches(source_id, identities):
+            continue
+        marker = id(call)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        matches.append(call)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _source_matches(source_id: str, identities: set[str]) -> bool:
+    if source_id in identities:
+        return True
+    prefix = f"{source_id}:"
+    for identity in identities:
+        if identity.startswith(prefix) or source_id.startswith(f"{identity}:"):
+            return True
+    return False
+
+
+def _venue_timings(calls: list[dict[str, Any]]) -> list[Price2VenueTiming]:
+    by_venue: dict[str, Price2VenueTiming] = {}
+    for call in calls:
+        venue = _text(call.get("venue"))
         if not venue:
             continue
-        wait = _int(item.get("slot_wait_ms"))
-        io_ms = _int(item.get("io_ms"))
-        previous = by_venue.get(venue)
-        if previous is None:
-            by_venue[venue] = (wait, io_ms)
+        current = by_venue.get(venue)
+        wait = _int(call.get("slot_wait_ms"))
+        io_ms = _int(call.get("io_ms"))
+        if current is None:
+            by_venue[venue] = Price2VenueTiming(
+                venue=venue,
+                slot_wait_ms=wait,
+                io_ms=io_ms,
+                call_count=1,
+            )
             continue
-        by_venue[venue] = (
-            _max_optional(previous[0], wait),
-            _max_optional(previous[1], io_ms),
+        by_venue[venue] = current.model_copy(
+            update={
+                "slot_wait_ms": _max_optional(current.slot_wait_ms, wait),
+                "io_ms": _max_optional(current.io_ms, io_ms),
+                "call_count": current.call_count + 1,
+            }
         )
-    return by_venue
+    return list(by_venue.values())
 
 
 def _execution_size(legs: list[Price2LegProjection]) -> tuple[str | None, str | None]:
@@ -293,20 +360,17 @@ def _execution_size(legs: list[Price2LegProjection]) -> tuple[str | None, str | 
     return str(total), currency
 
 
-def _filled(cycle_outcome: str | None, trade_id: str | None) -> bool:
-    if cycle_outcome == "filled":
-        return True
-    return bool(trade_id)
+def _filled(cycle_outcome: str | None) -> bool:
+    return cycle_outcome == "filled"
 
 
-def _elapsed_ms(
+def _quote_evaluation_elapsed_ms(
     started_at: datetime | None,
-    finished_at: datetime | None,
-    assembly_ms: int | None,
+    evaluated_at: datetime | None,
 ) -> int | None:
-    if started_at is not None and finished_at is not None:
-        return max(0, int((finished_at - started_at).total_seconds() * 1000))
-    return assembly_ms
+    if started_at is None or evaluated_at is None:
+        return None
+    return max(0, int((evaluated_at - started_at).total_seconds() * 1000))
 
 
 def _parse_json(raw: Any) -> Any:

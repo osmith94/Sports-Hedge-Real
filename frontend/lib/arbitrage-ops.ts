@@ -81,6 +81,14 @@ export type ActivityPrice2Leg = {
   quoteAgeMs: number | null;
   slotWaitMs: number | null;
   ioMs: number | null;
+  timingMatch: "native_id" | null;
+};
+
+export type ActivityPrice2VenueTiming = {
+  venue: string;
+  slotWaitMs: number | null;
+  ioMs: number | null;
+  callCount: number;
 };
 
 export type ActivityPrice2 = {
@@ -90,6 +98,7 @@ export type ActivityPrice2 = {
   tradeId: string | null;
   status: "accepted" | "rejected" | "incomplete_unavailable";
   filled: boolean;
+  tradeLinked: boolean;
   startedAt: string | null;
   finishedAt: string | null;
   elapsedMs: number | null;
@@ -103,6 +112,7 @@ export type ActivityPrice2 = {
   source: "execution_snapshot_audit" | "lifecycle_rejection";
   dataKind: "historical_recorded";
   legs: ActivityPrice2Leg[];
+  venueTimings: ActivityPrice2VenueTiming[];
 };
 
 export type ActivityEvent = {

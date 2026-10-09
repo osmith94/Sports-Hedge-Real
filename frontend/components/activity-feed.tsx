@@ -44,6 +44,7 @@ export function ActivityFeed({
             data-price2-snapshot-id={item.price2?.snapshotId ?? undefined}
             data-price2-cycle={item.price2?.executionCycle ?? undefined}
             data-price2-filled={item.price2 ? String(item.price2.filled) : undefined}
+            data-price2-trade-linked={item.price2 ? String(item.price2.tradeLinked) : undefined}
             data-data-kind={item.price2?.dataKind}
           >
             <div className="feed-kind">{item.kind.replaceAll("_", " ")}</div>
@@ -89,15 +90,13 @@ function Price2Timing({ item }: { item: ActivityPrice2 }) {
 function Price2TimingHydrated({ item }: { item: ActivityPrice2 }) {
   return (
     <>
-      Price-2 <HydratedLocalClock iso={item.finishedAt} />
+      Quote evaluation {item.startedAt ? <HydratedLocalClock iso={item.startedAt} /> : "start not recorded"}
+      {" → "}
+      {item.finishedAt ? <HydratedLocalClock iso={item.finishedAt} /> : "end not recorded"}
       {" · "}
-      {item.elapsedMs == null ? "elapsed not recorded" : `${item.elapsedMs} ms`}
-      {item.startedAt ? (
-        <>
-          {" · start "}
-          <HydratedLocalClock iso={item.startedAt} />
-        </>
-      ) : null}
+      {item.elapsedMs == null
+        ? "quote evaluation duration not recorded"
+        : `${item.elapsedMs} ms (not order-submit latency)`}
     </>
   );
 }
@@ -130,11 +129,27 @@ function Price2Detail({ price2 }: { price2: ActivityPrice2 }) {
                 {" · retrieved "}
                 {leg.retrievedAt ? <HydratedLocalClock iso={leg.retrievedAt} /> : "not recorded"}
                 {leg.quoteAgeMs != null ? ` · quote age ${leg.quoteAgeMs}ms` : " · quote age not recorded"}
-                {leg.slotWaitMs != null ? ` · slot wait ${leg.slotWaitMs}ms` : ""}
-                {leg.ioMs != null ? ` · I/O ${leg.ioMs}ms` : ""}
+                {leg.timingMatch === "native_id" && leg.slotWaitMs != null
+                  ? ` · matched slot wait ${leg.slotWaitMs}ms`
+                  : ""}
+                {leg.timingMatch === "native_id" && leg.ioMs != null
+                  ? ` · matched I/O ${leg.ioMs}ms`
+                  : ""}
               </div>
             ))
           )}
+          {price2.venueTimings.length ? (
+            <div className="feed-price2-venue-timing">
+              {price2.venueTimings.map((timing) => (
+                <div key={timing.venue}>
+                  {legVenue(timing.venue)} provider timing (venue-aggregated max of {timing.callCount} call
+                  {timing.callCount === 1 ? "" : "s"}, not per-leg)
+                  {timing.slotWaitMs != null ? ` · slot wait ${timing.slotWaitMs}ms` : " · slot wait not recorded"}
+                  {timing.ioMs != null ? ` · I/O ${timing.ioMs}ms` : " · I/O not recorded"}
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
     </details>

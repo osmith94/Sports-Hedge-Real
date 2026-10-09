@@ -12,6 +12,7 @@ import {
   mergeOperatorActivity,
   oldestVisibleOccurredAt,
   price2CompactDetail,
+  price2ActivityQuery,
   price2TimingLine,
   price2Title,
   visibleOpportunityIds,
@@ -53,6 +54,7 @@ function attempt(
     status: "accepted",
     accepted: true,
     filled: false,
+    trade_linked: false,
     net_edge: "0.012",
     guaranteed_profit: "0.04",
     execution_size: "3",
@@ -189,11 +191,27 @@ describe("Price-2 activity feed projection", () => {
     const expected = formatDateLocalClockWithMs(new Date("2026-10-09T19:11:42.521Z"));
     assert.equal(hydrated, expected);
     const line = price2TimingLine(
-      { finishedAt: "2026-10-09T19:11:42.521Z", elapsedMs: 812 },
+      {
+        startedAt: "2026-10-09T19:11:41.709Z",
+        finishedAt: "2026-10-09T19:11:42.521Z",
+        elapsedMs: 812,
+        occurredAt: "2026-10-09T19:11:45.000Z",
+      },
       now,
     );
-    assert.equal(line, `Price-2 ${expected} · 812 ms`);
+    assert.match(line, /quote evaluation 812 ms/);
+    assert.match(line, /audit /);
+    assert.doesNotMatch(line, /order-submit/);
+    const unknown = price2TimingLine({ startedAt: null, finishedAt: null, elapsedMs: null }, now);
+    assert.match(unknown, /quote evaluation duration not recorded/);
     assert.match(price2CompactDetail(attempt()), /cycle 1/);
+    assert.match(
+      price2CompactDetail(attempt({ trade_linked: true, filled: false })),
+      /trade linked · fill not recorded/,
+    );
+    const mapped = activityFromPrice2(attempt({ finished_at: null, elapsed_ms: null }));
+    assert.equal(mapped.price2?.finishedAt, null);
+    assert.equal(mapped.price2?.elapsedMs, null);
   });
 
   it("bounds the follow-up read to visible opportunity ids", () => {
@@ -222,9 +240,15 @@ describe("Price-2 activity feed projection", () => {
     assert.equal(oldestVisibleOccurredAt(events), "2026-10-09T19:11:00.000Z");
     const page = readFileSync(join(frontendRoot, "app/page.tsx"), "utf8");
     const feed = readFileSync(join(frontendRoot, "components/activity-feed.tsx"), "utf8");
+    const vitest = readFileSync(join(frontendRoot, "vitest.config.ts"), "utf8");
+    assert.match(vitest, /price2-activity-feed\.test\.ts/);
     assert.match(page, /getPrice2ActivityAttempts/);
-    assert.match(page, /opportunity_ids=/);
+    assert.match(page, /price2ActivityQuery/);
     assert.match(page, /mergeOperatorActivity/);
+    const query = price2ActivityQuery([], null, Date.parse("2026-10-09T19:45:00.000Z"));
+    assert.match(query, /include_recent=true/);
+    assert.match(query, /since=/);
+    assert.doesNotMatch(query, /opportunity_ids=/);
     assert.match(feed, /Price-2 attempts/);
     assert.match(feed, /RECORDED AUDIT/);
     assert.match(feed, /Price-2 quote detail/);

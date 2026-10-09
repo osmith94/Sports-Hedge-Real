@@ -44,6 +44,7 @@ from sports_hedge.arbitrage.watchlist.price2_activity import (
     PRICE2_ACTIVITY_DEFAULT_LIMIT,
     PRICE2_ACTIVITY_MAX_LIMIT,
     PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS,
+    PRICE2_ACTIVITY_RECENT_LIMIT,
     Price2ActivityObservation,
     merge_price2_observations,
     project_audit_row,
@@ -995,15 +996,16 @@ class WatchlistService:
     def price2_activity(
         self,
         *,
-        opportunity_ids: Sequence[str],
+        opportunity_ids: Sequence[str] | None = None,
         since: datetime | None = None,
         limit: int = PRICE2_ACTIVITY_DEFAULT_LIMIT,
+        include_recent: bool = False,
     ) -> list[Price2ActivityObservation]:
-        """Indexed read of stored Price-2 attempts for the visible opportunity set."""
+        """Indexed read of stored Price-2 attempts for visible ids and/or a time window."""
 
-        ids = list(dict.fromkeys(opportunity_ids))
-        if not ids:
-            raise ValueError("opportunity_ids is required")
+        ids = list(dict.fromkeys(opportunity_ids or []))
+        if not ids and since is None:
+            raise ValueError("opportunity_ids or since is required")
         if len(ids) > PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS:
             raise ValueError(
                 f"at most {PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS} opportunity_ids"
@@ -1014,6 +1016,8 @@ class WatchlistService:
             ids,
             since=since,
             limit=limit,
+            include_recent=include_recent,
+            recent_limit=min(PRICE2_ACTIVITY_RECENT_LIMIT, limit),
         )
         audits = [project_audit_row(row) for row in audits_raw]
         for item in audits:

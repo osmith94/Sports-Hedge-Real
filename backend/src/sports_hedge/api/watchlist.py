@@ -200,11 +200,15 @@ def recent_lifecycle_activity(
 
 @router.get("/price2-attempts", response_model=list[Price2ActivityObservation])
 def price2_attempts(
-    opportunity_ids: str = Query(
-        ...,
+    opportunity_ids: str | None = Query(
+        default=None,
         description="Comma-separated opportunity ids from the visible Activity page (max 100).",
     ),
     since: datetime | None = None,
+    include_recent: bool = Query(
+        default=False,
+        description="Also include a bounded recent time-window of Price-2 audits (requires since).",
+    ),
     limit: int = Query(
         default=PRICE2_ACTIVITY_DEFAULT_LIMIT,
         ge=1,
@@ -212,11 +216,20 @@ def price2_attempts(
     ),
     service: WatchlistService = Depends(get_watchlist_service),
 ) -> list[Price2ActivityObservation]:
-    """Read-only Price-2 audit projection. Requires the visible opportunity set."""
+    """Read-only Price-2 audit projection. Bounded by opportunity ids and/or since."""
 
     try:
-        ids = normalize_opportunity_ids(opportunity_ids)
-        return service.price2_activity(opportunity_ids=ids, since=since, limit=limit)
+        ids = normalize_opportunity_ids(opportunity_ids, required=False)
+        if not ids and since is None:
+            raise ValueError("opportunity_ids or since is required")
+        if include_recent and since is None:
+            raise ValueError("since is required when include_recent is true")
+        return service.price2_activity(
+            opportunity_ids=ids,
+            since=since,
+            limit=limit,
+            include_recent=include_recent,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
