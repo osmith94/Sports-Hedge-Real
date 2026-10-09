@@ -314,6 +314,10 @@ def _lane_health(lane: Any, engine_tier: Any | None) -> str:
 
     if lane is None and engine_tier is None:
         return "unknown"
+    if str(_attr(lane, "last_plan_reason") or "") == "hot_paused":
+        if _worker_state(lane) == "running":
+            return "running"
+        return "healthy"
     if _attr(lane, "last_error") or _attr(engine_tier, "last_error"):
         return "degraded"
     if _attr(lane, "degraded") is True:

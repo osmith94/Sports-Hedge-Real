@@ -76,6 +76,8 @@ PRICE_ENGINE_EXECUTION_CANDIDATE_LANE = "execution_candidate"
 PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
 # Ungranted BACKGROUND waiters refused because the operator paused the lane.
 BACKGROUND_ADMISSION_PAUSED = "background_admission_paused"
+# Ungranted HOT waiters refused because the operator paused the lane.
+HOT_ADMISSION_PAUSED = "hot_admission_paused"
 # No runnable HOT work: leave one physical slot for ACTIVE (3 of 4 for lower).
 IDLE_ACTIVE_RESERVED_SLOTS = 1
 # Runnable HOT work: new lower-priority leases stop at one slot.
@@ -239,6 +241,7 @@ class ProviderAccessLayer:
         self._startup_active_headroom = False
         self._hot_provider_demand = False
         self._background_admission_paused = False
+        self._hot_admission_paused = False
         self._bound_loop: asyncio.AbstractEventLoop | None = None
         self._waiters: dict[VenueName, list[_Waiter]] = {venue: [] for venue in self._limits}
         self._hot_grants_since_universe = {venue: 0 for venue in self._limits}
@@ -320,6 +323,25 @@ class ProviderAccessLayer:
     def background_admission_paused(self) -> bool:
         return self._background_admission_paused
 
+    def set_hot_admission_paused(self, paused: bool) -> None:
+        """Refuse new HOT leases while the operator pause is on.
+
+        Already granted HOT leases finish. Queued, not-yet-granted HOT waiters
+        are woken immediately and are not granted later. ACTIVE TRADE,
+        EXECUTION CANDIDATE / Price-2, UNIVERSE, BACKGROUND, and settlement
+        keep their own admission rules. Slot caps are unchanged.
+        """
+
+        paused = bool(paused)
+        if self._hot_admission_paused == paused:
+            return
+        self._hot_admission_paused = paused
+        self._reconsider_admission()
+
+    @property
+    def hot_admission_paused(self) -> bool:
+        return self._hot_admission_paused
+
     def _bind_loop(self) -> None:
         if self._bound_loop is None:
             self._bound_loop = asyncio.get_running_loop()
@@ -330,7 +352,7 @@ class ProviderAccessLayer:
         Safe on the event loop when the condition is free, and safe from a
         worker thread by scheduling onto the loop that owns the waiters.
         Does not block the event loop and does not require the setter to be
-        async.
+        async. Also refuses paused HOT waiters.
         """
 
         try:
@@ -364,12 +386,15 @@ class ProviderAccessLayer:
         self._reconsider_unlocked()
 
     def _reconsider_unlocked(self) -> None:
-        if self._background_admission_paused:
+        if self._background_admission_paused or self._hot_admission_paused:
             for waiters in self._waiters.values():
                 for waiter in waiters:
-                    if waiter.granted or not self._background_admission_blocked(waiter):
+                    if waiter.granted:
                         continue
-                    self._refuse_ungranted_background(waiter)
+                    if self._background_admission_blocked(waiter):
+                        self._refuse_ungranted_background(waiter)
+                    elif self._hot_admission_blocked(waiter):
+                        self._refuse_ungranted_hot(waiter)
         for venue in self._limits:
             self._pump(venue)
 
@@ -379,11 +404,21 @@ class ProviderAccessLayer:
             and waiter.requested_lane == PRICE_ENGINE_BACKGROUND_LANE
         )
 
+    def _hot_admission_blocked(self, waiter: _Waiter) -> bool:
+        return self._hot_admission_paused and waiter.priority is ProviderPriority.HOT
+
     def _refuse_ungranted_background(self, waiter: _Waiter) -> None:
         if waiter.granted or waiter.cancelled:
             return
         waiter.cancelled = True
         waiter.reason = BACKGROUND_ADMISSION_PAUSED
+        waiter.event.set()
+
+    def _refuse_ungranted_hot(self, waiter: _Waiter) -> None:
+        if waiter.granted or waiter.cancelled:
+            return
+        waiter.cancelled = True
+        waiter.reason = HOT_ADMISSION_PAUSED
         waiter.event.set()
 
     def _hot_demand_active(self) -> bool:
@@ -394,6 +429,14 @@ class ProviderAccessLayer:
         lower-priority grant that would fill the last protected slot.
         """
 
+        if self._hot_admission_paused:
+            for waiters in self._waiters.values():
+                for item in waiters:
+                    if item.cancelled or item.priority is not ProviderPriority.HOT:
+                        continue
+                    if item.granted:
+                        return True
+            return False
         if self._hot_provider_demand:
             return True
         for waiters in self._waiters.values():
@@ -583,6 +626,8 @@ class ProviderAccessLayer:
             self._waiters[venue].append(waiter)
             if self._background_admission_blocked(waiter):
                 self._refuse_ungranted_background(waiter)
+            elif self._hot_admission_blocked(waiter):
+                self._refuse_ungranted_hot(waiter)
             else:
                 self._pump(venue)
             return waiter
@@ -678,7 +723,7 @@ class ProviderAccessLayer:
                 yield None
                 return
             if waiter.cancelled:
-                if waiter.reason == BACKGROUND_ADMISSION_PAUSED:
+                if waiter.reason in {BACKGROUND_ADMISSION_PAUSED, HOT_ADMISSION_PAUSED}:
                     yield None
                     return
                 raise asyncio.CancelledError
@@ -810,6 +855,7 @@ class ProviderAccessLayer:
                 not item.granted
                 and not item.cancelled
                 and not self._background_admission_blocked(item)
+                and not self._hot_admission_blocked(item)
                 and self._lower_grant_allowed(venue, item)
             )
         ]

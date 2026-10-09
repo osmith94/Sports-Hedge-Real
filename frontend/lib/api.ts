@@ -771,6 +771,7 @@ export type OperatorScannerSettings = {
   max_one_time_gbp?: string;
   scanner_stopped: boolean;
   universe_scans_paused?: boolean;
+  hot_pricing_paused?: boolean;
   background_pricing_paused?: boolean;
   settlement_scans_paused?: boolean;
   source?: "operator" | "env_default";
@@ -923,6 +924,7 @@ export type LiveRefreshStatus = {
   paper_autofill_enabled?: boolean;
   scanner_stopped?: boolean;
   universe_scans_paused?: boolean;
+  hot_pricing_paused?: boolean;
   background_pricing_paused?: boolean;
   settlement_scans_paused?: boolean;
   settlement_operator_summary?: string | null;
@@ -1766,6 +1768,32 @@ export async function resumePaperScanner(): Promise<LiveRefreshStatus> {
 
 export async function pauseUniverseSchedule(): Promise<LiveRefreshStatus> {
   const response = await fetch(`${API_BASE}/paper/scanner/universe-schedule/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function pauseHotPricing(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/hot-pricing/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<LiveRefreshStatus>;
+}
+
+export async function resumeHotPricing(): Promise<LiveRefreshStatus> {
+  const response = await fetch(`${API_BASE}/paper/scanner/hot-pricing/resume`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
