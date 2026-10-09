@@ -18,16 +18,23 @@ import {
   getPaperTreasury,
   getTrackedWatchlist,
   getWatchlistActivity,
+  getPrice2ActivityAttempts,
   opportunityMonitorTrackedQuery,
   NearOpportunity,
   OpportunityLifecycleEvent,
+  Price2ActivityObservation,
   PaperLiquiditySnapshot,
   PaperTrade,
   PaperTradeBookSummary,
   PaperTreasurySnapshot,
 } from "../lib/api";
 import { CapitalSnapshot } from "../lib/arbitrage-ops";
-import { activityFromWatchlist } from "../lib/watchlist";
+import {
+  activityFromWatchlist,
+  mergeOperatorActivity,
+  oldestVisibleOccurredAt,
+  visibleOpportunityIds,
+} from "../lib/watchlist";
 
 export const dynamic = "force-dynamic";
 
@@ -69,6 +76,20 @@ export default async function ArbitragePage() {
     getWatchlistActivity("limit=100&operator_signal=true"),
     [] as OpportunityLifecycleEvent[],
   );
+  const opportunityIds = activityFetch.available
+    ? visibleOpportunityIds(activityFetch.value)
+    : [];
+  const oldest = activityFetch.available
+    ? oldestVisibleOccurredAt(activityFetch.value)
+    : null;
+  const price2Query = opportunityIds.length
+    ? `opportunity_ids=${encodeURIComponent(opportunityIds.join(","))}&limit=200${
+        oldest ? `&since=${encodeURIComponent(oldest)}` : ""
+      }`
+    : "";
+  const price2Fetch = opportunityIds.length
+    ? await settledValue(getPrice2ActivityAttempts(price2Query), [] as Price2ActivityObservation[])
+    : { value: [] as Price2ActivityObservation[], available: true };
 
   try {
     livePriorityCount = (await getLivePriorityAlerts()).length;
@@ -96,7 +117,12 @@ export default async function ArbitragePage() {
 
   const liveConnected = tracked.available || tradesAvailable || liquidityAvailable;
   const activity = {
-    items: activityFetch.available ? activityFromWatchlist(activityFetch.value) : [],
+    items: activityFetch.available
+      ? mergeOperatorActivity(
+          activityFromWatchlist(activityFetch.value),
+          price2Fetch.available ? price2Fetch.value : [],
+        )
+      : [],
     usedFixture: false,
   };
   return (

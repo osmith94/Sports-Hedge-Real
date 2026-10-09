@@ -26,6 +26,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     LifecycleEventType,
     NearOpportunity,
     OpportunityLifecycleEvent,
+    OpportunityObservationPoint,
     OpportunityStatus,
     PaperFillAttempt,
     PaperFillAttemptStatus,
@@ -38,7 +39,15 @@ from sports_hedge.arbitrage.watchlist.models import (
     paper_fill_lifecycle_event_id,
     qualifying_lifecycle_event_id,
     strike_distance_narrative,
-    OpportunityObservationPoint,
+)
+from sports_hedge.arbitrage.watchlist.price2_activity import (
+    PRICE2_ACTIVITY_DEFAULT_LIMIT,
+    PRICE2_ACTIVITY_MAX_LIMIT,
+    PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS,
+    Price2ActivityObservation,
+    merge_price2_observations,
+    project_audit_row,
+    project_lifecycle_rejection,
 )
 from sports_hedge.arbitrage.watchlist.ranking import (
     filter_tracked_to_cohort,
@@ -982,6 +991,49 @@ class WatchlistService:
             since=since,
             operator_signal=True,
         )
+
+    def price2_activity(
+        self,
+        *,
+        opportunity_ids: Sequence[str],
+        since: datetime | None = None,
+        limit: int = PRICE2_ACTIVITY_DEFAULT_LIMIT,
+    ) -> list[Price2ActivityObservation]:
+        """Indexed read of stored Price-2 attempts for the visible opportunity set."""
+
+        ids = list(dict.fromkeys(opportunity_ids))
+        if not ids:
+            raise ValueError("opportunity_ids is required")
+        if len(ids) > PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS:
+            raise ValueError(
+                f"at most {PRICE2_ACTIVITY_MAX_OPPORTUNITY_IDS} opportunity_ids"
+            )
+        if limit <= 0 or limit > PRICE2_ACTIVITY_MAX_LIMIT:
+            raise ValueError(f"limit must be between 1 and {PRICE2_ACTIVITY_MAX_LIMIT}")
+        audits_raw, rejection_events, labels = self.repository.list_price2_activity_sources(
+            ids,
+            since=since,
+            limit=limit,
+        )
+        audits = [project_audit_row(row) for row in audits_raw]
+        for item in audits:
+            meta = labels.get(item.opportunity_id)
+            if meta is None:
+                continue
+            if item.fixture_label is None:
+                item.fixture_label = meta.get("fixture_label")
+            if item.market_family is None:
+                item.market_family = meta.get("market_family")
+            if item.canonical_event_id is None:
+                item.canonical_event_id = meta.get("canonical_event_id")
+            if item.canonical_market_id is None:
+                item.canonical_market_id = meta.get("canonical_market_id")
+        rejections = [
+            projected
+            for event in rejection_events
+            if (projected := project_lifecycle_rejection(event)) is not None
+        ]
+        return merge_price2_observations(audits, rejections)[:limit]
 
     def _freshness_filtered(
         self,

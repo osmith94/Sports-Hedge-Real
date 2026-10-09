@@ -7,14 +7,20 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
+from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.application.scan_lanes import (
     FRESHNESS_EXECUTABLE,
     FRESHNESS_RADAR_CURRENT,
 )
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityLifecycleEvent
+from sports_hedge.arbitrage.watchlist.price2_activity import (
+    PRICE2_ACTIVITY_DEFAULT_LIMIT,
+    PRICE2_ACTIVITY_MAX_LIMIT,
+    Price2ActivityObservation,
+    normalize_opportunity_ids,
+)
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
 from sports_hedge.arbitrage.watchlist.service import WatchlistService
-from sports_hedge.application.paper_operations import PaperOperationsService
 from sports_hedge.config import get_settings
 from sports_hedge.domain.football import MarketFamily
 from sports_hedge.domain.models import VenueName
@@ -190,6 +196,29 @@ def recent_lifecycle_activity(
         since=since,
         operator_signal=operator_signal,
     )
+
+
+@router.get("/price2-attempts", response_model=list[Price2ActivityObservation])
+def price2_attempts(
+    opportunity_ids: str = Query(
+        ...,
+        description="Comma-separated opportunity ids from the visible Activity page (max 100).",
+    ),
+    since: datetime | None = None,
+    limit: int = Query(
+        default=PRICE2_ACTIVITY_DEFAULT_LIMIT,
+        ge=1,
+        le=PRICE2_ACTIVITY_MAX_LIMIT,
+    ),
+    service: WatchlistService = Depends(get_watchlist_service),
+) -> list[Price2ActivityObservation]:
+    """Read-only Price-2 audit projection. Requires the visible opportunity set."""
+
+    try:
+        ids = normalize_opportunity_ids(opportunity_ids)
+        return service.price2_activity(opportunity_ids=ids, since=since, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _read_watchlist(reader, operations: PaperOperationsService, **kwargs):

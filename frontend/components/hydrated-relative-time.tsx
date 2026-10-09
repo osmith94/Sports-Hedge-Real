@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { relativeTime } from "../lib/format";
+import { formatLocalClockWithMs, relativeTime } from "../lib/format";
 import {
   OBSERVATION_AGE_TICK_MS,
   startSharedObservationAgeTimer,
@@ -31,4 +31,10 @@ export function HydratedRelativeTime({
       {prefix ? `${prefix} ${label}` : label}
     </time>
   );
+}
+
+export function HydratedLocalClock({ iso }: { iso: string | null | undefined }) {
+  const nowMs = useHydratedNowMs();
+  const label = formatLocalClockWithMs(iso, nowMs);
+  return <time dateTime={iso ?? undefined}>{label}</time>;
 }

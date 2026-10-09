@@ -24,6 +24,33 @@ export function money(
     : new Intl.NumberFormat("en-GB", { style: "currency", currency }).format(parsed);
 }
 
+export function formatDateLocalClockWithMs(date: Date): string {
+  const pad = (value: number, width = 2) => String(value).padStart(width, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+}
+
+export function formatLocalClockWithMs(
+  iso: string | null | undefined,
+  now?: number | null,
+): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  if (now == null || !Number.isFinite(now)) return iso;
+  return formatDateLocalClockWithMs(date);
+}
+
+export function nativeStake(
+  value: string | number | null | undefined,
+  currency?: string | null,
+): string {
+  const parsed = number(value);
+  if (parsed === null) return "—";
+  if (currency === "GBP" || currency === "USD") return money(parsed, currency);
+  if (currency) return `${parsed} ${currency}`;
+  return `${parsed} · currency not recorded`;
+}
+
 export function relativeTime(iso: string | null | undefined, now?: number | null): string {
   if (!iso) return "—";
   const then = Date.parse(iso);

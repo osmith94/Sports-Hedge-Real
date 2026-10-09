@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -22,6 +22,7 @@ from sports_hedge.arbitrage.watchlist.models import (
     PaperFillAttemptStatus,
     WatchLeg,
     attempt_id_from_lifecycle_event,
+    fixture_label_from_teams,
 )
 from sports_hedge.domain.football import FootballPeriod, MarketFamily
 from sports_hedge.domain.models import MarketScope, VenueName
@@ -638,6 +639,84 @@ class SqliteWatchlistRepository:
                 ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_price2_activity_sources(
+        self,
+        opportunity_ids: Sequence[str],
+        *,
+        since: datetime | None = None,
+        limit: int = 200,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[OpportunityLifecycleEvent],
+        dict[str, dict[str, str | None]],
+    ]:
+        """Bounded Price-2 feed reads. Requires opportunity ids; never scans all audits."""
+
+        if not opportunity_ids:
+            raise ValueError("opportunity_ids is required")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        placeholders = ", ".join("?" for _ in opportunity_ids)
+        audit_sql = (
+            "SELECT snapshot_id, opportunity_id, canonical_market_id, occurred_at, "
+            "accepted, rejection_reason, execution_cycle, trade_id, tranche_id, "
+            "cycle_outcome, snapshot_json, diagnostics_json "
+            "FROM execution_snapshot_audits "
+            f"WHERE opportunity_id IN ({placeholders})"
+        )
+        rejection_sql = (
+            "SELECT watchlist_lifecycle_events.*, "
+            "watchlist_lifecycle_events.rowid AS append_seq "
+            "FROM watchlist_lifecycle_events "
+            f"WHERE opportunity_id IN ({placeholders}) "
+            "AND event_type = ? AND detail LIKE ?"
+        )
+        label_sql = (
+            "SELECT opportunity_id, home_team, away_team, market_family, "
+            "canonical_event_id, canonical_market_id "
+            "FROM watchlist_opportunities "
+            f"WHERE opportunity_id IN ({placeholders})"
+        )
+        audit_params: list[Any] = list(opportunity_ids)
+        rejection_params: list[Any] = [
+            *opportunity_ids,
+            LifecycleEventType.PAPER_FILL_REJECTED.value,
+            "execution_reprice_%",
+        ]
+        if since is not None:
+            audit_sql += " AND occurred_at >= ?"
+            rejection_sql += " AND occurred_at >= ?"
+            stamp = since.isoformat()
+            audit_params.append(stamp)
+            rejection_params.append(stamp)
+        audit_sql += " ORDER BY occurred_at DESC, snapshot_id DESC LIMIT ?"
+        rejection_sql += " ORDER BY occurred_at DESC, append_seq DESC LIMIT ?"
+        audit_params.append(limit)
+        rejection_params.append(limit)
+        with self.exclusive():
+            audit_rows = self._connection.execute(audit_sql, audit_params).fetchall()
+            rejection_rows = self._connection.execute(
+                rejection_sql, rejection_params
+            ).fetchall()
+            label_rows = self._connection.execute(
+                label_sql, list(opportunity_ids)
+            ).fetchall()
+        labels: dict[str, dict[str, str | None]] = {}
+        for row in label_rows:
+            home = row["home_team"]
+            away = row["away_team"]
+            labels[str(row["opportunity_id"])] = {
+                "fixture_label": fixture_label_from_teams(home, away) or home or away,
+                "market_family": row["market_family"],
+                "canonical_event_id": row["canonical_event_id"],
+                "canonical_market_id": row["canonical_market_id"],
+            }
+        return (
+            [dict(row) for row in audit_rows],
+            [_event_from_row(row) for row in rejection_rows],
+            labels,
+        )
+
     def append_observation(self, point: OpportunityObservationPoint) -> None:
         with self.exclusive():
             self._connection.execute(
@@ -745,7 +824,7 @@ class SqliteWatchlistRepository:
         parameters.append(limit)
         with self.exclusive():
             rows = self._connection.execute(
-                f"SELECT watchlist_lifecycle_events.*, "  # noqa: S608
+                f"SELECT watchlist_lifecycle_events.*, "
                 "watchlist_lifecycle_events.rowid AS append_seq "
                 f"FROM watchlist_lifecycle_events{where} "
                 "ORDER BY occurred_at DESC, append_seq DESC LIMIT ?",
