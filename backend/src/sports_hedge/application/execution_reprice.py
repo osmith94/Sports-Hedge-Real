@@ -12,6 +12,7 @@ fixtures, markets, or matches.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from collections.abc import Sequence
@@ -541,7 +542,11 @@ async def capture_with_execution_reprice(
         cumulative_capital_gbp="0",
     )
     snapshot_json = None if refreshed.snapshot is None else refreshed.snapshot.to_json()
-    entry_history = persist_price_engine_item_capture(
+    # Persist (and any armed live dispatch) off this event loop. run_blocking()
+    # would otherwise join a worker on the scanner thread until fake or real
+    # venue transports finish. Reserve → submit → persist stay one function.
+    entry_history = await asyncio.to_thread(
+        persist_price_engine_item_capture,
         refreshed.decision,
         service=service,
         watchlist=watchlist,

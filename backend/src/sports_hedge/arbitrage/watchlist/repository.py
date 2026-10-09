@@ -680,11 +680,23 @@ class SqliteWatchlistRepository:
             points.reverse()
             return points
 
-    def list_opportunities(self) -> list[NearOpportunity]:
+    def list_opportunities(
+        self, *, status: OpportunityStatus | None = None
+    ) -> list[NearOpportunity]:
         with self.exclusive():
-            rows = self._connection.execute(
-                "SELECT * FROM watchlist_opportunities ORDER BY last_seen_at DESC"
-            ).fetchall()
+            if status is None:
+                rows = self._connection.execute(
+                    "SELECT * FROM watchlist_opportunities ORDER BY last_seen_at DESC"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM watchlist_opportunities
+                    WHERE status = ?
+                    ORDER BY last_seen_at DESC
+                    """,
+                    (status.value,),
+                ).fetchall()
             return [_opportunity_from_row(row) for row in rows]
 
     def list_events(
