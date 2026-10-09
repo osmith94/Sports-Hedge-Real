@@ -111,6 +111,11 @@ def test_only_known_stale_quote_may_request_execution_reprice() -> None:
     }
     for reasons in blocked.values():
         assert execution_reprice_permitted(_decision(rejection_reasons=reasons)) is False
+    informational = _decision(
+        eligible_for_paper_simulation=True,
+        rejection_reasons=["missing_risk_evidence"],
+    )
+    assert execution_reprice_permitted(informational) is True
 
     assert execution_reprice_permitted(_decision(canonical_market_id=None)) is False
     unmatched = _decision(

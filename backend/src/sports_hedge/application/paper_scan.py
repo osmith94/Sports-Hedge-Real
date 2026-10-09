@@ -29,6 +29,7 @@ from sports_hedge.arbitrage.min_net_threshold import (
     OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED,
     resolve_min_net_threshold,
 )
+from sports_hedge.arbitrage.watchlist.economics import INFORMATIONAL_NONBLOCKING_REASONS
 from sports_hedge.arbitrage.payoff_scan import (
     DepthAwarePayoffScanner,
     PayoffScanResult,
@@ -502,6 +503,7 @@ class PaperScanService:
         risk_inputs = None
         risk = None
         if not liquidity_rejections:
+            # Optional heuristic score. Absence is telemetry, not a paper-entry veto.
             risk_inputs = self._risk_inputs(
                 left,
                 right,
@@ -511,9 +513,7 @@ class PaperScanService:
                 recent_volatility_bps=recent_volatility_bps,
                 quote_age_ms=quote_age_ms if quote_age_ms is not None else 10**9,
             )
-            if risk_inputs is None:
-                rejections.append("missing_risk_evidence")
-            else:
+            if risk_inputs is not None:
                 risk = self.risk_scorer.score(risk_inputs)
 
         execution_modes = {
@@ -859,9 +859,9 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _paper_blocking_reasons(reasons: list[str]) -> list[str]:
-    """Every remaining rejection blocks. Diagnostic labels are not rejections."""
+    """Every remaining rejection blocks. Optional risk-score evidence does not."""
 
-    return list(reasons)
+    return [reason for reason in reasons if reason not in INFORMATIONAL_NONBLOCKING_REASONS]
 
 
 def _default_execution_mode(venue: VenueName) -> LegExecutionMode:
