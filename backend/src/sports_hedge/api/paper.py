@@ -446,10 +446,14 @@ def get_paper_journal_holder() -> PaperOperationsService:
 def recover_orphaned_live_executions_at_startup() -> list[dict[str, Any]]:
     """Rebuild unambiguous orphaned attempts once, before live dispatch starts.
 
+    Also fail-closes paper PAPER_FILLING rows that have no in-memory plan and
+    no trade. That full watchlist recovery stays here, not on each capture.
     Callers that only resolve the paper service, and ``/health``, must not use this.
     """
 
-    return get_paper_journal_holder().recover_orphaned_live_executions()
+    holder = get_paper_journal_holder()
+    holder.reconcile_orphaned_paper_fills()
+    return holder.recover_orphaned_live_executions()
 
 
 def _unresolved_depends(value: Any) -> bool:

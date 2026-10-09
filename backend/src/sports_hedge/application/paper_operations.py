@@ -751,15 +751,19 @@ class PaperOperationsService:
             return None
         opportunity_id = _opportunity_id(decision.canonical_market_id)
         dispatched = now or datetime.now(UTC)
-        reconciled_ids = set(self.reconcile_orphaned_paper_fills(now=dispatched))
-        if (
-            opportunity_id in reconciled_ids
-            and decision.eligible_for_paper_simulation
-        ):
-            self._promote_reconciled_orphan(opportunity_id, decision)
-        opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
         current_watch = self.watchlist.repository.get(opportunity_id)
         existing_trade = self._get_trade_by_opportunity(opportunity_id)
+        if self._reconcile_orphan_for_opportunity(
+            opportunity_id,
+            current=current_watch,
+            existing_trade=existing_trade,
+            now=dispatched,
+        ):
+            if decision.eligible_for_paper_simulation:
+                self._promote_reconciled_orphan(opportunity_id, decision)
+            current_watch = self.watchlist.repository.get(opportunity_id)
+            existing_trade = self._get_trade_by_opportunity(opportunity_id)
+        opening_legs = [leg for leg in decision.fill_legs if leg.requested_stake > 0]
         if opening_legs:
             plan = self._plan_from_decision(
                 decision, opportunity_id, provenance, pricing_lane=pricing_lane
@@ -860,13 +864,18 @@ class PaperOperationsService:
         return candidate
 
     def reconcile_orphaned_paper_fills(self, *, now: datetime | None = None) -> list[str]:
-        """Fail-close PAPER_FILLING rows that cannot be recovered after restart."""
+        """Fail-close PAPER_FILLING rows that cannot be recovered after restart.
+
+        Startup/recovery owner only. Routine capture uses
+        ``_reconcile_orphan_for_opportunity`` so one decision does not scan the
+        whole watchlist.
+        """
 
         occurred_at = now or datetime.now(UTC)
         reconciled: list[str] = []
-        for item in self.watchlist.repository.list_opportunities():
-            if item.status is not OpportunityStatus.PAPER_FILLING:
-                continue
+        for item in self.watchlist.repository.list_opportunities(
+            status=OpportunityStatus.PAPER_FILLING
+        ):
             if item.opportunity_id in self._plans:
                 continue
             if self._get_trade_by_opportunity(item.opportunity_id) is not None:
@@ -877,6 +886,26 @@ class PaperOperationsService:
             )
             reconciled.append(item.opportunity_id)
         return reconciled
+
+    def _reconcile_orphan_for_opportunity(
+        self,
+        opportunity_id: str,
+        *,
+        current: NearOpportunity | None,
+        existing_trade: PaperTrade | None,
+        now: datetime,
+    ) -> bool:
+        """Close this row if it is an unrecoverable PAPER_FILLING orphan."""
+
+        if current is None or current.status is not OpportunityStatus.PAPER_FILLING:
+            return False
+        if opportunity_id in self._plans or existing_trade is not None:
+            return False
+        self.watchlist.reconcile_orphaned_paper_filling(
+            opportunity_id,
+            occurred_at=now,
+        )
+        return True
 
     def _promote_reconciled_orphan(self, opportunity_id: str, decision: PaperScanDecision) -> None:
         """A fresh qualifying decision may start a new attempt after orphan close."""

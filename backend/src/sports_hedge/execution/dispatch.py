@@ -366,7 +366,13 @@ def order_for_leg(
 
 
 def run_blocking(coro: Any) -> Any:
-    """Run one coroutine from the synchronous scanner seam."""
+    """Run one coroutine from a synchronous thread that does not own the scanner loop.
+
+    When a loop is already running on this thread, ``thread.join()`` stalls that
+    loop until the worker finishes. Price-2 item capture therefore runs this
+    persist/dispatch function off the scanner loop via ``asyncio.to_thread``.
+    Do not call this helper on the HOT/UNIVERSE event-loop thread.
+    """
 
     try:
         asyncio.get_running_loop()
