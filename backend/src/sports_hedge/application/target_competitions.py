@@ -687,6 +687,11 @@ TARGET_COMPETITIONS: tuple[TargetCompetition, ...] = (
             "primera division argentina",
             "primera división argentina",
             "liga profesional 2026",
+            # Observed Matchbook COMPETITION meta-tag on men's top-flight
+            # fixtures (census 2026-09-21; UNIVERSE report 2026-10-09, 13
+            # events). Exact alias only. Primera B Metropolitana, Primera
+            # Nacional, cups, women's and reserve labels stay unmatched.
+            "argentina liga profesional de fútbol",
         ),
         polymarket_gamma_series_id="10312",
         polymarket_gamma_sport="arg",
