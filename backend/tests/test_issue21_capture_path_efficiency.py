@@ -10,7 +10,6 @@ import asyncio
 import inspect
 import time
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
