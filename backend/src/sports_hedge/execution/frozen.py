@@ -42,6 +42,13 @@ from sports_hedge.application.execution_snapshot import (
     NativeOrderFreezeDiagnostic,
 )
 from sports_hedge.domain.models import MarketSide, VenueName
+from sports_hedge.execution.depth_plan import (
+    DepthPlanError,
+    NativeDepthPlan,
+    approved_back_limit_odds,
+    expected_average_odds,
+    sweep_back_levels,
+)
 from sports_hedge.execution.translate import (
     TranslationError,
     matchbook_limit_odds,
@@ -217,15 +224,20 @@ def _freeze_polymarket(
         )
     tick_size, minimum = inspected.tick_size, inspected.minimum_shares
     try:
+        plan = _plan_for_leg(leg)
+        limit_odds = approved_back_limit_odds(leg)
         native = polymarket_native_order(
             native_runner_id=runner,
             native_market_id=market,
             side=MarketSide.BACK,
-            decimal_odds=leg.displayed_odds,
+            decimal_odds=limit_odds,
             requested_stake=leg.requested_stake,
             tick_size=tick_size,
             minimum_shares=minimum,
         )
+        implied = Decimal(1) / limit_odds
+        if plan is not None and native.price < implied:
+            raise TranslationError("Polymarket tick cannot express the approved worst BUY price")
     except TranslationError as exc:
         return None, _diagnostic(
             venue=VenueName.POLYMARKET.value,
@@ -238,7 +250,7 @@ def _freeze_polymarket(
                 exc, fallback_stake=_optional_text(getattr(leg, "requested_stake", None))
             ),
         )
-    except (AttributeError, TypeError, InvalidOperation, ValueError):
+    except (AttributeError, TypeError, InvalidOperation, ValueError, DepthPlanError):
         return None, _diagnostic(
             venue=VenueName.POLYMARKET.value,
             frozen=False,
@@ -256,7 +268,7 @@ def _freeze_polymarket(
             native_runner_id=native.token_id,
             side=MarketSide.BACK.value,
             currency=str(getattr(leg, "currency", "") or "USD"),
-            approved_decimal_odds=_text(leg.displayed_odds),
+            approved_decimal_odds=_text(expected_average_odds(leg)),
             approved_stake=_text(leg.requested_stake),
             order_type=native.order_type,
             tick_size=native.tick_size,
@@ -264,6 +276,10 @@ def _freeze_polymarket(
             limit_price=_text(native.price),
             native_amount=_text(native.amount),
             native_shares=_text(native.shares),
+            approved_depth_worst_limit=_text(limit_odds),
+            expected_average=_text(expected_average_odds(leg)),
+            requested_total=_text(leg.requested_stake),
+            admitted_levels=_admitted_pairs(plan),
         ),
         _diagnostic(
             venue=VenueName.POLYMARKET.value,
@@ -293,7 +309,13 @@ def _freeze_matchbook(leg: Any) -> tuple[FrozenNativeOrder | None, NativeOrderFr
             intended_native_stake=_optional_text(getattr(leg, "requested_stake", None)),
         )
     try:
-        odds = matchbook_limit_odds(leg.displayed_odds, side=MarketSide.BACK)
+        plan = _plan_for_leg(leg)
+        limit_odds = approved_back_limit_odds(leg)
+        odds = matchbook_limit_odds(limit_odds, side=MarketSide.BACK)
+        if odds < limit_odds:
+            raise TranslationError("Matchbook back limit rounded below the approved worst level")
+        if plan is not None and odds > limit_odds:
+            raise TranslationError("Matchbook ladder snap would miss the approved worst BACK level")
         stake = matchbook_stake(leg.requested_stake)
         int(runner)
     except TranslationError as exc:
@@ -306,7 +328,7 @@ def _freeze_matchbook(leg: Any) -> tuple[FrozenNativeOrder | None, NativeOrderFr
                 exc, fallback_stake=_optional_text(getattr(leg, "requested_stake", None))
             ),
         )
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError, DepthPlanError):
         return None, _diagnostic(
             venue=VenueName.MATCHBOOK.value,
             frozen=False,
@@ -324,12 +346,16 @@ def _freeze_matchbook(leg: Any) -> tuple[FrozenNativeOrder | None, NativeOrderFr
             native_runner_id=runner,
             side=MarketSide.BACK.value,
             currency=str(getattr(leg, "currency", "") or "GBP"),
-            approved_decimal_odds=_text(leg.displayed_odds),
+            approved_decimal_odds=_text(expected_average_odds(leg)),
             approved_stake=_text(leg.requested_stake),
             order_type="back-lay",
             ladder_odds=_text(odds),
             native_stake=_text(stake),
             native_side="back",
+            approved_depth_worst_limit=_text(limit_odds),
+            expected_average=_text(expected_average_odds(leg)),
+            requested_total=_text(leg.requested_stake),
+            admitted_levels=_admitted_pairs(plan),
         ),
         _diagnostic(
             venue=VenueName.MATCHBOOK.value,
@@ -421,3 +447,20 @@ def _diagnostic(
         intended_native_shares=intended_native_shares,
         intended_limit_price=intended_limit_price,
     )
+
+
+def _plan_for_leg(leg: Any) -> NativeDepthPlan | None:
+    levels = list(getattr(leg, "levels", None) or [])
+    stake = getattr(leg, "requested_stake", None)
+    if not levels or stake is None or stake <= 0:
+        return None
+    plan = sweep_back_levels(levels, stake)
+    if not plan.fully_filled:
+        raise DepthPlanError("approved_stake_exceeds_executable_depth")
+    return plan
+
+
+def _admitted_pairs(plan: NativeDepthPlan | None) -> tuple[tuple[str, str], ...]:
+    if plan is None:
+        return ()
+    return plan.as_admitted_pairs()
