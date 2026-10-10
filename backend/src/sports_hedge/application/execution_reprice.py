@@ -1,4 +1,4 @@
-"""One exact-ID execution reprice immediately before a PAPER entry.
+"""One exact-ID execution reprice immediately before a paper or armed-live fill.
 
 Discovery pricing may qualify an opportunity from the latest known books,
 including when those books are past the paper-entry quote-age gate. That
@@ -6,8 +6,9 @@ discovery fact is QUALIFYING only. The fill uses a second, contemporaneous
 complete-set read of the same persisted native IDs. PAPER_ELIGIBLE is that
 refreshed decision, not the discovery snapshot.
 
-PAPER only. This module does not place venue orders and does not rediscover
-fixtures, markets, or matches.
+Paper fills stay simulated. Armed REAL may submit through the existing live
+package dispatcher after a fully reconciled hedge. This module does not
+rediscover fixtures, markets, or matches.
 """
 
 from __future__ import annotations
@@ -591,22 +592,13 @@ def _paper_operations(watchlist: WatchlistService) -> Any:
 
 
 def _open_iterative_trade(operations: Any, opportunity_id: str) -> Any | None:
-    from sports_hedge.paper.trades import PaperActiveTradePhase, PaperTradeState
+    from sports_hedge.application.paper_operations import iterative_trade_is_open
 
     getter = getattr(operations, "_get_trade_by_opportunity", None)
     trade = getter(opportunity_id) if callable(getter) else None
-    if trade is None or trade.state is not PaperTradeState.OPEN:
-        return None
-    if getattr(trade, "places_orders", False):
-        return None
-    if trade.unresolved_recovery or trade.active_trade_phase in {
-        PaperActiveTradePhase.EXIT_MANAGEMENT,
-        PaperActiveTradePhase.MONITORING_CAP_REACHED,
-        PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
-        PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE,
-    }:
-        return None
-    return trade
+    if iterative_trade_is_open(trade):
+        return trade
+    return None
 
 
 async def continue_iterative_paper_fills(
@@ -618,12 +610,14 @@ async def continue_iterative_paper_fills(
     pricing_lane: str | None,
     entry_decision: PaperScanDecision,
 ) -> None:
-    """Immediately reprice and PAPER-fill while a fresh accepted snapshot remains.
+    """Immediately reprice and fill while a fresh accepted snapshot remains.
 
     Each cycle fetches the exact native books again and may append one tranche
-    to the existing opportunity trade. The loop stops on the first gate that
-    rejects the new snapshot or refuses the fill. It does not wait for the
-    ordinary HOT cadence and does not reuse the previous snapshot.
+    to the existing opportunity trade. Paper stays simulated. Armed live only
+    continues after the previous tranche is fully filled and reconciled. The
+    loop stops on the first gate that rejects the new snapshot or refuses the
+    fill. It does not wait for the ordinary HOT cadence and does not reuse the
+    previous snapshot.
     """
 
     if not opportunity_id or not _claim_iteration(opportunity_id):
@@ -637,6 +631,7 @@ async def continue_iterative_paper_fills(
     try:
         decision = entry_decision
         while True:
+            await asyncio.sleep(0)
             operations = _paper_operations(watchlist)
             if _open_iterative_trade(operations, opportunity_id) is None:
                 return
@@ -688,7 +683,8 @@ async def continue_iterative_paper_fills(
                     snapshot=None if snapshot is None else snapshot.audit_line(),
                 )
                 return
-            outcome = operations.fill_from_execution_snapshot(
+            outcome = await asyncio.to_thread(
+                operations.fill_from_execution_snapshot,
                 opportunity_id,
                 refreshed.decision,
                 snapshot_id=snapshot.snapshot_id,

@@ -97,7 +97,12 @@ def scrubbed_snapshot_json(plan: PaperFillPlan) -> str | None:
     return json.dumps(scrub_secrets(payload), default=str)
 
 
-def recovery_context(plan: PaperFillPlan, trade_id: str) -> str:
+def recovery_context(
+    plan: PaperFillPlan,
+    trade_id: str,
+    *,
+    tranche_id: str = OPENING_TRANCHE_ID,
+) -> str:
     """Leg identity stored with the attempt so a later restart can rebuild a trade.
 
     Economics are not copied. The client order id is the same digest dispatch uses.
@@ -110,7 +115,7 @@ def recovery_context(plan: PaperFillPlan, trade_id: str) -> str:
         request = _request_for_leg(
             leg,
             trade_id=trade_id,
-            tranche_id=OPENING_TRANCHE_ID,
+            tranche_id=tranche_id,
             snapshot_json=plan.execution_snapshot_json,
         )
         if request is None:

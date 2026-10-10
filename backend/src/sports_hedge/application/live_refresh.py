@@ -210,6 +210,10 @@ LOGGER = logging.getLogger(__name__)
 def _accumulation_eligible(trade: Any) -> bool:
     """Open exposure that may request another Price-2 cycle, not a recovery."""
 
+    from sports_hedge.application.paper_operations import iterative_trade_is_open
+
+    if iterative_trade_is_open(trade):
+        return True
     if getattr(trade, "places_orders", False):
         return False
     if getattr(trade, "unresolved_recovery", False):
