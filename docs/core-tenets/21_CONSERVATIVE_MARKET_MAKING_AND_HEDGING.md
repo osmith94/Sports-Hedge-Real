@@ -6,7 +6,7 @@ Sports Hedge may develop a **separate MARKET MAKER strategy** that posts resting
 
 > **Discover gaps through UNIVERSE. Observe through STREAM. Quote conservatively. Reprice or withdraw unfilled Matchbook offers when the reference moves. Hedge confirmed Matchbook fills promptly. Never call an unmatched maker offer a guaranteed arb.**
 
-A target quoted margin is conditional on both the lay being matched and the hedge executing. It is **not a guaranteed profit** while an offer rests. This tenet authorises a future design and research strategy, **not venue order placement** or turning on real execution.
+A target quoted margin is conditional on both the lay being matched and the hedge executing. It is **not a guaranteed profit** while an offer rests. **Passive-maker fill behaviour cannot be established from paper-market data alone**: genuine fill probabilities, cancellation races and actual fill-to-hedge outcomes require observations from real, exchange-acknowledged orders. Consequently, after read-only shadow validation and a separate live-readiness gate, the intended empirical trial is **explicitly authorised, tiny real-money maker orders**, not an obligatory maker paper-trading performance phase. This tenet is a future design contract, **not current authorisation to place venue orders** or turn on real execution.
 
 ## 1. UNIVERSE is a candidate source, including unmatched fixtures
 
@@ -28,7 +28,7 @@ Do not fabricate a Matchbook listing if one does not exist. Do not let a vague l
 
 ## 2. Initial opportunity profile: pre-match and hedgeable
 
-Start with **one selected pre-match fixture and one resting quote**, paper/shadow only; no in-play offers. Prefer less volatile windows with sufficient *Polymarket* hedge depth and reliable approved regulation-time 1X2 settlement.
+Start with **one selected pre-match fixture and one resting quote**. Initial engineering and model testing remain shadow/read-only; the **first genuine fill-evidence phase is a separately authorised micro-live trial**, not paper claims about whether passive quotes get matched. No in-play offers. Prefer less volatile windows with sufficient *Polymarket* hedge depth and reliable approved regulation-time 1X2 settlement.
 
 Major competitions may offer deeper hedges, but **do not exclude lower leagues from candidate discovery**: their thin Matchbook markets could be our gap, provided the price is stable enough, native identity is confirmed, and the hedging venue has genuinely adequate liquidity.
 
@@ -39,7 +39,11 @@ Distinguish deliberately:
 - **Unmatched canonical market:** a mapping/availability investigation until verified, not a trading shortcut.
 - **Stale Matchbook data:** a possible signal of neglected odds, but must be refreshed before quoting.
 
-Example *initial test parameters* (not permanent tenet-imposed defaults or proven profitable settings): quote only 6–24 hours pre-kickoff; stop new offers 90 minutes before kickoff; aim for 2% conditional net margin; cap Matchbook lay **liability** at £10/fixture. Operator risk settings, venue minimums, and empirical tests can require tighter rules.
+Example *initial trial parameters* (not permanent tenet-imposed defaults or proven profitable settings): quote only 6–24 hours pre-kickoff; stop new offers 90 minutes before kickoff; aim for 2% **conditional** net margin; propose an initial **£5 Matchbook lay stake** if the venue's current minimum stake, odds increment and account rules permit it; cap Matchbook **lay liability** independently (illustratively £10 per fixture), with additional hard caps on **total native capital committed across both venues**, maximum matched-but-unhedged exposure and maximum tolerated recovery loss. One quote and one fixture only.
+
+**Stake is not liability.** At decimal lay odds 4.00, a £5 backer stake exposes the layer to **£15 liability** before the costs and funds needed for the Polymarket BUY hedge. That hypothetical quote must be rejected under a £10 liability limit rather than silently increasing the limit. Equally, if the exchange or Polymarket hedge has a minimum size above the configured caps, **skip the trial**, report `below_venue_minimum` / `hedge_minimum_not_supported`, and request new operator approval for any changed size. Never automatically upsize real money to satisfy an API minimum. The risk budget must include commission, FX costs, hedge expenditure and recovery capacity—not merely £5.
+
+The selection of £5 is a **proposed small initial order**, not a verified venue minimum, guaranteed match size, permission to trade, or maximum possible loss.
 
 ## 3. Single economic and settlement authority
 
@@ -65,7 +69,7 @@ STREAM supplies Polymarket live public market observations; it is **not a second
 1. Select a fixture/registered market from UNIVERSE, BACKGROUND, HOT or the Candidate Radar.
 2. Wait for a **complete, correctly sequenced, fresh Polymarket order-book state** for the approved token and for sufficient Matchbook status evidence. Missing, incomplete, disconnected or unvalidated feeds block new quotes.
 3. Compute the target Matchbook lay odds, backer stake, lay liability and hypothetical hedge quantity that achieve the configured net conditional margin.
-4. **Shadow stage:** log the hypothetical intended quote only; do not claim an exchange accepted or matched it.
+4. **Shadow stage:** log the hypothetical intended quote only; do not claim an exchange accepted or matched it. **Separately authorised micro-live stage:** only after all readiness gates are met, submit one genuinely bounded Matchbook offer and capture its authoritative exchange order ID, status and acknowledgements. Shadow signals never automatically trigger a live order.
 5. When Polymarket moves, coalesce high-frequency changes, recompute hedge depth and margin, and decide to **hold, amend, reduce or cancel the unmatched Matchbook offer**. Prevent churn and respect venue pacing.
 6. On insufficient hedge depth, suspension, stale/disconnected feed, risk-limit breach or pre-match cutoff, request cancellation and **wait for authoritative cancellation acknowledgement**. Cancellation submission cannot erase a simultaneous fill.
 7. Only a **confirmed Matchbook match**, full or partial, triggers a hedge/recovery action for the matched amount.
@@ -74,7 +78,9 @@ Updates from the Polymarket feed ordinarily change **outstanding quotes**, not b
 
 ## 5. Hedge trigger, exposure and adverse selection
 
-**Default future hedge trigger: confirmed Matchbook matched quantity.** Recalculate the exact hedge quantity for actual fills (including partial fills), independently revalidate Polymarket executable book/depth and market state, and use existing fees/FX/settlement/Treasury evidence before execution.
+**Default future hedge trigger: confirmed Matchbook matched quantity.** Recalculate the exact hedge quantity for actual fills (including partial fills), independently revalidate Polymarket executable book/depth and market state, and use existing fees/FX/settlement/Treasury evidence before execution. A £5 original stake does not imply £5 of hedge expenditure; derive the necessary Polymarket BUY shares, executable cost and required account balance from the full state-payoff hedge model.
+
+**Before posting even a £5 real lay**, independently verify that the exact Polymarket equivalent market is presently open and hedgeable at the worst permitted fill size, with adequate current executable depth, venue-specific fees, FX, **spendable collateral/allowance** and a reserved loss-recovery budget. This readiness snapshot does **not** reserve future third-party liquidity or guarantee the hedge will still be available when the lay fills. Revalidate again after every confirmed full or partial Matchbook fill. If pre-quote hedge readiness is absent, do **not** post the lay.
 
 On a fill, **exposure reduction is higher priority than maintaining the originally desired margin**. A hedge may no longer be profitable; do not wait indefinitely for the market to revert or let an opening-arb minimum-profit requirement prevent a necessary emergency risk-reducing action.
 
@@ -101,32 +107,49 @@ On feed failure stop new quoting and cancel unmatched offers where authorised/po
 
 ## 7. Staged development and evidence requirements
 
-**Stage A — Research and read-only candidate radar.** Identify thin/stale Matchbook and unmatched UNIVERSE opportunities, including reason codes why each is/is not eligible. Verify Polymarket hedge market and depth. Show candidate counts and limitations; no bets.
+**Stage A — Research and read-only candidate radar (no venue writes).** Identify thin/stale Matchbook and unmatched UNIVERSE opportunities, including reason codes why each is/is not eligible. Verify Polymarket hedge market, native contract identity, current depth and account/territory execution eligibility. Show candidate counts and limitations; no bets.
 
-**Stage B — One-fixture shadow quote.** Use STREAM and exact native market mapping to compute desired quote, cancellation/repricing decisions and intended hedge size. Model conservative order-queue and latency outcomes from observed feeds; label **hypothetical match probability**, not an observed Matchbook fill. No venue write.
+**Stage B — One-fixture shadow quote and failure testing (no venue writes).** Use STREAM and exact native mapping to compute proposed quote odds, lay stake, **liability**, cancel/reprice decisions, hedge size/cost and recovery budget. Exercise fake order-status feeds, order-ack/cancel/fill races, partial fills, duplicate notifications, webhook gaps, missing PM liquidity, REST/WS outages and kill switch with deterministic tests and conservative latency scenarios. These tests prove **software behaviour**, not that a resting passive quote would have filled in a real order queue. Paper-model P&L and maker fill rates **are not an acceptance prerequisite or substitute for actual maker fills**.
 
-**Stage C — Controlled paper lifecycle.** Simulate resting quotes, partial and adverse-selection fills, cancellation races, prompt hedge revalidation, residual exposure/recovery and Treasury constraints. Do not fabricate paper fills from passive offers merely being posted.
+**Stage C — Separate live-order readiness and explicit operator sign-off (still no venue writes).** Before any micro-live trial, verify all of:
 
-**Stage D — Explicitly authorised micro-live trial only.** Separately reviewed execution permissions, order-status and reconciliation readiness, native kill switch, hard caps, validated shadow/paper evidence and manual sign-off. Scale only on measured **real matched-to-hedged** outcomes (Core Tenet 18).
+- Live execution capability and region/account/venue permission for **both** Matchbook and Polymarket; no access-control or geolocation workaround.
+- Independently tested native **Matchbook LAY** submit, status, partial-fill and cancel-ack lifecycle, with exact native order ID, order-ownership reconciliation and a reliable way to learn whether a fill occurred while cancellation was pending.
+- Independently tested Polymarket BUY capability/readiness for the actual mapped hedge token, venue minimum orders, funding/collateral, allowances, current depth and fees/FX. Live PM trade permission must not be inferred from access to the public STREAM market feed.
+- A **maker-specific pre-quote execution plan** and **post-fill fresh hedge/recovery plan** meeting Core Tenets 02 and 18. The current taker opening Price-2 gate does **not** itself authorise maker execution; any necessary changes to those execution contracts must be separately proposed/reviewed rather than silently bypassed.
+- Hard configurable Matchbook stake, **lay liability**, combined cash-at-risk, total outstanding quotes, max unhedged amount/time and recovery-loss limits. Prove limits are enforced by the actual venue transport, not only the UI. Native Treasury balances for *both* venues must be spendable and not double counted.
+- A tested independent **market-maker kill switch**, idempotent state transitions, missed-fill recovery, reconciliation, operator supervision and a clear manual escalation / loss-limiting fallback if PM becomes unavailable.
+- Owner-specific written approval of **one eligible fixture, contract, timing window, order size, liability/combined-capital limits and execution arming**, after checking current venue minimums. No automatic arming merely because a draft tenet is merged.
 
-The STREAM Phase-1 shadow implementation can proceed independently. This document is **not approval** to add MARKET MAKER to that PR, execute real orders or deploy anything.
+**Stage D — Explicitly authorised micro-live trial with genuine small orders.** Start with **one £5 Matchbook lay stake if and only if allowed within the already approved liability, native Treasury, minimum-order and Polymarket hedge-size limits**; otherwise **do not place an order**. A nominal £5 quoted stake does not cap liability or total loss. No in-play, no multiple parallel orders, no automatic size increase, and no unattended execution.
+
+Once an exchange-authoritative full or partial Matchbook match is confirmed, **immediately initiate the separately validated Polymarket BUY hedge for the matched exposure** (subject to fresh fill-time depth/readiness). Log request, acknowledgment, actual fill amount, slippage, residual exposure and recovery action. A submitted hedge is not a completed hedge; cancellation may race with a Matchbook fill. Stop new quoting if any required system is degraded. If a hedge fails or ceases to be profitable, invoke predefined bounded risk-reduction/recovery controls rather than assuming the margin can be preserved.
+
+Learn from **real order** evidence: unmatched dwell time, matched volume, maker fill probability with an honest quoted-time denominator, adverse selection, cancel-vs-fill latency, Matchbook fill-to-Polymarket-hedge latency, realised minimum settlement payoff after all costs, failed hedges and loss frequency. Small sample sizes remain inconclusive; only expand exposure following separately reviewed real data, not paper profitability.
+
+**Sequence:** shadow software/readiness tests → separately approved small real maker + hedge trial → review genuine fill and recovery evidence → only then consider expansion. An extended simulated maker-fill trial is optional diagnostic work, **not a mandatory gate that purports to prove real passive-order fills**.
+
+The STREAM Phase-1 shadow implementation can proceed independently. **This documentation change does not permit live execution, change launcher flags, deploy a strategy or authorise any £5 bet today.**
 
 ## 8. Required audit, dashboard and learning metrics
 
-A dedicated MARKET MAKER view should show **candidate source**, exact fixture and market identity, mapped native IDs, equivalence evidence, Matchbook spread/depth/age, Polymarket hedge book age/depth, projected quote odds, stake, **liability**, conditional margin, native capital requirement, status and exclusion reason.
+A dedicated MARKET MAKER view should show **candidate source**, exact fixture and market identity, mapped native IDs, equivalence evidence, Matchbook spread/depth/age, Polymarket hedge book age/depth, projected quote odds, **backer stake**, **lay liability**, **total combined funds-at-risk** and reserved hedge/recovery capital separately, conditional margin, status and exclusion reason. For real trials display the *explicit operator approval and independent live-arming state*, venue order acknowledgment, matched/unmatched split and hedge completion separately.
 
 Retain immutable timestamps/evidence for proposed/accepted/amended/cancelled quotes, provider acknowledgements, *confirmed* matches, partial fills, remaining exposure, Polymarket pre-hedge executable depth and actual hedge fills, fees, FX, slippage, recovery actions and settlement.
 
-Report separately: candidate-to-eligible conversion; time quotes were active; matched stake and **fill rate** (with denominator); matched-to-fully-hedged conversion; fill-to-hedge latency; maximum unhedged exposure/duration; quoted vs realised net margins; fee/FX P&L; adverse-selection loss; forced-loss hedge/recovery frequency; stale/unsupported/unmatched rejection counts.
+Report separately: candidate-to-eligible conversion; time quotes were active; **real vs simulated** matched stake and fill rates (with denominators); matched-to-fully-hedged conversion; fill-to-hedge latency; maximum unhedged exposure/duration; quoted vs realised net margins; fee/FX P&L; adverse-selection loss; forced-loss hedge/recovery frequency; expired/stale/unsupported/unmatched and **below minimum size** rejection counts. Shadow-model fills may never be reported as real exchange matches.
 
 ## Review checks
 
 - [ ] Unmatched UNIVERSE fixtures can appear on radar **without bypassing exact registration/settlement matching**.
 - [ ] Thin/stale Matchbook odds are a **discovery signal**, not execution evidence; fresh Polymarket hedge depth is genuinely sufficient.
-- [ ] One initial pre-match quote and strictly bounded size/liability; no initial in-play trading.
+- [ ] Initial pre-match only, one quote; **£5 nominal lay stake is illustrative, with independent hard caps on lay liability and total capital at risk**. Do not silently increase stake to meet provider minimums.
 - [ ] All lay/payoff/margin math shares existing fees, FX, native capital and settlement authorities.
 - [ ] A resting passive offer never becomes Best Arb, executable taker size, or guaranteed profit.
 - [ ] Polymarket changes manage unmatched quote; **only confirmed Matchbook fills** initiate default hedging.
 - [ ] Hedge/recovery handles partial fills, cancellation races, stale/disconnected feed and adverse selection; exposure is explicit.
 - [ ] Provider slots, active-trade priority, Windows runtime stability and execution-disabled defaults are preserved.
-- [ ] Shadow, paper and real evidence cannot be mistaken for each other; no real execution without separate approval.
+- [ ] Shadow and deterministic fake-fill tests verify logic, **not actual Matchbook maker fill probability**; no mandatory performance claims from paper orders.
+- [ ] The micro-live readiness gate is separately reviewed, includes region/account permissions, native lay and hedge minimums, hedge/collateral readiness, maker-specific execution contracts, risk recovery, idempotency, and an independent kill switch.
+- [ ] Actual tiny real maker orders and Polymarket BUY hedges require *explicit per-trial owner approval and live arming*. No strategy execution is authorised merely by this documentation.
+- [ ] Shadow, paper and real evidence cannot be mistaken for each other; all real fills and the hedged/unhedged state are exchange-acknowledged.
