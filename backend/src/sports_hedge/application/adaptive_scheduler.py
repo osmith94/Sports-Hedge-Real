@@ -74,6 +74,8 @@ LANE_EXECUTION_CANDIDATE = "execution_candidate"
 LANE_HOT = ScanLane.HOT.value
 LANE_BACKGROUND = "background"
 LANE_UNIVERSE = ScanLane.UNIVERSE.value
+LANE_STREAM = "stream"
+STREAM_LANE_WEIGHT = 16
 
 
 class SchedulerBand(IntEnum):
@@ -164,6 +166,8 @@ class SchedulerWork:
             return LANE_HOT
         if text == LANE_BACKGROUND:
             return LANE_BACKGROUND
+        if text == LANE_STREAM:
+            return LANE_STREAM
         return LANE_UNIVERSE
 
 
@@ -210,6 +214,8 @@ def lane_weight(lane: str) -> int:
         return UNIVERSE_LANE_WEIGHT
     if normalized == LANE_BACKGROUND:
         return BACKGROUND_LANE_WEIGHT
+    if normalized == LANE_STREAM:
+        return STREAM_LANE_WEIGHT
     return HOT_LANE_WEIGHT
 
 
@@ -222,6 +228,8 @@ def classify_value_class(work: SchedulerWork) -> SchedulerValueClass:
     low_value = _is_low_value(work)
     if lane == LANE_UNIVERSE:
         return SchedulerValueClass.UNIVERSE
+    if lane == LANE_STREAM:
+        return SchedulerValueClass.LOW_VALUE
     if low_value:
         return SchedulerValueClass.LOW_VALUE
     if lane == LANE_HOT:

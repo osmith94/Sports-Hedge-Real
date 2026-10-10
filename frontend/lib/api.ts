@@ -2794,3 +2794,101 @@ export type PaperLedgerReconciliation = {
 export function getPaperLedgerReconciliation(): Promise<PaperLedgerReconciliation> {
   return request<PaperLedgerReconciliation>("/paper/ledger/reconciliation");
 }
+
+export type StreamCandidateStatus = {
+  catalogue_row_id: string;
+  register_canonical_key: string;
+  trustworthy: boolean;
+  net_edge?: string | null;
+  rejection_reasons: string[];
+  stream_quote_at?: string | null;
+  matchbook_quote_at?: string | null;
+  pair_age_ms?: number | null;
+  skew_ms?: number | null;
+  data_class: string;
+  executable: boolean;
+  price2: boolean;
+  paper_entry: boolean;
+};
+
+export type StreamStatus = {
+  module: string;
+  phase: string;
+  enabled: boolean;
+  paused: boolean;
+  connection_status: string;
+  canonical_event_id?: string | null;
+  home_team?: string | null;
+  away_team?: string | null;
+  competition?: string | null;
+  registered_market_count: number;
+  subscribed_market_count: number;
+  token_id_count: number;
+  skipped_unavailable: number;
+  reconnect_count: number;
+  last_full_snapshot_at?: string | null;
+  last_incremental_update_at?: string | null;
+  matchbook_request_count: number;
+  matchbook_rate_limited_count: number;
+  coalesced_event_count: number;
+  dropped_event_count: number;
+  suppressed_event_count?: number;
+  last_trigger_reason?: string | null;
+  last_probability_delta?: string | null;
+  last_dispatch_delay_ms?: number | null;
+  matchbook_requests_by_trigger?: Record<string, number>;
+  price_move_probability_points?: string;
+  error_bad_message_count: number;
+  unknown_token_count: number;
+  ignored_best_bid_ask_count: number;
+  resync_count: number;
+  last_error?: string | null;
+  token_cap: number;
+  max_fixtures: number;
+  diagnostic_reads_fetch_providers: boolean;
+  paper_opened: boolean;
+  orders_placed: boolean;
+  candidates: StreamCandidateStatus[];
+  limitations: string[];
+};
+
+export function getStreamStatus(): Promise<StreamStatus> {
+  return request<StreamStatus>("/stream/status");
+}
+
+export async function selectStreamFixture(canonicalEventId: string): Promise<StreamStatus> {
+  const response = await fetch(`${API_BASE}/stream/select`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ canonical_event_id: canonicalEventId }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<StreamStatus>;
+}
+
+export async function pauseStream(): Promise<StreamStatus> {
+  const response = await fetch(`${API_BASE}/stream/pause`, { method: "POST", cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<StreamStatus>;
+}
+
+export async function resumeStream(): Promise<StreamStatus> {
+  const response = await fetch(`${API_BASE}/stream/resume`, { method: "POST", cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<StreamStatus>;
+}
+
+export async function removeStreamFixture(): Promise<StreamStatus> {
+  const response = await fetch(`${API_BASE}/stream/remove`, { method: "POST", cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<StreamStatus>;
+}
