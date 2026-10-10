@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 
 from sports_hedge.application.active_trade_recovery import remaining_book_levels
+from sports_hedge.application.execution_snapshot import FrozenNativeOrder
 from sports_hedge.application.paper_scan import _fill_legs_from_observations
 from sports_hedge.arbitrage.depth import (
     DepthAwareCompleteSetScanner,
@@ -29,6 +30,7 @@ from sports_hedge.execution.depth_plan import (
     conservative_complete_set_solution,
     exact_frozen_settlement,
     qualifies_at_conservative_limits,
+    qualifies_frozen_native_orders,
     stamp_fill_leg_depth_plan,
     sweep_back_levels,
 )
@@ -42,6 +44,7 @@ from sports_hedge.execution.frozen import freeze_native_orders
 from sports_hedge.execution.models import VenueOrderResult, VenueOrderStatus
 from sports_hedge.execution.package import execution_armed
 from sports_hedge.execution.translate import POLYMARKET_ORDER_TYPE as PM_FAK
+from sports_hedge.execution.translate import matchbook_stake
 from sports_hedge.fees.cost import (
     CostKnownStatus,
     FeeBasis,
@@ -204,9 +207,7 @@ def test_five_pound_sweep_uses_second_level_worst_limit_not_top_of_book() -> Non
         gbp_per_unit=fx,
         minimum_net_edge=Decimal("0.01"),
     )
-    total_gbp, min_pnl, states = exact_frozen_settlement(
-        matched, costs=costs, gbp_per_unit=fx
-    )
+    total_gbp, min_pnl, states = exact_frozen_settlement(matched, costs=costs, gbp_per_unit=fx)
     assert total_gbp > 0
     assert min_pnl > 0
     assert set(states) == {"home", "away"}
@@ -505,6 +506,7 @@ def test_fill_legs_stamp_worst_limit_from_observations() -> None:
             )
         ],
     )
+
     # Pair with an empty right observation that has no matching selected quote.
     class _Right:
         venue = VenueName.POLYMARKET
@@ -574,7 +576,7 @@ def test_theoretical_solver_ratio_is_not_proof_for_the_frozen_pair() -> None:
         VenueName.POLYMARKET: _cost(VenueName.POLYMARKET, action=MarketAction.BUY),
     }
     fx = {"GBP": Decimal(1), "USD": GBP_PER_USD}
-    theoretical = conservative_complete_set_solution( [mb, pm], costs=costs, gbp_per_unit=fx)
+    theoretical = conservative_complete_set_solution([mb, pm], costs=costs, gbp_per_unit=fx)
     assert theoretical.is_arbitrage is True
     assert theoretical.roi >= Decimal("0.01")
     assert (
@@ -634,3 +636,80 @@ def test_generalized_dnb_refund_state_is_included_in_exact_payoff() -> None:
     assert states["draw"] == Decimal(0)
     assert total == Decimal("10.00")
     assert minimum > 0
+
+
+def test_pre_snap_pair_can_pass_while_frozen_native_rounding_fails_min_net() -> None:
+    mb = stamp_fill_leg_depth_plan(
+        PaperOpportunityLeg(
+            outcome="home",
+            venue=VenueName.MATCHBOOK,
+            source_market_id="mb-mkt",
+            source_runner_id="101",
+            source_event_id="evt-mb",
+            currency="GBP",
+            requested_stake=Decimal("10.009"),
+            displayed_odds=Decimal("2.02"),
+            levels=[_level("2.02", "100")],
+        )
+    )
+    pm = stamp_fill_leg_depth_plan(
+        PaperOpportunityLeg(
+            outcome="away",
+            venue=VenueName.POLYMARKET,
+            source_market_id="condition-1",
+            source_runner_id=TOKEN,
+            source_event_id="evt-pm",
+            currency="USD",
+            requested_stake=Decimal("12.51125"),
+            displayed_odds=Decimal("2.02"),
+            levels=[_level("2.02", "100")],
+        )
+    )
+    costs = {
+        VenueName.MATCHBOOK: _cost(VenueName.MATCHBOOK, action=MarketAction.BACK),
+        VenueName.POLYMARKET: _cost(VenueName.POLYMARKET, action=MarketAction.BUY),
+    }
+    fx = {"GBP": Decimal(1), "USD": GBP_PER_USD}
+    assert qualifies_at_conservative_limits(
+        [mb, pm],
+        costs=costs,
+        gbp_per_unit=fx,
+        minimum_net_edge=Decimal("0.01"),
+    )
+    assert matchbook_stake(mb.requested_stake) == Decimal("10.00")
+    frozen = (
+        FrozenNativeOrder(
+            venue=VenueName.MATCHBOOK.value,
+            native_event_id="evt-mb",
+            native_market_id="mb-mkt",
+            native_runner_id="101",
+            side=MarketSide.BACK.value,
+            currency="GBP",
+            approved_decimal_odds="2.02",
+            approved_stake="10.009",
+            ladder_odds="2.02",
+            native_stake="10.00",
+        ),
+        FrozenNativeOrder(
+            venue=VenueName.POLYMARKET.value,
+            native_event_id="evt-pm",
+            native_market_id="condition-1",
+            native_runner_id=TOKEN,
+            side=MarketSide.BACK.value,
+            currency="USD",
+            approved_decimal_odds="2.02",
+            approved_stake="12.51125",
+            limit_price="0.4950495049504950495049504950",
+            native_amount="12.51",
+        ),
+    )
+    assert (
+        qualifies_frozen_native_orders(
+            frozen,
+            [mb, pm],
+            costs=costs,
+            gbp_per_unit=fx,
+            minimum_net_edge=Decimal("0.01"),
+        )
+        is False
+    )

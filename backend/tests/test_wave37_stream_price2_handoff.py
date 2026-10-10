@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,6 +24,7 @@ from test_issue31_stream_phase1 import (
     _wait_until,
 )
 
+from sports_hedge.application.execution_reprice import ExecutionCaptureResult
 from sports_hedge.application.provider_access import ProviderAccessLayer
 from sports_hedge.application.stream.handoff import StreamPrice2Handoff
 from sports_hedge.application.stream.runtime import StreamRuntime
@@ -60,9 +62,12 @@ async def test_handoff_uses_existing_capture_and_does_not_place_orders(monkeypat
     async def capture(decision, runtime):
         calls.append(runtime.identity.catalogue_row_id)
         assert decision.canonical_event_id == "evt-stream-1"
-        return SimpleNamespace(
+        return ExecutionCaptureResult(
             entry_decision=decision,
             snapshot=SimpleNamespace(accepted=True, snapshot_id="exec:stream:1"),
+            price2_accepted=True,
+            paper_opened=True,
+            orders_placed=False,
         )
 
     handoff = StreamPrice2Handoff(capture=capture)
@@ -146,9 +151,12 @@ async def test_populated_books_and_coalesced_mb_schedule_existing_price2(monkeyp
 
     async def capture(decision, runtime):
         calls.append(runtime.identity.catalogue_row_id)
-        return SimpleNamespace(
+        return ExecutionCaptureResult(
             entry_decision=decision,
             snapshot=SimpleNamespace(accepted=True, snapshot_id="exec:stream:2"),
+            price2_accepted=True,
+            paper_opened=True,
+            orders_placed=False,
         )
 
     runtime = await _pin_runtime(transport, fetch)
@@ -194,3 +202,87 @@ async def test_populated_books_and_coalesced_mb_schedule_existing_price2(monkeyp
     assert status.orders_placed is False
     assert status.phase == "wave37_stream_price2"
     await runtime.shutdown()
+
+
+def _stream_pin():
+    return __import__(
+        "sports_hedge.application.stream.pin", fromlist=["streamable_markets"]
+    ).streamable_markets([_row()])
+
+
+async def _open_one(handoff: StreamPrice2Handoff, capture) -> StreamPrice2Handoff:
+    handoff.bind_capture(capture)
+    await handoff.maybe_open(
+        pin=_stream_pin(),
+        candidates=[
+            StreamCandidate(
+                catalogue_row_id="amc-stream-1",
+                register_canonical_key="MATCH_RESULT_FT",
+                trustworthy=True,
+                net_edge="0.04",
+                rejection_reasons=(),
+                stream_quote_at=NOW.isoformat(),
+                matchbook_quote_at=NOW.isoformat(),
+                pair_age_ms=10,
+                skew_ms=5,
+            )
+        ],
+        decisions={"amc-stream-1": _decision()},
+    )
+    return handoff
+
+
+@pytest.mark.asyncio
+async def test_eligible_without_persisted_fill_is_not_paper_opened(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sports_hedge.application.stream.handoff.execution_reprice_permitted",
+        lambda _decision: True,
+    )
+
+    async def capture(decision, runtime):
+        del runtime
+        assert decision.eligible_for_paper_simulation is True
+        return ExecutionCaptureResult(
+            entry_decision=decision,
+            snapshot=SimpleNamespace(accepted=True, snapshot_id="exec:eligible-no-fill"),
+            price2_accepted=True,
+            paper_opened=False,
+            orders_placed=False,
+        )
+
+    handoff = await _open_one(StreamPrice2Handoff(), capture)
+    assert handoff.accepted_count == 1
+    assert handoff.paper_opened is False
+    assert "amc-stream-1" in handoff.accepted_rows
+    assert handoff.paper_opened_rows == set()
+    assert handoff.orders_placed is False
+    assert execution_armed(Settings()) is False
+
+
+@pytest.mark.asyncio
+async def test_armed_flag_without_submit_is_not_orders_placed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sports_hedge.application.stream.handoff.execution_reprice_permitted",
+        lambda _decision: True,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.package.execution_armed",
+        lambda _settings: True,
+    )
+
+    async def capture(decision, runtime):
+        del runtime
+        return ExecutionCaptureResult(
+            entry_decision=decision,
+            snapshot=SimpleNamespace(accepted=True, snapshot_id="exec:armed-no-order"),
+            price2_accepted=True,
+            paper_opened=True,
+            orders_placed=False,
+            orders_submitted=0,
+        )
+
+    handoff = await _open_one(StreamPrice2Handoff(), capture)
+    assert handoff.accepted_count == 1
+    assert handoff.paper_opened is True
+    assert handoff.orders_placed is False
+    assert execution_armed(Settings()) is False

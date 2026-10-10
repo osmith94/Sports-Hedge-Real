@@ -187,9 +187,7 @@ def record_execution_snapshot_attempt(
     with _EXECUTION_AUDIT_LOCK:
         if not snapshot.execution_cycle:
             counter = getattr(watchlist, "next_execution_cycle", None)
-            snapshot.execution_cycle = (
-                int(counter(opportunity_id)) if callable(counter) else 1
-            )
+            snapshot.execution_cycle = int(counter(opportunity_id)) if callable(counter) else 1
         outcome = CYCLE_REJECTED if not snapshot.accepted else CYCLE_ACCEPTED
         recorder(
             snapshot_id=snapshot.snapshot_id,
@@ -275,6 +273,12 @@ class ExecutionCaptureResult:
     discovery_decision: PaperScanDecision | None = None
     entry_decision: PaperScanDecision | None = None
     entry_history: list[Any] | None = None
+    snapshot: ExecutionSnapshot | None = None
+    price2_accepted: bool = False
+    paper_opened: bool = False
+    orders_placed: bool = False
+    paper_trade_id: str | None = None
+    orders_submitted: int = 0
 
 
 def execution_reprice_permitted(decision: PaperScanDecision) -> bool:
@@ -485,6 +489,7 @@ async def capture_with_execution_reprice(
         return ExecutionCaptureResult(
             discovery_history=discovery_history,
             discovery_decision=discovery,
+            snapshot=refreshed.snapshot,
         )
 
     if not price2_entry_authorized(refreshed.snapshot):
@@ -525,6 +530,8 @@ async def capture_with_execution_reprice(
             discovery_decision=discovery,
             entry_decision=refreshed.decision,
             entry_history=entry_history,
+            snapshot=refreshed.snapshot,
+            price2_accepted=False,
         )
 
     log_execution_phase(
@@ -564,11 +571,20 @@ async def capture_with_execution_reprice(
         pricing_lane=pricing_lane,
         entry_decision=refreshed.decision,
     )
+    paper_opened, orders_placed, trade_id, submitted = _recorded_opening_evidence(
+        watchlist, opportunity_id
+    )
     return ExecutionCaptureResult(
         discovery_history=discovery_history,
         discovery_decision=discovery,
         entry_decision=refreshed.decision,
         entry_history=list(entry_history or []),
+        snapshot=refreshed.snapshot,
+        price2_accepted=price2_entry_authorized(refreshed.snapshot),
+        paper_opened=paper_opened,
+        orders_placed=orders_placed,
+        paper_trade_id=trade_id,
+        orders_submitted=submitted,
     )
 
 
@@ -583,6 +599,49 @@ def _claim_iteration(opportunity_id: str) -> bool:
 def _release_iteration(opportunity_id: str) -> None:
     with _ITERATION_GUARD:
         _ITERATION_ACTIVE.discard(opportunity_id)
+
+
+def _recorded_opening_evidence(
+    watchlist: WatchlistService, opportunity_id: str
+) -> tuple[bool, bool, str | None, int]:
+    """Persisted paper trade / live order evidence. Arming is not evidence."""
+
+    from sports_hedge.execution.dispatch import opening_package_id
+    from sports_hedge.paper.trades import PaperLegFillKind, PaperTradeState
+
+    operations = _paper_operations(watchlist)
+    getter = getattr(operations, "_get_trade_by_opportunity", None)
+    trade = getter(opportunity_id) if callable(getter) else None
+    if trade is None:
+        return False, False, None, 0
+    filled = any(
+        getattr(leg, "filled_stake", 0) > 0
+        and getattr(leg, "fill_kind", PaperLegFillKind.UNFILLED) is not PaperLegFillKind.UNFILLED
+        for leg in getattr(trade, "legs", ()) or ()
+    )
+    opened = (
+        trade.state
+        in {
+            PaperTradeState.OPEN,
+            PaperTradeState.PARTIAL,
+            PaperTradeState.CLOSED,
+        }
+        and filled
+    )
+    live_fills = [
+        leg
+        for leg in getattr(trade, "legs", ()) or ()
+        if getattr(leg, "fill_kind", None) is PaperLegFillKind.LIVE_VENUE
+    ]
+    submitted = len(live_fills)
+    placed = bool(getattr(trade, "places_orders", False) and live_fills)
+    if getattr(trade, "places_orders", False) and not placed:
+        store = getattr(operations, "_live_attempt_store", None)
+        attempt = store().get(opening_package_id(trade.trade_id)) if callable(store) else None
+        orders = [] if not isinstance(attempt, dict) else attempt.get("orders") or []
+        submitted = max(submitted, len(orders) if isinstance(orders, list) else 0)
+        placed = submitted > 0
+    return opened, placed, str(trade.trade_id), submitted
 
 
 def _paper_operations(watchlist: WatchlistService) -> Any:
@@ -656,11 +715,7 @@ async def continue_iterative_paper_fills(
                 cumulative_capital_gbp=_capital_text(trade),
             )
             snapshot = refreshed.snapshot
-            accepted = (
-                refreshed.decision is not None
-                and snapshot is not None
-                and snapshot.accepted
-            )
+            accepted = refreshed.decision is not None and snapshot is not None and snapshot.accepted
             if not accepted:
                 reason = refreshed.reason or EXECUTION_REPRICE_FAILED
                 if refreshed.decision is not None or snapshot is not None:

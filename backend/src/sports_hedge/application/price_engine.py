@@ -2717,6 +2717,75 @@ class CataloguePriceEngine:
         )
         result.snapshot.frozen_orders = package.orders
         result.snapshot.native_order_freeze_diagnostics = package.diagnostics
+        if not result.snapshot.accepted and not result.pending_real_authority:
+            return
+        if self._frozen_pair_still_clears(result):
+            return
+        self._reject_snapped_native_pair(result)
+
+    def _frozen_pair_still_clears(self, result: Any) -> bool:
+        from sports_hedge.execution.depth_plan import qualifies_frozen_native_orders
+
+        decision = result.decision
+        snapshot = result.snapshot
+        if snapshot is None or decision is None:
+            return False
+        freezable = [
+            leg
+            for leg in getattr(decision, "fill_legs", ()) or ()
+            if getattr(leg, "requested_stake", 0) > 0
+            and getattr(leg, "venue", None) in {VenueName.MATCHBOOK, VenueName.POLYMARKET}
+        ]
+        if len(freezable) < 2:
+            return True
+        if len(snapshot.frozen_orders) < len(freezable):
+            return False
+        costs = {item.venue: item for item in getattr(decision, "venue_costs", ()) or ()}
+        fx = {
+            str(item.currency).upper(): item.gbp_per_unit
+            for item in getattr(decision, "fx_snapshots", ()) or ()
+        }
+        fx.setdefault("GBP", Decimal(1))
+        minimum = getattr(decision, "minimum_net_edge", None)
+        if minimum is None:
+            return False
+        payoff = getattr(decision, "payoff_scan", None)
+        state_model = None if payoff is None else getattr(payoff, "state_model", None)
+        return qualifies_frozen_native_orders(
+            snapshot.frozen_orders,
+            decision.fill_legs,
+            costs=costs,
+            gbp_per_unit=fx,
+            minimum_net_edge=minimum,
+            state_model=state_model,
+        )
+
+    def _reject_snapped_native_pair(self, result: Any) -> None:
+        from sports_hedge.application.execution_reprice import log_execution_phase
+
+        reason = "exact_frozen_pair_below_min_net"
+        snapshot = result.snapshot
+        decision = result.decision
+        if snapshot is not None:
+            snapshot.accepted = False
+            snapshot.rejection_reason = reason
+        result.reason = reason
+        result.pending_real_authority = False
+        if decision is not None:
+            reasons = list(decision.rejection_reasons or [])
+            if reason not in reasons:
+                reasons.append(reason)
+            result.decision = decision.model_copy(
+                update={
+                    "eligible_for_paper_simulation": False,
+                    "rejection_reasons": reasons,
+                }
+            )
+        log_execution_phase(
+            "PRICE2_REJECT",
+            snapshot_id=None if snapshot is None else snapshot.snapshot_id,
+            reason=reason,
+        )
 
     def _log_accepted_package(self, result: Any) -> None:
         from sports_hedge.application.execution_reprice import (

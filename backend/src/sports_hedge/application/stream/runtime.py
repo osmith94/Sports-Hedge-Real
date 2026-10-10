@@ -111,9 +111,9 @@ class StreamRuntime:
                 pair_age_ms=item.pair_age_ms,
                 skew_ms=item.skew_ms,
                 data_class=item.data_class,
-                executable=item.catalogue_row_id in self.handoff.accepted_rows,
+                executable=item.catalogue_row_id in self.handoff.paper_opened_rows,
                 price2=item.catalogue_row_id in self.handoff.accepted_rows,
-                paper_entry=self.handoff.paper_opened and item.catalogue_row_id in self.handoff.accepted_rows,
+                paper_entry=item.catalogue_row_id in self.handoff.paper_opened_rows,
             )
             for item in self.shadow.candidates
         ]
@@ -133,7 +133,9 @@ class StreamRuntime:
             skipped_unavailable=0 if pin is None else pin.skipped_unavailable,
             reconnect_count=0 if observer is None else observer.reconnect_count,
             last_full_snapshot_at=_iso(None if observer is None else observer.last_snapshot_at),
-            last_incremental_update_at=_iso(None if observer is None else observer.last_incremental_at),
+            last_incremental_update_at=_iso(
+                None if observer is None else observer.last_incremental_at
+            ),
             matchbook_request_count=stats.request_count,
             matchbook_rate_limited_count=stats.rate_limited_count,
             coalesced_event_count=stats.coalesced_count,
@@ -144,7 +146,9 @@ class StreamRuntime:
             ignored_best_bid_ask_count=0 if books is None else books.ignored_bbo_count,
             resync_count=0 if books is None else books.resync_count,
             last_error=self.handoff.last_error
-            or (stats.last_error if observer is None else (observer.last_error or stats.last_error)),
+            or (
+                stats.last_error if observer is None else (observer.last_error or stats.last_error)
+            ),
             last_trigger_reason=stats.last_trigger_reason,
             last_probability_delta=stats.last_probability_delta,
             last_dispatch_delay_ms=stats.last_dispatch_delay_ms,

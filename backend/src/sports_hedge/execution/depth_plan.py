@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sports_hedge.arbitrage.models import ExecutableQuote
@@ -52,7 +52,9 @@ class NativeDepthPlan:
     fully_filled: bool
 
     def as_admitted_pairs(self) -> tuple[tuple[str, str], ...]:
-        return tuple((format(item.decimal_odds, "f"), format(item.stake, "f")) for item in self.levels)
+        return tuple(
+            (format(item.decimal_odds, "f"), format(item.stake, "f")) for item in self.levels
+        )
 
 
 def sweep_back_levels(levels: Sequence[BookLevel], requested_stake: Decimal) -> NativeDepthPlan:
@@ -207,11 +209,16 @@ def exact_frozen_settlement(
             rate = Decimal(1)
         if rate is None or rate <= 0:
             raise DepthPlanError("missing_fx")
-        stake = getattr(leg, "requested_stake", None)
-        if stake is None or stake <= 0:
+        stake = _positive_decimal(getattr(leg, "requested_stake", None))
+        if stake is None:
             continue
         try:
-            limit = approved_back_limit_odds(leg)
+            submitted = getattr(leg, "submitted_limit_odds", None)
+            limit = (
+                _require_decimal(submitted)
+                if submitted is not None
+                else approved_back_limit_odds(leg)
+            )
             net = conservative_net_odds(
                 cost,
                 gross_odds=limit,
@@ -354,3 +361,122 @@ def qualifies_at_conservative_limits(
     if any(pnl < 0 for pnl in state_pnl.values()):
         return False
     return (minimum_pnl / total_gbp) >= minimum_net_edge
+
+
+def submitted_native_stake_and_limit(order: Any) -> tuple[Decimal, Decimal]:
+    """Stake and gross decimal odds actually frozen after venue tick/size snap."""
+
+    stake = _positive_decimal(getattr(order, "native_stake", None))
+    odds = _positive_decimal(getattr(order, "ladder_odds", None))
+    if stake is not None and odds is not None:
+        return stake, odds
+    amount = _positive_decimal(getattr(order, "native_amount", None))
+    price = _positive_decimal(getattr(order, "limit_price", None))
+    if amount is not None and price is not None:
+        return amount, Decimal(1) / price
+    shares = _positive_decimal(getattr(order, "native_shares", None))
+    if shares is not None and price is not None:
+        return shares * price, Decimal(1) / price
+    raise DepthPlanError("missing_frozen_native_fields")
+
+
+def frozen_settlement_legs(
+    frozen_orders: Sequence[Any],
+    legs: Sequence[Any],
+) -> list[Any]:
+    """Map frozen native orders onto the same settlement legs Price-2 scanned."""
+
+    by_key: dict[tuple[str, str, str], Any] = {}
+    for leg in legs:
+        venue = getattr(leg, "venue", None)
+        venue_key = venue.value if isinstance(venue, VenueName) else str(venue or "")
+        key = (
+            venue_key,
+            str(getattr(leg, "source_market_id", "") or ""),
+            str(getattr(leg, "source_runner_id", "") or ""),
+        )
+        by_key[key] = leg
+    adapted: list[FrozenSettlementLeg] = []
+    for order in frozen_orders:
+        venue_key = str(getattr(order, "venue", "") or "")
+        key = (
+            venue_key,
+            str(getattr(order, "native_market_id", "") or ""),
+            str(getattr(order, "native_runner_id", "") or ""),
+        )
+        leg = by_key.get(key)
+        if leg is None:
+            raise DepthPlanError("incomplete_outcome_set")
+        stake, limit = submitted_native_stake_and_limit(order)
+        adapted.append(
+            FrozenSettlementLeg(
+                venue=getattr(leg, "venue", None),
+                currency=str(
+                    getattr(order, "currency", None) or getattr(leg, "currency", "") or ""
+                ),
+                outcome=str(getattr(leg, "outcome", "") or ""),
+                requested_stake=stake,
+                submitted_limit_odds=limit,
+            )
+        )
+    return adapted
+
+
+def qualifies_frozen_native_orders(
+    frozen_orders: Sequence[Any],
+    legs: Sequence[Any],
+    *,
+    costs: Mapping[VenueName, VenueCostSnapshot],
+    gbp_per_unit: Mapping[str, Decimal],
+    minimum_net_edge: Decimal,
+    configured_slippage_bps: Decimal | None = None,
+    state_model: Any | None = None,
+) -> bool:
+    """True only when the post-snap FrozenNativeOrder pair still clears min-net.
+
+    Uses the same settlement authority as ``qualifies_at_conservative_limits``.
+    Does not re-solve stake ratios or add a second profitability buffer.
+    """
+
+    try:
+        adapted = frozen_settlement_legs(frozen_orders, legs)
+    except DepthPlanError:
+        return False
+    return qualifies_at_conservative_limits(
+        adapted,
+        costs=costs,
+        gbp_per_unit=gbp_per_unit,
+        minimum_net_edge=minimum_net_edge,
+        configured_slippage_bps=configured_slippage_bps,
+        state_model=state_model,
+    )
+
+
+@dataclass(frozen=True)
+class FrozenSettlementLeg:
+    """Fill-leg shape whose stake and limit are already venue-snapped."""
+
+    venue: Any
+    currency: str
+    outcome: str
+    requested_stake: Decimal
+    submitted_limit_odds: Decimal
+
+
+def _positive_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
+def _require_decimal(value: Any) -> Decimal:
+    number = _positive_decimal(value)
+    if number is None:
+        raise DepthPlanError("conservative_odds_not_executable")
+    return number

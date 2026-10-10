@@ -29,7 +29,9 @@ export function streamCandidateSummary(status: StreamStatus | null | undefined):
   }
   const price2 = candidates.filter((item) => item.price2);
   if (price2.length) {
-    return `${price2.length} Price-2 accepted candidate${price2.length === 1 ? "" : "s"} · execution still disarmed unless separately armed.`;
+    const fills = status?.paper_opened ? "paper fill recorded" : "no persisted paper fill";
+    const orders = status?.orders_placed ? "venue orders recorded" : "no venue orders recorded";
+    return `${price2.length} Price-2 accepted candidate${price2.length === 1 ? "" : "s"} · ${fills} · ${orders} · execution still disarmed unless separately armed.`;
   }
   return `${trustworthy.length} trustworthy diagnostic candidate${trustworthy.length === 1 ? "" : "s"} · waiting for existing Price-2.`;
 }
