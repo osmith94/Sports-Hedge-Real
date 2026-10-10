@@ -15,30 +15,37 @@ from sports_hedge.application.complete_set import (
     solver_eligible_market,
     solver_model_for_pair,
 )
-from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.executable_liquidity import (
     opening_liquidity_rejection_reasons,
 )
+from sports_hedge.application.market_observation import VenueMarketObservation
 from sports_hedge.application.quote_freshness import (
     conservative_combined_age_ms,
     conservative_combined_basis,
     require_aware_instant,
 )
+from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
+from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
+from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.arbitrage.depth import DepthAwareCompleteSetScanner, DepthQuoteSource
 from sports_hedge.arbitrage.min_net_threshold import (
     OUTRIGHT_MIN_NET_EDGE_UNCONFIGURED,
     resolve_min_net_threshold,
 )
-from sports_hedge.arbitrage.watchlist.economics import INFORMATIONAL_NONBLOCKING_REASONS
 from sports_hedge.arbitrage.payoff_scan import (
     DepthAwarePayoffScanner,
     PayoffScanResult,
     is_state_safe_fee,
 )
+from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
+from sports_hedge.arbitrage.watchlist.economics import INFORMATIONAL_NONBLOCKING_REASONS
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import CanonicalOutcome
-from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
 from sports_hedge.domain.models import MarketScope, VenueName
+from sports_hedge.execution.depth_plan import (
+    qualifies_at_conservative_limits,
+    stamp_fill_leg_depth_plan,
+)
 from sports_hedge.fees.cost import MarketAction, VenueCostSnapshot
 from sports_hedge.fees.effective import CostRuleError, apply_venue_costs
 from sports_hedge.fees.models import FeeSnapshot
@@ -57,15 +64,6 @@ from sports_hedge.normalization.identity import (
 )
 from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
-from sports_hedge.arbitrage.allocation.adapters import (
-    balances_from_liquidity,
-    estimated_time_to_release,
-    exposures_from_trades,
-    request_from_paper_decision,
-)
-from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
-from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
-from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.paper.models import FxRateSnapshot, PaperScanDecision
 from sports_hedge.paper.position_management.quotes import LatestObservationCatalog
 from sports_hedge.paper.trades import PaperTrade
@@ -354,7 +352,7 @@ class PaperScanService:
             try:
                 apply_venue_costs(
                     cost,
-                    gross_decimal_odds=Decimal("2"),
+                    gross_decimal_odds=Decimal(2),
                     require_gbp=False,
                     as_of=evaluated_at,
                 )
@@ -403,7 +401,7 @@ class PaperScanService:
         solver_started = monotonic()
         sources: list[DepthQuoteSource] = []
         configured_spread = Decimal(self.settings.fx_spread_bps)
-        configured_fx_slip = Decimal("0")
+        configured_fx_slip = Decimal(0)
         configured_book_slip = Decimal(self.settings.max_slippage_bps)
         if configured_book_slip > 0:
             assumption_labels.append(f"configured_book_slippage_bps:{configured_book_slip}")
@@ -571,6 +569,25 @@ class PaperScanService:
                 except FillPlanMappingError as exc:
                     alloc_reasons.append(f"allocation_failed:{exc.reason}")
         rejections.extend(alloc_reasons)
+        if (
+            not _paper_blocking_reasons(rejections)
+            and applied_threshold is not None
+            and len(getattr(draft, "fill_legs", ()) or ()) >= 2
+        ):
+            generalized = (
+                None
+                if solver_model == SOLVER_MODEL_SIMPLE
+                else generalized_state_model_for_pair(left.market, right.market)
+            )
+            if not qualifies_at_conservative_limits(
+                draft.fill_legs,
+                costs=scan_costs,
+                gbp_per_unit=effective_fx,
+                minimum_net_edge=applied_threshold,
+                configured_slippage_bps=slip,
+                state_model=generalized,
+            ):
+                rejections.append("exact_frozen_pair_below_min_net")
         self._stamp_scan_phases(
             mapping_ms=mapping_ms,
             fee_started=fee_started,
@@ -601,6 +618,13 @@ class PaperScanService:
         )
         if not arb or standing is None:
             return None, []
+        from sports_hedge.arbitrage.allocation.adapters import (
+            balances_from_liquidity,
+            estimated_time_to_release,
+            exposures_from_trades,
+            request_from_paper_decision,
+        )
+
         policy = policy_from_settings(self.settings)
         balances = balances_from_liquidity(
             standing,
@@ -680,7 +704,7 @@ class PaperScanService:
                 if stake.stake <= 0:
                     continue
                 stake_by_key[_payoff_leg_key(stake)] = (
-                    stake_by_key.get(_payoff_leg_key(stake), Decimal("0")) + stake.stake
+                    stake_by_key.get(_payoff_leg_key(stake), Decimal(0)) + stake.stake
                 )
         if depth_scan is not None and len(selected_quotes) < 2:
             return None
@@ -846,7 +870,7 @@ def _with_gbp_rate(rates: list[FxRateSnapshot], *, as_of: datetime | None = None
         rates.append(
             FxRateSnapshot(
                 currency="GBP",
-                gbp_per_unit=Decimal("1"),
+                gbp_per_unit=Decimal(1),
                 source="functional_currency",
                 captured_at=as_of or datetime.now(UTC),
             )
@@ -890,7 +914,7 @@ def _fill_legs_from_observations(
                 continue
             key = _payoff_leg_key(stake)
             selected.add(key)
-            stakes[key] = stakes.get(key, Decimal("0")) + stake.stake
+            stakes[key] = stakes.get(key, Decimal(0)) + stake.stake
     legs: list[PaperOpportunityLeg] = []
     for observation in (left, right):
         rate = effective_fx.get(observation.native_currency)
@@ -911,7 +935,7 @@ def _fill_legs_from_observations(
                 continue
             best = max(book.back_levels, key=lambda item: item.decimal_odds)
             stake_amount = stakes.get(select_key)
-            visible = sum((level.available_stake for level in book.back_levels), Decimal("0"))
+            visible = sum((level.available_stake for level in book.back_levels), Decimal(0))
             if stake_amount is None or stake_amount <= 0:
                 if depth_scan is None:
                     continue
@@ -923,18 +947,20 @@ def _fill_legs_from_observations(
             if requested <= 0:
                 continue
             legs.append(
-                PaperOpportunityLeg(
-                    outcome=outcome,
-                    venue=observation.venue,
-                    source_market_id=observation.market.source_market_id,
-                    source_runner_id=book.source_runner_id,
-                    source_event_id=str(observation.market.event.source_event_id),
-                    currency=observation.native_currency,
-                    requested_stake=requested,
-                    displayed_odds=best.decimal_odds,
-                    levels=list(book.back_levels),
-                    quote_age_ms=observation.quote_age_ms,
-                    quote_captured_at=observation.observed_at,
+                stamp_fill_leg_depth_plan(
+                    PaperOpportunityLeg(
+                        outcome=outcome,
+                        venue=observation.venue,
+                        source_market_id=observation.market.source_market_id,
+                        source_runner_id=book.source_runner_id,
+                        source_event_id=str(observation.market.event.source_event_id),
+                        currency=observation.native_currency,
+                        requested_stake=requested,
+                        displayed_odds=best.decimal_odds,
+                        levels=list(book.back_levels),
+                        quote_age_ms=observation.quote_age_ms,
+                        quote_captured_at=observation.observed_at,
+                    )
                 )
             )
     return legs
@@ -1002,7 +1028,11 @@ def apply_allocation_to_fill_legs(
             outcome=leg.outcome,
         )
         match = stake_by_id[key]
-        resized.append(leg.model_copy(update={"requested_stake": match.stake_native}))
+        resized.append(
+            stamp_fill_leg_depth_plan(
+                leg.model_copy(update={"requested_stake": match.stake_native})
+            )
+        )
     return resized
 
 

@@ -427,6 +427,15 @@ class MatchbookClient(ReadOnlyVenue):
             "price-mode": "expanded",
         }
 
+    def _exact_id_price_params(self) -> dict[str, Any]:
+        """Price-2 / HOT exact-market reads. Not UNIVERSE event listings."""
+
+        return {
+            **self._market_data_params(),
+            "minimum-liquidity": self.settings.matchbook_price2_minimum_liquidity,
+            "price-depth": self.settings.matchbook_price2_price_depth,
+        }
+
     async def list_events(self, **filters: Any) -> dict[str, Any]:
         """List Matchbook events for football within a bounded live/near-future window.
 
@@ -765,9 +774,8 @@ class MatchbookClient(ReadOnlyVenue):
         """
 
         params = {
-            **self._market_data_params(),
+            **self._exact_id_price_params(),
             "include-prices": "true",
-            "price-depth": self.settings.matchbook_price_depth,
             **filters,
         }
         path = f"/edge/rest/events/{event_id}/markets/{market_id}"
@@ -811,8 +819,8 @@ class MatchbookClient(ReadOnlyVenue):
         if outcome_id is None:
             raise ValueError("Matchbook order books require a runner/outcome id")
         params = {
-            **self._market_data_params(),
-            "depth": self.settings.matchbook_price_depth,
+            **self._exact_id_price_params(),
+            "depth": self.settings.matchbook_price2_price_depth,
             **filters,
         }
         return await self._get(

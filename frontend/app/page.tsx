@@ -2,6 +2,7 @@ import { ActivityFeed } from "../components/activity-feed";
 import { CapitalSummary } from "../components/capital-summary";
 import { FixtureDiscoverySection } from "../components/fixture-discovery-section";
 import { HotFixturesPanel } from "../components/hot-fixtures-panel";
+import { StreamPanel } from "../components/stream-panel";
 import { LiquidityPools } from "../components/liquidity-pools";
 import { GenerateMatchingReport } from "../components/generate-matching-report";
 import { OpportunityMonitor } from "../components/opportunity-monitor";
@@ -160,6 +161,8 @@ export default async function ArbitragePage() {
       <FixtureDiscoverySection />
 
       <HotFixturesPanel />
+
+      <StreamPanel />
 
       <OpportunityMonitor
         items={tracked.available ? tracked.value : []}

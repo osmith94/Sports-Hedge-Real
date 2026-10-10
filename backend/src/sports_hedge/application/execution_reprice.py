@@ -1,4 +1,4 @@
-"""One exact-ID execution reprice immediately before a PAPER entry.
+"""One exact-ID execution reprice immediately before a paper or armed-live fill.
 
 Discovery pricing may qualify an opportunity from the latest known books,
 including when those books are past the paper-entry quote-age gate. That
@@ -6,8 +6,9 @@ discovery fact is QUALIFYING only. The fill uses a second, contemporaneous
 complete-set read of the same persisted native IDs. PAPER_ELIGIBLE is that
 refreshed decision, not the discovery snapshot.
 
-PAPER only. This module does not place venue orders and does not rediscover
-fixtures, markets, or matches.
+Paper fills stay simulated. Armed REAL may submit through the existing live
+package dispatcher after a fully reconciled hedge. This module does not
+rediscover fixtures, markets, or matches.
 """
 
 from __future__ import annotations
@@ -186,9 +187,7 @@ def record_execution_snapshot_attempt(
     with _EXECUTION_AUDIT_LOCK:
         if not snapshot.execution_cycle:
             counter = getattr(watchlist, "next_execution_cycle", None)
-            snapshot.execution_cycle = (
-                int(counter(opportunity_id)) if callable(counter) else 1
-            )
+            snapshot.execution_cycle = int(counter(opportunity_id)) if callable(counter) else 1
         outcome = CYCLE_REJECTED if not snapshot.accepted else CYCLE_ACCEPTED
         recorder(
             snapshot_id=snapshot.snapshot_id,
@@ -274,6 +273,12 @@ class ExecutionCaptureResult:
     discovery_decision: PaperScanDecision | None = None
     entry_decision: PaperScanDecision | None = None
     entry_history: list[Any] | None = None
+    snapshot: ExecutionSnapshot | None = None
+    price2_accepted: bool = False
+    paper_opened: bool = False
+    orders_placed: bool = False
+    paper_trade_id: str | None = None
+    orders_submitted: int = 0
 
 
 def execution_reprice_permitted(decision: PaperScanDecision) -> bool:
@@ -484,6 +489,7 @@ async def capture_with_execution_reprice(
         return ExecutionCaptureResult(
             discovery_history=discovery_history,
             discovery_decision=discovery,
+            snapshot=refreshed.snapshot,
         )
 
     if not price2_entry_authorized(refreshed.snapshot):
@@ -524,6 +530,8 @@ async def capture_with_execution_reprice(
             discovery_decision=discovery,
             entry_decision=refreshed.decision,
             entry_history=entry_history,
+            snapshot=refreshed.snapshot,
+            price2_accepted=False,
         )
 
     log_execution_phase(
@@ -545,30 +553,54 @@ async def capture_with_execution_reprice(
     # Persist (and any armed live dispatch) off this event loop. run_blocking()
     # would otherwise join a worker on the scanner thread until fake or real
     # venue transports finish. Reserve → submit → persist stay one function.
-    entry_history = await asyncio.to_thread(
-        persist_price_engine_item_capture,
-        refreshed.decision,
-        service=service,
-        watchlist=watchlist,
-        refreshed_venues=refreshed.refreshed_venues,
-        pricing_lane=pricing_lane,
-        execution_authoritative=True,
-        execution_snapshot_json=snapshot_json,
-    )
-    await continue_iterative_paper_fills(
-        opportunity_id=opportunity_id,
-        runtime=runtime,
-        engine=engine,
-        watchlist=watchlist,
-        pricing_lane=pricing_lane,
-        entry_decision=refreshed.decision,
-    )
-    return ExecutionCaptureResult(
-        discovery_history=discovery_history,
-        discovery_decision=discovery,
-        entry_decision=refreshed.decision,
-        entry_history=list(entry_history or []),
-    )
+    # Claim iteration before persist so a concurrent TOP_UP cannot fetch the
+    # same native books while the opening write is still in to_thread.
+    claimed = bool(opportunity_id) and _claim_iteration(opportunity_id)
+    try:
+        entry_history = await asyncio.to_thread(
+            persist_price_engine_item_capture,
+            refreshed.decision,
+            service=service,
+            watchlist=watchlist,
+            refreshed_venues=refreshed.refreshed_venues,
+            pricing_lane=pricing_lane,
+            execution_authoritative=True,
+            execution_snapshot_json=snapshot_json,
+        )
+        if claimed:
+            await continue_iterative_paper_fills(
+                opportunity_id=opportunity_id,
+                runtime=runtime,
+                engine=engine,
+                watchlist=watchlist,
+                pricing_lane=pricing_lane,
+                entry_decision=refreshed.decision,
+                already_claimed=True,
+            )
+        elif opportunity_id:
+            log_execution_phase(
+                PHASE_REJECTED,
+                reason=EXECUTION_REPRICE_DUPLICATE,
+                opportunity_id=opportunity_id,
+            )
+        paper_opened, orders_placed, trade_id, submitted = _recorded_opening_evidence(
+            watchlist, opportunity_id
+        )
+        return ExecutionCaptureResult(
+            discovery_history=discovery_history,
+            discovery_decision=discovery,
+            entry_decision=refreshed.decision,
+            entry_history=list(entry_history or []),
+            snapshot=refreshed.snapshot,
+            price2_accepted=price2_entry_authorized(refreshed.snapshot),
+            paper_opened=paper_opened,
+            orders_placed=orders_placed,
+            paper_trade_id=trade_id,
+            orders_submitted=submitted,
+        )
+    finally:
+        if claimed:
+            _release_iteration(opportunity_id)
 
 
 def _claim_iteration(opportunity_id: str) -> bool:
@@ -584,6 +616,49 @@ def _release_iteration(opportunity_id: str) -> None:
         _ITERATION_ACTIVE.discard(opportunity_id)
 
 
+def _recorded_opening_evidence(
+    watchlist: WatchlistService, opportunity_id: str
+) -> tuple[bool, bool, str | None, int]:
+    """Persisted paper trade / live order evidence. Arming is not evidence."""
+
+    from sports_hedge.execution.dispatch import opening_package_id
+    from sports_hedge.paper.trades import PaperLegFillKind, PaperTradeState
+
+    operations = _paper_operations(watchlist)
+    getter = getattr(operations, "_get_trade_by_opportunity", None)
+    trade = getter(opportunity_id) if callable(getter) else None
+    if trade is None:
+        return False, False, None, 0
+    filled = any(
+        getattr(leg, "filled_stake", 0) > 0
+        and getattr(leg, "fill_kind", PaperLegFillKind.UNFILLED) is not PaperLegFillKind.UNFILLED
+        for leg in getattr(trade, "legs", ()) or ()
+    )
+    opened = (
+        trade.state
+        in {
+            PaperTradeState.OPEN,
+            PaperTradeState.PARTIAL,
+            PaperTradeState.CLOSED,
+        }
+        and filled
+    )
+    live_fills = [
+        leg
+        for leg in getattr(trade, "legs", ()) or ()
+        if getattr(leg, "fill_kind", None) is PaperLegFillKind.LIVE_VENUE
+    ]
+    submitted = len(live_fills)
+    placed = bool(getattr(trade, "places_orders", False) and live_fills)
+    if getattr(trade, "places_orders", False) and not placed:
+        store = getattr(operations, "_live_attempt_store", None)
+        attempt = store().get(opening_package_id(trade.trade_id)) if callable(store) else None
+        orders = [] if not isinstance(attempt, dict) else attempt.get("orders") or []
+        submitted = max(submitted, len(orders) if isinstance(orders, list) else 0)
+        placed = submitted > 0
+    return opened, placed, str(trade.trade_id), submitted
+
+
 def _paper_operations(watchlist: WatchlistService) -> Any:
     from sports_hedge.api.paper import get_paper_operations_service, operations_priority_alerts
 
@@ -591,22 +666,13 @@ def _paper_operations(watchlist: WatchlistService) -> Any:
 
 
 def _open_iterative_trade(operations: Any, opportunity_id: str) -> Any | None:
-    from sports_hedge.paper.trades import PaperActiveTradePhase, PaperTradeState
+    from sports_hedge.application.paper_operations import iterative_trade_is_open
 
     getter = getattr(operations, "_get_trade_by_opportunity", None)
     trade = getter(opportunity_id) if callable(getter) else None
-    if trade is None or trade.state is not PaperTradeState.OPEN:
-        return None
-    if getattr(trade, "places_orders", False):
-        return None
-    if trade.unresolved_recovery or trade.active_trade_phase in {
-        PaperActiveTradePhase.EXIT_MANAGEMENT,
-        PaperActiveTradePhase.MONITORING_CAP_REACHED,
-        PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
-        PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE,
-    }:
-        return None
-    return trade
+    if iterative_trade_is_open(trade):
+        return trade
+    return None
 
 
 async def continue_iterative_paper_fills(
@@ -617,26 +683,31 @@ async def continue_iterative_paper_fills(
     watchlist: WatchlistService,
     pricing_lane: str | None,
     entry_decision: PaperScanDecision,
+    already_claimed: bool = False,
 ) -> None:
-    """Immediately reprice and PAPER-fill while a fresh accepted snapshot remains.
+    """Immediately reprice and fill while a fresh accepted snapshot remains.
 
     Each cycle fetches the exact native books again and may append one tranche
-    to the existing opportunity trade. The loop stops on the first gate that
-    rejects the new snapshot or refuses the fill. It does not wait for the
-    ordinary HOT cadence and does not reuse the previous snapshot.
+    to the existing opportunity trade. Paper stays simulated. Armed live only
+    continues after the previous tranche is fully filled and reconciled. The
+    loop stops on the first gate that rejects the new snapshot or refuses the
+    fill. It does not wait for the ordinary HOT cadence and does not reuse the
+    previous snapshot.
     """
 
-    if not opportunity_id or not _claim_iteration(opportunity_id):
-        if opportunity_id:
-            log_execution_phase(
-                PHASE_REJECTED,
-                reason=EXECUTION_REPRICE_DUPLICATE,
-                opportunity_id=opportunity_id,
-            )
+    if not opportunity_id:
+        return
+    if not already_claimed and not _claim_iteration(opportunity_id):
+        log_execution_phase(
+            PHASE_REJECTED,
+            reason=EXECUTION_REPRICE_DUPLICATE,
+            opportunity_id=opportunity_id,
+        )
         return
     try:
         decision = entry_decision
         while True:
+            await asyncio.sleep(0)
             operations = _paper_operations(watchlist)
             if _open_iterative_trade(operations, opportunity_id) is None:
                 return
@@ -661,11 +732,7 @@ async def continue_iterative_paper_fills(
                 cumulative_capital_gbp=_capital_text(trade),
             )
             snapshot = refreshed.snapshot
-            accepted = (
-                refreshed.decision is not None
-                and snapshot is not None
-                and snapshot.accepted
-            )
+            accepted = refreshed.decision is not None and snapshot is not None and snapshot.accepted
             if not accepted:
                 reason = refreshed.reason or EXECUTION_REPRICE_FAILED
                 if refreshed.decision is not None or snapshot is not None:
@@ -688,7 +755,8 @@ async def continue_iterative_paper_fills(
                     snapshot=None if snapshot is None else snapshot.audit_line(),
                 )
                 return
-            outcome = operations.fill_from_execution_snapshot(
+            outcome = await asyncio.to_thread(
+                operations.fill_from_execution_snapshot,
                 opportunity_id,
                 refreshed.decision,
                 snapshot_id=snapshot.snapshot_id,
@@ -711,4 +779,5 @@ async def continue_iterative_paper_fills(
                 execution_cycle=snapshot.execution_cycle,
             )
     finally:
-        _release_iteration(opportunity_id)
+        if not already_claimed:
+            _release_iteration(opportunity_id)

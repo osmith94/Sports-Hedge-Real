@@ -230,6 +230,9 @@ def paper_trade_id(opportunity_id: str) -> str:
     return f"ptrade-{slug}"
 
 
+_UNSAFE_LIVE_REMAINDERS = frozenset({"still_resting", "cancel_unproven"})
+
+
 def _package_already_persisted(trade: Any, package_id: str) -> bool:
     """True when this package id is already the saved live trade."""
 
@@ -248,6 +251,68 @@ def _package_already_persisted(trade: Any, package_id: str) -> bool:
         if isinstance(payload, dict) and payload.get("package_id") == package_id:
             return True
     return False
+
+
+def _latest_live_remainder(trade: Any) -> str | None:
+    remainder = None
+    for event in getattr(trade, "audit", []):
+        if getattr(event, "event_type", None) is not PaperTradeAuditEventType.LIVE_PACKAGE_RECORDED:
+            continue
+        detail = getattr(event, "detail", None)
+        if not detail:
+            continue
+        try:
+            payload = json.loads(detail)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "remainder" in payload:
+            remainder = payload.get("remainder")
+    return None if remainder is None else str(remainder)
+
+
+def live_hedge_is_complete(trade: Any) -> bool:
+    """True only after both venue legs have known full fills and no resting remainder."""
+
+    if trade is None or not getattr(trade, "places_orders", False):
+        return False
+    if trade.state is not PaperTradeState.OPEN:
+        return False
+    if getattr(trade, "live_fill_unknown", False) or getattr(trade, "unresolved_recovery", False):
+        return False
+    if trade.active_trade_phase is PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE:
+        return False
+    legs = list(getattr(trade, "legs", []) or [])
+    if not legs:
+        return False
+    for leg in legs:
+        if getattr(leg, "requested_stake", Decimal(0)) <= 0:
+            continue
+        if getattr(leg, "fill_quantity_known", True) is False:
+            return False
+        if getattr(leg, "filled_stake", Decimal(0)) != leg.requested_stake:
+            return False
+        if getattr(leg, "fill_kind", None) is not PaperLegFillKind.LIVE_VENUE:
+            return False
+    return _latest_live_remainder(trade) not in _UNSAFE_LIVE_REMAINDERS
+
+
+def iterative_trade_is_open(trade: Any) -> bool:
+    """OPEN paper, or a fully reconciled live hedge, that may take another Price-2."""
+
+    if trade is None or trade.state is not PaperTradeState.OPEN:
+        return False
+    if getattr(trade, "live_fill_unknown", False):
+        return False
+    if trade.unresolved_recovery or trade.active_trade_phase in {
+        PaperActiveTradePhase.EXIT_MANAGEMENT,
+        PaperActiveTradePhase.MONITORING_CAP_REACHED,
+        PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+        PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE,
+    }:
+        return False
+    if getattr(trade, "places_orders", False):
+        return live_hedge_is_complete(trade)
+    return True
 
 
 def _orphan_reason(
@@ -1670,7 +1735,7 @@ class PaperOperationsService:
 
         with self._fill_persist_lock:
             trade = self._get_trade_by_opportunity(opportunity_id)
-            if trade is None or trade.state is not PaperTradeState.OPEN:
+            if trade is None or not iterative_trade_is_open(trade):
                 return CYCLE_NOT_OPEN
             if self._snapshot_id_on_trade(trade, snapshot_id):
                 return CYCLE_DUPLICATE
@@ -1678,6 +1743,7 @@ class PaperOperationsService:
                 PaperActiveTradePhase.EXIT_MANAGEMENT,
                 PaperActiveTradePhase.MONITORING_CAP_REACHED,
                 PaperActiveTradePhase.RECOVERING_PARTIAL_ENTRY,
+                PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE,
             }:
                 return CYCLE_NOT_OPEN
             plan = self._plan_from_decision(
@@ -1725,15 +1791,17 @@ class PaperOperationsService:
                 return outcome
             tranche = added[-1]
             self._plans[opportunity_id] = plan
+            live_incomplete = loaded.places_orders and not live_hedge_is_complete(loaded)
+            outcome = CYCLE_NOT_OPEN if live_incomplete else CYCLE_FILLED
             self._link_execution_snapshot(
                 snapshot_id,
                 trade_id=loaded.trade_id,
                 tranche_id=tranche.tranche_id,
-                cycle_outcome=CYCLE_FILLED,
+                cycle_outcome=outcome,
                 liquidity=evidence,
                 cumulative_capital_gbp=str(loaded.capital_locked_gbp or Decimal("0")),
             )
-            return CYCLE_FILLED
+            return outcome
 
     def _snapshot_id_on_trade(self, trade: PaperTrade, snapshot_id: str) -> bool:
         return any(
@@ -1893,9 +1961,15 @@ class PaperOperationsService:
                 trade = loaded
         if trade.state not in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             return None
+        live_ready = live_hedge_is_complete(trade)
         if (
             trade.places_orders
             or trade.active_trade_phase is PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE
+        ) and not live_ready:
+            return self._result_from_existing_trade(trade, when)
+        if live_ready and (
+            not execution_armed(self.settings)
+            or effective_operator_scanner_settings(self.settings).scanner_stopped
         ):
             return self._result_from_existing_trade(trade, when)
         self._ensure_opening_tranche(trade, when)
@@ -2079,16 +2153,32 @@ class PaperOperationsService:
                 "books": compact_executable_books(mapped_legs),
             },
         )
+        sequence = 1 + max((item.sequence for item in trade.tranches), default=0)
+        tranche_id = f"topup:{trade.trade_id}:{sequence}"
+        if live_ready:
+            from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+            snapshot_id = execution_snapshot_id_from_json(plan.execution_snapshot_json)
+            if snapshot_id:
+                tranche_id = f"topup:{snapshot_id}"
+        if any(item.tranche_id == tranche_id for item in trade.tranches):
+            return self._result_from_existing_trade(trade, when)
+        if live_ready:
+            sized_plan = plan.model_copy(update={"legs": mapped_legs})
+            self._dispatch_live_tranche(
+                sized_plan,
+                trade_id=trade.trade_id,
+                tranche_id=tranche_id,
+                now=when,
+            )
+            loaded = self.trades.get(trade.trade_id) if self.trades is not None else trade
+            return self._result_from_existing_trade(loaded or trade, when)
         fills = self.simulator.simulate(
             mapped_legs,
             fill_config,
             opportunity_id=trade.opportunity_id,
             now=when,
         )
-        sequence = 1 + max((item.sequence for item in trade.tranches), default=0)
-        tranche_id = f"topup:{trade.trade_id}:{sequence}"
-        if any(item.tranche_id == tranche_id for item in trade.tranches):
-            return self._result_from_existing_trade(trade, when)
         fills = _with_stable_fill_ids(
             fills,
             trade.opportunity_id,
@@ -3048,9 +3138,25 @@ class PaperOperationsService:
             trade_id=str(attempt["trade_id"]),
             package_id=str(attempt["package_id"]),
             snapshot_json=attempt.get("snapshot_json"),
+            tranche_id=str(attempt.get("tranche_id") or OPENING_TRANCHE_ID),
         )
 
     def _dispatch_live_opening(self, plan: PaperFillPlan, *, now: datetime | None) -> None:
+        self._dispatch_live_tranche(
+            plan,
+            trade_id=paper_trade_id(plan.opportunity_id),
+            tranche_id=OPENING_TRANCHE_ID,
+            now=now,
+        )
+
+    def _dispatch_live_tranche(
+        self,
+        plan: PaperFillPlan,
+        *,
+        trade_id: str,
+        tranche_id: str,
+        now: datetime | None,
+    ) -> None:
         when = now or datetime.now(UTC)
         from sports_hedge.execution.composition import bind_process_execution_runtime
 
@@ -3067,8 +3173,7 @@ class PaperOperationsService:
             polymarket=polymarket,
         ):
             return
-        trade_id = paper_trade_id(plan.opportunity_id)
-        package_id = opening_package_id(trade_id)
+        package_id = opening_package_id(trade_id, tranche_id)
         store = self._live_attempt_store()
         if store.get(package_id) is not None:
             return
@@ -3077,11 +3182,11 @@ class PaperOperationsService:
             {
                 "package_id": package_id,
                 "trade_id": trade_id,
-                "tranche_id": OPENING_TRANCHE_ID,
+                "tranche_id": tranche_id,
                 "opportunity_id": plan.opportunity_id,
                 "snapshot_ref": snapshot_ref(plan),
                 "snapshot_json": snapshot_json,
-                "recovery_json": recovery_context(plan, trade_id),
+                "recovery_json": recovery_context(plan, trade_id, tranche_id=tranche_id),
                 "created_at": when,
             }
         )
@@ -3091,7 +3196,7 @@ class PaperOperationsService:
             run_live_opening(
                 plan,
                 trade_id=trade_id,
-                tranche_id=OPENING_TRANCHE_ID,
+                tranche_id=tranche_id,
                 settings=self.settings,
                 matchbook=matchbook,
                 kalshi=kalshi,
@@ -3124,6 +3229,7 @@ class PaperOperationsService:
                     trade_id=trade_id,
                     package_id=package_id,
                     snapshot_json=snapshot_json,
+                    tranche_id=tranche_id,
                 )
             finally:
                 self._opening_persist_active = False
@@ -3140,6 +3246,7 @@ class PaperOperationsService:
         trade_id: str,
         package_id: str,
         snapshot_json: str | None,
+        tranche_id: str = OPENING_TRANCHE_ID,
     ) -> PaperTrade | None:
         if self.trades is None:
             return None
@@ -3154,20 +3261,31 @@ class PaperOperationsService:
             if opportunity is None:
                 return None
             trade = self._new_trade_shell(plan, opportunity, occurred_at, plan.provenance)
+        append = (
+            tranche_id != OPENING_TRANCHE_ID
+            and already is not None
+            and getattr(already, "places_orders", False)
+        )
+        if append:
+            trade = already
+            if any(leg.tranche_id == tranche_id for leg in trade.legs):
+                return trade
         opening = [leg for leg in plan.legs if leg.requested_stake > 0]
         unknown = False
         known_positive = False
         complete = bool(opening)
         legs: list[PaperTradeLeg] = []
-        native: dict[str, Decimal] = {}
-        gbp = Decimal(0)
+        native: dict[str, Decimal] = dict(trade.capital_locked_native) if append else {}
+        gbp = trade.capital_locked_gbp or Decimal(0) if append else Decimal(0)
+        incremental_gbp = Decimal(0)
         fx = {item.currency: item for item in plan.fx_snapshots}
+        fill_ids: list[str] = []
         for plan_leg in opening:
             order = order_for_leg(
                 plan_leg,
                 orders,
                 trade_id=trade_id,
-                tranche_id=OPENING_TRANCHE_ID,
+                tranche_id=tranche_id,
             )
             quantity_known = order is not None and order.filled_size is not None
             filled = order.filled_size if quantity_known and order is not None else Decimal(0)
@@ -3183,6 +3301,13 @@ class PaperOperationsService:
             if quantity_known and filled is not None and filled > 0:
                 known_positive = True
             average = None if order is None else order.average_fill_price
+            fill_id = (
+                None
+                if order is None or not quantity_known or filled <= 0
+                else f"live:{order.client_order_id}"
+            )
+            if fill_id:
+                fill_ids.append(fill_id)
             legs.append(
                 PaperTradeLeg(
                     venue=plan_leg.venue,
@@ -3195,6 +3320,9 @@ class PaperOperationsService:
                     source_market_id=plan_leg.source_market_id,
                     source_event_id=_native_source_event_id(plan_leg, plan),
                     source_runner_id=plan_leg.source_runner_id,
+                    source_contract_id=(
+                        plan_leg.source_runner_id if plan_leg.venue is VenueName.POLYMARKET else None
+                    ),
                     opening_action=(
                         MarketAction.BUY
                         if plan_leg.venue in {VenueName.POLYMARKET, VenueName.KALSHI}
@@ -3202,13 +3330,11 @@ class PaperOperationsService:
                     ),
                     canonical_state=plan_leg.outcome,
                     settlement_fingerprint_key=(
-                        None if opportunity is None else opportunity.settlement_key
+                        trade.settlement_key
+                        if append
+                        else (None if opportunity is None else opportunity.settlement_key)
                     ),
-                    fill_id=(
-                        None
-                        if order is None or not quantity_known or filled <= 0
-                        else f"live:{order.client_order_id}"
-                    ),
+                    fill_id=fill_id,
                     fill_kind=(
                         PaperLegFillKind.LIVE_VENUE
                         if quantity_known and filled > 0
@@ -3217,7 +3343,7 @@ class PaperOperationsService:
                     execution_mode=plan.execution_modes.get(
                         plan_leg.venue, LegExecutionMode.INTERNAL
                     ).value,
-                    tranche_id=OPENING_TRANCHE_ID,
+                    tranche_id=tranche_id,
                     fill_quantity_known=quantity_known,
                 )
             )
@@ -3225,9 +3351,14 @@ class PaperOperationsService:
                 native[plan_leg.currency] = native.get(plan_leg.currency, Decimal(0)) + filled
                 if plan_leg.currency == "GBP":
                     gbp += filled
+                    incremental_gbp += filled
                 elif plan_leg.currency in fx:
-                    gbp += filled * fx[plan_leg.currency].gbp_per_unit
+                    reporting = filled * fx[plan_leg.currency].gbp_per_unit
+                    gbp += reporting
+                    incremental_gbp += reporting
         if package_outcome is not LivePackageOutcome.FULLY_FILLED:
+            complete = False
+        if remainder in _UNSAFE_LIVE_REMAINDERS:
             complete = False
         if unknown or not known_positive:
             if known_positive and not complete:
@@ -3239,7 +3370,11 @@ class PaperOperationsService:
             state = PaperTradeState.OPEN
         else:
             state = PaperTradeState.PARTIAL
-        trade.legs = legs
+        if append:
+            trade.legs = list(trade.legs) + legs
+        else:
+            trade.legs = legs
+            trade.guaranteed_profit_gbp_at_open = None
         trade.state = state
         trade.paper_only = False
         trade.places_orders = True
@@ -3247,11 +3382,12 @@ class PaperOperationsService:
         trade.unresolved_recovery = False
         trade.capital_locked_native = native
         trade.capital_locked_gbp = gbp
-        trade.guaranteed_profit_gbp_at_open = None
         trade.last_updated_at = occurred_at
         trade.provenance = plan.provenance
-        trade.fx_snapshots = list(plan.fx_snapshots)
-        trade.venue_costs = list(plan.venue_costs)
+        if plan.fx_snapshots:
+            trade.fx_snapshots = list(plan.fx_snapshots)
+        if plan.venue_costs:
+            trade.venue_costs = list(plan.venue_costs)
         if state is PaperTradeState.PARTIAL:
             trade.active_trade_phase = PaperActiveTradePhase.LIVE_PARTIAL_EXPOSURE
             trade.residual_exposure_gbp = None if unknown else residual_exposure_gbp(trade)
@@ -3263,7 +3399,7 @@ class PaperOperationsService:
             trade.residual_exposure_gbp = None
         audit_payload = {
             "trade_id": trade_id,
-            "tranche_id": OPENING_TRANCHE_ID,
+            "tranche_id": tranche_id,
             "package_id": package_id,
             "snapshot_ref": snapshot_ref(plan),
             "execution_snapshot": json.loads(snapshot_json) if snapshot_json else None,
@@ -3272,19 +3408,131 @@ class PaperOperationsService:
             "remainder": remainder,
             "recovered_from_persisted_attempt": remainder == "recovered_from_persisted_attempt",
         }
-        self._append_trade_event_once(
-            trade,
-            event_type=PaperTradeAuditEventType.LIVE_PACKAGE_RECORDED,
-            occurred_at=occurred_at,
-            detail=json.dumps(audit_payload, default=str),
+        if any(event.event_id == f"{trade.trade_id}:live_package:{package_id}" for event in trade.audit):
+            return trade
+        trade.audit.append(
+            PaperTradeAuditEvent(
+                event_id=f"{trade.trade_id}:live_package:{package_id}",
+                occurred_at=occurred_at,
+                event_type=PaperTradeAuditEventType.LIVE_PACKAGE_RECORDED,
+                detail=json.dumps(audit_payload, default=str),
+            )
         )
+        if snapshot_json:
+            from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+            snapshot_id = execution_snapshot_id_from_json(snapshot_json)
+            snapshot_event_id = f"{trade.trade_id}:execution_snapshot:{snapshot_id}"
+            if snapshot_id and not any(event.event_id == snapshot_event_id for event in trade.audit):
+                trade.audit.append(
+                    PaperTradeAuditEvent(
+                        event_id=snapshot_event_id,
+                        occurred_at=occurred_at,
+                        event_type=PaperTradeAuditEventType.EXECUTION_SNAPSHOT,
+                        detail=snapshot_json,
+                    )
+                )
+        if append:
+            sequence = 1 + max((item.sequence for item in trade.tranches), default=0)
+            from sports_hedge.application.execution_snapshot import execution_snapshot_id_from_json
+
+            snapshot_id = execution_snapshot_id_from_json(snapshot_json)
+            trade.tranches.append(
+                PaperTradeTranche(
+                    tranche_id=tranche_id,
+                    sequence=sequence,
+                    kind=PaperTradeTrancheKind.TOP_UP,
+                    occurred_at=occurred_at,
+                    capital_locked_gbp=incremental_gbp,
+                    guaranteed_profit_gbp=None,
+                    fill_ids=fill_ids,
+                    idempotency_key=snapshot_id or tranche_id,
+                    execution_snapshot_id=snapshot_id,
+                )
+            )
+            trade.audit.append(
+                PaperTradeAuditEvent(
+                    event_id=f"{trade.trade_id}:{tranche_id}",
+                    occurred_at=occurred_at,
+                    event_type=(
+                        PaperTradeAuditEventType.TOP_UP_TRANCHE_RECORDED
+                        if complete
+                        else PaperTradeAuditEventType.TOP_UP_PARTIAL_RECORDED
+                    ),
+                    detail=(
+                        f"tranche={tranche_id} incremental_gbp={incremental_gbp}"
+                        if complete
+                        else (
+                            f"tranche={tranche_id} incomplete live top-up; "
+                            "discretionary accumulation halted"
+                        )
+                    ),
+                )
+            )
+            self._lock_live_venue_fills(legs, plan=plan, occurred_at=occurred_at)
+        elif known_positive:
+            self._lock_live_venue_fills(legs, plan=plan, occurred_at=occurred_at)
         saved = self.trades.save(trade)
-        if saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
+        if not append and saved.state in {PaperTradeState.OPEN, PaperTradeState.PARTIAL}:
             self._ensure_opening_tranche(saved, occurred_at)
+            saved = self._bind_opening_execution_snapshot(saved, plan)
             self._promote_active_trade(saved, occurred_at)
             saved = self.trades.get(saved.trade_id) or saved
-        self._record_live_watch_stage(plan.opportunity_id, saved.state, occurred_at, package_outcome)
+        elif append:
+            saved = self.trades.get(saved.trade_id) or saved
+        if not append:
+            self._record_live_watch_stage(
+                plan.opportunity_id, saved.state, occurred_at, package_outcome
+            )
         return saved
+
+    def _lock_live_venue_fills(
+        self,
+        legs: list[PaperTradeLeg],
+        *,
+        plan: PaperFillPlan,
+        occurred_at: datetime,
+    ) -> None:
+        """Lock confirmed live fills. Missing native pools stay unposted, not invented."""
+
+        if self.ledger is None:
+            return
+        fx = {item.currency: item for item in plan.fx_snapshots}
+        requests: list[TreasuryLockRequest] = []
+        snap = self.ledger.treasury.snapshot()
+        for leg in legs:
+            if leg.filled_stake <= 0 or not leg.fill_id:
+                continue
+            if leg.fill_kind is not PaperLegFillKind.LIVE_VENUE:
+                continue
+            try:
+                snap.pool(leg.venue, leg.currency)
+            except KeyError:
+                continue
+            rate = self._lock_fx_rate(leg.venue, leg.currency, fx)
+            requests.append(
+                TreasuryLockRequest(
+                    venue=leg.venue,
+                    native_currency=leg.currency,
+                    amount_native=leg.filled_stake,
+                    lock_id=leg.fill_id,
+                    fill_id=leg.fill_id,
+                    trade_id=paper_trade_id(plan.opportunity_id),
+                    opportunity_id=plan.opportunity_id,
+                    source="live_venue_fill",
+                    reason="Confirmed live venue fill capital lock",
+                    fx_rate_gbp_per_unit=rate,
+                    capital_source=CapitalSource.AUTO_POOL.value,
+                )
+            )
+        if not requests:
+            return
+        try:
+            self.ledger.treasury.lock_capital(
+                requests, occurred_at=occurred_at, provenance=plan.provenance
+            )
+        except PaperTreasuryError:
+            return
 
     def _record_live_watch_stage(
         self,

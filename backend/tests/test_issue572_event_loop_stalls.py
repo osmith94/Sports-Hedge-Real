@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import itertools
 import threading
 import time
@@ -48,6 +49,7 @@ from loop_liveness_harness import (
     HeartbeatProbe,
     RealisticUniverse,
     SchedulingGap,
+    stream_runtime_is_unstarted,
     SlowCallback,
     extreme_stress_liveness_failures,
     extreme_stress_summary,
@@ -551,9 +553,11 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
 
     Before #572 this sweep produced >100 callbacks >=0.25s (up to ~0.56s on a
     fast Linux VM) and delayed the heartbeat past 0.5s, all inside
-    ``record_universe_fixture_progress``.
+    ``record_universe_fixture_progress``. STREAM stays default-off. Heartbeat
+    SLA is non-GC lateness; callbacks still fail at 0.25s including GC.
     """
 
+    assert stream_runtime_is_unstarted()
     universe = RealisticUniverse(REPRESENTATIVE_FIXTURES, latency_s=0.002, hot_every=25)
     hot_fixtures = len(range(0, REPRESENTATIVE_FIXTURES, 25))
     collector, repository = _collector(universe)
@@ -645,7 +649,7 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         f"longest_callback_ms={int(profiler.profile.longest_s * 1000)} "
         f"longest_non_gc_callback_ms={int(profiler.profile.longest_non_gc_s * 1000)} "
         f"longest_iteration_ms={int(profiler.profile.longest_iteration_s * 1000)} "
-        f"heartbeat_worst_ms={int(heartbeat.worst_s * 1000)} "
+        f"{heartbeat.report()} "
         f"callbacks_over_250ms={len(over)} "
         f"phase_clock_longest={LOOP_ACTIVITY.longest}"
     )
@@ -655,8 +659,11 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
     assert _scanner_signature(report) == _scanner_signature(reference)
     assert coordinator._universe_hot_promotions == hot_fixtures
     assert over == [], f"{len(over)} event-loop callbacks >= 0.25s\n{detail}"
-    assert heartbeat.worst_s < LIVENESS_BOUND_S, f"heartbeat {heartbeat.worst_s:.3f}s\n{detail}"
+    assert heartbeat.worst_non_gc_s < LIVENESS_BOUND_S, (
+        f"non-GC heartbeat {heartbeat.worst_non_gc_s:.3f}s ({heartbeat.report()})\n{detail}"
+    )
     assert profiler.profile.longest_non_gc_s < LIVENESS_BOUND_S, detail
+    assert stream_runtime_is_unstarted()
 
     # Runs recorded while UNIVERSE was in progress: true wall-clock overlap.
     during = [item for item in trace if item[2]]
@@ -671,6 +678,19 @@ async def test_representative_universe_keeps_loop_live_and_lanes_progressing(
         "BACKGROUND did not resume after UNIVERSE completed"
     )
     assert coordinator._universe_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_probe_non_gc_sla_does_not_raise_the_bound() -> None:
+    """Raw heartbeat may include loop-thread GC; the 0.25s SLA is non-GC."""
+
+    probe = HeartbeatProbe(interval_s=0.01).start()
+    await asyncio.sleep(0.04)
+    await probe.stop()
+    assert probe.beats >= 1
+    assert len(probe.gaps) == probe.beats
+    assert probe.worst_non_gc_s <= probe.worst_s + 1e-9
+    assert LIVENESS_BOUND_S == 0.25
 
 
 def _callback(elapsed_s: float, gc_s: float) -> SlowCallback:
@@ -729,3 +749,16 @@ async def test_extreme_stress_policy_still_fails_a_real_application_stall() -> N
     assert any(item.startswith("non-GC callback") for item in failures), failures
     summary = extreme_stress_summary("stall", gaps, profiler.profile.slow, longest_gc_pause_s=0.0)
     assert "non_gc_excursions=1" in summary, summary
+
+
+def test_identity_membership_keys_do_not_scan_the_whole_alias_map() -> None:
+    """UNIVERSE market_evaluation hottest frame on Windows full-suite 114280897588.
+
+    Scanning ``_aliases.items()`` per fixture is O(aliases) on the event loop.
+    The reverse index must stay the membership authority. Do not relax the
+    0.25s non-GC heartbeat bound to hide that scan.
+    """
+
+    src = inspect.getsource(FixtureCurrentStateStore._identity_membership_keys)
+    assert "_aliases_by_target" in src
+    assert "for alias, dest in self._aliases.items()" not in src

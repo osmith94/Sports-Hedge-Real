@@ -261,6 +261,7 @@ class FixtureCurrentStateStore:
         self._reset_generation = 0
         self._rows: dict[str, _FixtureRecord] = {}
         self._aliases: dict[str, str] = {}
+        self._aliases_by_target: dict[str, set[str]] = {}
         self._tombstones: dict[str, CurrentStateTombstone] = {}
         self._tombstone_aliases: dict[str, str] = {}
         self._scheduling_index: dict[str, str] = {}
@@ -291,6 +292,7 @@ class FixtureCurrentStateStore:
             self._generation = 0
             self._rows = {}
             self._aliases = {}
+            self._aliases_by_target = {}
             self._scheduling_index = {}
             self._has_collection = False
             if not keep_tombstones:
@@ -589,7 +591,7 @@ class FixtureCurrentStateStore:
                 self._bind_alias(alias, target)
         for alias, canonical_id in list(self._aliases.items()):
             if canonical_id not in self._rows:
-                self._aliases.pop(alias, None)
+                self._unbind_alias(alias)
         self._generation += 1
         self._has_collection = True
 
@@ -615,9 +617,7 @@ class FixtureCurrentStateStore:
             canonical_id = self._resolve_canonical_id_unlocked(identity)
             if canonical_id is None:
                 return frozenset()
-            aliases = {
-                alias for alias, target in self._aliases.items() if target == canonical_id
-            }
+            aliases = set(self._aliases_by_target.get(canonical_id, ()))
             aliases.add(canonical_id)
             return frozenset(aliases)
 
@@ -1713,9 +1713,7 @@ class FixtureCurrentStateStore:
                 canonical = str(status.fixture.canonical_event_id or "").strip()
                 if canonical:
                     existing.add(canonical)
-        for alias, dest in self._aliases.items():
-            if dest == target_id:
-                existing.add(alias)
+        existing.update(self._aliases_by_target.get(target_id, ()))
         return {item for item in existing if item}
 
     def _has_trusted_source_overlap(self, target_id: str, incoming_ids: set[str]) -> bool:
@@ -1732,23 +1730,53 @@ class FixtureCurrentStateStore:
         if source is None or target is None:
             return
         target.absorb_record(source, target_id=target_id)
-        for alias, dest in list(self._aliases.items()):
-            if dest == source_id:
-                self._aliases[alias] = target_id
-        self._aliases[source_id] = target_id
+        for alias in list(self._aliases_by_target.get(source_id, ())):
+            self._bind_alias_unlocked(alias, target_id, replace=True)
+        self._bind_alias_unlocked(source_id, target_id, replace=True)
         self._rows.pop(source_id, None)
         for key, dest in list(self._scheduling_index.items()):
             if dest == source_id:
                 self._scheduling_index[key] = target_id
 
     def _bind_alias(self, alias: str, target_id: str) -> None:
+        self._bind_alias_unlocked(alias, target_id, replace=False)
+
+    def _bind_alias_unlocked(
+        self, alias: str, target_id: str, *, replace: bool
+    ) -> None:
         key = alias.strip()
-        if not key or target_id not in self._rows:
+        if not key:
+            return
+        if not replace and target_id not in self._rows:
             return
         current = self._aliases.get(key)
-        if current is not None and current in self._rows and current != target_id:
+        if (
+            not replace
+            and current is not None
+            and current in self._rows
+            and current != target_id
+        ):
             return
+        if current == target_id:
+            self._aliases_by_target.setdefault(target_id, set()).add(key)
+            return
+        if current is not None:
+            self._unbind_alias_from_target(key, current)
         self._aliases[key] = target_id
+        self._aliases_by_target.setdefault(target_id, set()).add(key)
+
+    def _unbind_alias(self, alias: str) -> None:
+        current = self._aliases.pop(alias, None)
+        if current is not None:
+            self._unbind_alias_from_target(alias, current)
+
+    def _unbind_alias_from_target(self, alias: str, target_id: str) -> None:
+        members = self._aliases_by_target.get(target_id)
+        if members is None:
+            return
+        members.discard(alias)
+        if not members:
+            self._aliases_by_target.pop(target_id, None)
 
     def _bind_aliases(self, aliases: set[str], target_id: str) -> None:
         for alias in aliases:
@@ -1814,11 +1842,7 @@ class FixtureCurrentStateStore:
         membership = classify_scan_lane(fixture, evaluated, **classify_kwargs)
         if membership is ScanLane.DROP:
             if is_explicit_terminal(fixture):
-                aliases = {
-                    alias
-                    for alias, target in self._aliases.items()
-                    if target == canonical_id
-                }
+                aliases = set(self._aliases_by_target.get(canonical_id, ()))
                 aliases.add(canonical_id)
                 self._record_tombstone(
                     canonical_id,
@@ -1830,9 +1854,7 @@ class FixtureCurrentStateStore:
                 self._drop_identity(canonical_id)
             return
         if authoritative_post_kickoff_zero_equivalents(fixture, evaluated):
-            aliases = {
-                alias for alias, target in self._aliases.items() if target == canonical_id
-            }
+            aliases = set(self._aliases_by_target.get(canonical_id, ()))
             aliases.add(canonical_id)
             self._record_market_closure(
                 canonical_id,
@@ -1996,9 +2018,8 @@ class FixtureCurrentStateStore:
     def _drop_identity(self, canonical_id: str) -> None:
         self._note_touched(canonical_id)
         self._rows.pop(canonical_id, None)
-        for alias, target in list(self._aliases.items()):
-            if target == canonical_id:
-                self._aliases.pop(alias, None)
+        for alias in list(self._aliases_by_target.get(canonical_id, ())):
+            self._unbind_alias(alias)
         for key, target in list(self._scheduling_index.items()):
             if target == canonical_id:
                 self._scheduling_index.pop(key, None)

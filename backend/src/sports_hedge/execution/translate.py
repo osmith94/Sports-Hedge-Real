@@ -70,7 +70,23 @@ class KalshiAction(StrEnum):
 
 
 class TranslationError(ValueError):
-    """The approved price or size cannot be represented without worsening it."""
+    """The approved price or size cannot be represented without worsening it.
+
+    ``code`` is an optional stable freeze-diagnostic token. Callers must not
+    persist ``str(self)``: messages are for developers, not audit/UI copy.
+    ``details`` may hold only already-local numeric fields.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -345,7 +361,10 @@ def polymarket_token_id(native_runner_id: str) -> str:
 
     token = native_runner_id.strip()
     if not token.isdigit() or len(token) < 10 or ":" in native_runner_id:
-        raise TranslationError("Polymarket execution requires the exact CLOB token id")
+        raise TranslationError(
+            "Polymarket execution requires the exact CLOB token id",
+            code="missing_or_invalid_native_market_or_token",
+        )
     return token
 
 
@@ -367,33 +386,74 @@ def polymarket_native_order(
     """
 
     if not native_market_id.strip():
-        raise TranslationError("Polymarket market id is required")
+        raise TranslationError(
+            "Polymarket market id is required",
+            code="missing_or_invalid_native_market_or_token",
+        )
     if decimal_odds <= 1:
-        raise TranslationError("decimal odds must be greater than 1")
+        raise TranslationError(
+            "decimal odds must be greater than 1",
+            code="price_rounding_incompatible",
+        )
     if requested_stake <= 0:
-        raise TranslationError("Polymarket stake must be positive")
+        raise TranslationError(
+            "Polymarket stake must be positive",
+            code="stake_rounding_or_size_incompatible",
+        )
     if tick_size not in _POLYMARKET_TICKS:
-        raise TranslationError("Polymarket tick size is not a current V2 increment")
+        raise TranslationError(
+            "Polymarket tick size is not a current V2 increment",
+            code="unsupported_tick_size",
+        )
     if minimum_shares <= 0:
-        raise TranslationError("Polymarket minimum size is missing")
+        raise TranslationError(
+            "Polymarket minimum size is missing",
+            code="missing_minimum_order_size",
+        )
     token = polymarket_token_id(native_runner_id)
     tick = Decimal(tick_size)
     quantum = Decimal(10) ** -_POLYMARKET_TICKS[tick_size]
     implied = Decimal(1) / decimal_odds
     if side is MarketSide.BACK:
         price = _floor_to(implied, tick)
+        price_fields = {"intended_limit_price": format(price, "f")}
         if price <= 0 or price >= 1:
-            raise TranslationError("Polymarket buy limit is outside the tradable price range")
+            raise TranslationError(
+                "Polymarket buy limit is outside the tradable price range",
+                code="price_rounding_incompatible",
+                details=price_fields,
+            )
         odds = Decimal(1) / price
         if odds < decimal_odds:
-            raise TranslationError("Polymarket price rounding would worsen the approved odds")
+            raise TranslationError(
+                "Polymarket price rounding would worsen the approved odds",
+                code="price_rounding_incompatible",
+                details=price_fields,
+            )
         amount = _floor_to(requested_stake, quantum)
+        size_fields = {**price_fields, "intended_native_stake": format(amount, "f")}
         if amount <= 0:
-            raise TranslationError("Polymarket stake is below the size increment")
-        _require_stake_coverage(requested_stake, amount)
+            raise TranslationError(
+                "Polymarket stake is below the size increment",
+                code="stake_rounding_or_size_incompatible",
+                details=size_fields,
+            )
+        try:
+            _require_stake_coverage(requested_stake, amount)
+        except TranslationError as exc:
+            raise TranslationError(
+                str(exc),
+                code="stake_rounding_or_size_incompatible",
+                details=size_fields,
+            ) from exc
         shares = amount / price
+        size_fields = {**size_fields, "intended_native_shares": format(shares, "f")}
         if shares < minimum_shares:
-            raise TranslationError("Polymarket stake is below the minimum order size")
+            raise TranslationError(
+                "Polymarket stake is below the minimum order size",
+                code="below_native_minimum_shares",
+                details=size_fields,
+            )
         return PolymarketNativeOrder(
             token_id=token,
             side=PolymarketOrderSide.BUY,
@@ -407,20 +467,50 @@ def polymarket_native_order(
         )
     if side is MarketSide.LAY:
         price = _ceil_to(implied, tick)
+        price_fields = {"intended_limit_price": format(price, "f")}
         if price <= 0 or price >= 1:
-            raise TranslationError("Polymarket sell limit is outside the tradable price range")
+            raise TranslationError(
+                "Polymarket sell limit is outside the tradable price range",
+                code="price_rounding_incompatible",
+                details=price_fields,
+            )
         odds = Decimal(1) / price
         if odds > decimal_odds:
-            raise TranslationError("Polymarket price rounding would worsen the approved lay")
+            raise TranslationError(
+                "Polymarket price rounding would worsen the approved lay",
+                code="price_rounding_incompatible",
+                details=price_fields,
+            )
         shares = _floor_to(requested_stake / price, quantum)
+        size_fields = {**price_fields, "intended_native_shares": format(shares, "f")}
         if shares <= 0:
-            raise TranslationError("Polymarket stake is below the size increment")
+            raise TranslationError(
+                "Polymarket stake is below the size increment",
+                code="stake_rounding_or_size_incompatible",
+                details=size_fields,
+            )
         received = price * shares
+        size_fields = {**size_fields, "intended_native_stake": format(received, "f")}
         if received > requested_stake:
-            raise TranslationError("translated size would increase the approved stake")
-        _require_stake_coverage(requested_stake, received)
+            raise TranslationError(
+                "translated size would increase the approved stake",
+                code="stake_rounding_or_size_incompatible",
+                details=size_fields,
+            )
+        try:
+            _require_stake_coverage(requested_stake, received)
+        except TranslationError as exc:
+            raise TranslationError(
+                str(exc),
+                code="stake_rounding_or_size_incompatible",
+                details=size_fields,
+            ) from exc
         if shares < minimum_shares:
-            raise TranslationError("Polymarket stake is below the minimum order size")
+            raise TranslationError(
+                "Polymarket stake is below the minimum order size",
+                code="below_native_minimum_shares",
+                details=size_fields,
+            )
         return PolymarketNativeOrder(
             token_id=token,
             side=PolymarketOrderSide.SELL,
@@ -432,7 +522,10 @@ def polymarket_native_order(
             tick_size=tick_size,
             order_type=POLYMARKET_ORDER_TYPE,
         )
-    raise TranslationError("Polymarket execution only maps back to buy and lay to sell")
+    raise TranslationError(
+        "Polymarket execution only maps back to buy and lay to sell",
+        code="native_order_translation_other",
+    )
 
 
 def polymarket_payoff(order: PolymarketNativeOrder, *, outcome_wins: bool) -> Decimal:

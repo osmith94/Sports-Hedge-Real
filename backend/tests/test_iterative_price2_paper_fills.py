@@ -47,6 +47,7 @@ from sports_hedge.application.paper_operations import (
 )
 from sports_hedge.config import Settings
 from sports_hedge.paper.trades import PaperTradeAuditEventType, PaperTradeTrancheKind
+from sports_hedge.paper.placement_room import discretionary_cycle_cap_gbp
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 
 
@@ -265,8 +266,26 @@ async def test_concurrent_follow_up_does_not_fetch_twice(tmp_path, monkeypatch) 
         )
 
     driver = asyncio.create_task(_drive())
+    wait_started = asyncio.create_task(started.wait())
     try:
-        await asyncio.wait_for(started.wait(), timeout=5)
+        done, _pending = await asyncio.wait(
+            {driver, wait_started},
+            timeout=30,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not started.is_set():
+            fetches = 0
+            driver_error = None
+            if driver.done():
+                try:
+                    fetches = len(driver.result().matchbook.get_market_calls)
+                except BaseException as exc:  # noqa: BLE001 - surface driver crash
+                    driver_error = exc
+            raise AssertionError(
+                "iterative Matchbook get_market never reached the in-flight "
+                f"follow-up (driver_done={driver.done()} fetches={fetches} "
+                f"driver_error={driver_error!r})"
+            )
         rows = ready["watchlist"].repository.list_opportunities()
         opportunity_id = rows[0].opportunity_id
         plan = ready["operations"]._plans[opportunity_id]
@@ -292,6 +311,8 @@ async def test_concurrent_follow_up_does_not_fetch_twice(tmp_path, monkeypatch) 
         assert [row["cycle_outcome"] for row in audits] == ["filled", "rejected"]
     finally:
         release.set()
+        if not wait_started.done():
+            wait_started.cancel()
         if not driver.done():
             await driver
 
@@ -723,5 +744,61 @@ async def test_snapshot_bind_uses_one_trade_save_and_rolls_back(tmp_path, monkey
         assert successful.idempotency_key == snapshot_id
         assert loaded.capital_locked_gbp != before_capital
         assert _locked_pools(bundle.ledger) != before_locks
+    finally:
+        _close(bundle)
+
+
+def test_max_one_time_is_per_tranche_opportunity_and_event_are_cumulative() -> None:
+    opening = discretionary_cycle_cap_gbp(
+        event_room_gbp=Decimal("5"),
+        opportunity_room_gbp=Decimal("5"),
+        max_one_time_gbp=Decimal("3"),
+    )
+    follow = discretionary_cycle_cap_gbp(
+        event_room_gbp=Decimal("2"),
+        opportunity_room_gbp=Decimal("2"),
+        max_one_time_gbp=Decimal("3"),
+    )
+    assert opening == Decimal("3.00")
+    assert follow == Decimal("2.00")
+    assert opening + follow == Decimal("5.00")
+
+
+@pytest.mark.asyncio
+async def test_three_pound_opening_plus_two_pound_top_up_stops_at_five(tmp_path, monkeypatch) -> None:
+    rich = _market("80")
+    bundle = await _run(
+        tmp_path,
+        monkeypatch,
+        name="wave37-caps",
+        matchbook_payloads=[_stale(rich), _fresh(rich), _fresh(rich), _fresh(rich)],
+        kalshi_books=[
+            _book("0.20", "0.70", "80.00"),
+            _book("0.20", "0.70", "80.00"),
+            _book("0.20", "0.70", "80.00"),
+            _book("0.20", "0.70", "80.00"),
+        ],
+        max_one_time_gbp=3,
+        max_opportunity_gbp=5,
+        max_event_gbp=5,
+    )
+    try:
+        trade = _open_trade(bundle)
+        opening = next(
+            item for item in trade.tranches if item.kind is PaperTradeTrancheKind.OPENING
+        )
+        top_ups = [
+            item for item in trade.tranches if item.kind is PaperTradeTrancheKind.TOP_UP
+        ]
+        assert opening.capital_locked_gbp == Decimal("3.00")
+        assert len(top_ups) == 1
+        assert top_ups[0].capital_locked_gbp == Decimal("2.00")
+        assert trade.capital_locked_gbp == Decimal("5.00")
+        audits = _audits(bundle, trade.opportunity_id)
+        opening_snap = json.loads(audits[0]["snapshot_json"])
+        top_snap = json.loads(audits[1]["snapshot_json"])
+        assert "native_order_freeze_diagnostics" in opening_snap
+        assert "native_order_freeze_diagnostics" in top_snap
+        assert opening_snap["snapshot_id"] != top_snap["snapshot_id"]
     finally:
         _close(bundle)

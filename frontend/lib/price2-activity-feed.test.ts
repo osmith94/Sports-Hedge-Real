@@ -254,4 +254,75 @@ describe("Price-2 activity feed projection", () => {
     assert.match(feed, /Price-2 quote detail/);
     assert.doesNotMatch(feed, /available_depth/);
   });
+
+  it("distinguishes below-threshold economics from an unproven Polymarket native order", () => {
+    const rejected = activityFromPrice2(
+      attempt({
+        status: "rejected",
+        accepted: false,
+        filled: false,
+        net_edge: "0.0022",
+        guaranteed_profit: "0.01",
+        minimum_net_edge: "0.01",
+        economics_vs_threshold: "below_configured_threshold",
+        native_order_freeze_recorded: true,
+        rejection_reason: "polymarket_native_constraints_unproven",
+        legs: [
+          {
+            venue: "matchbook",
+            outcome: "home",
+            displayed_odds: "2.04",
+            requested_stake: "3",
+            stake_currency: "GBP",
+            freeze_status: "frozen",
+            freeze_reason: "frozen",
+            native_frozen: true,
+          },
+          {
+            venue: "polymarket",
+            outcome: "away",
+            displayed_odds: "2",
+            requested_stake: "1.00",
+            stake_currency: "USD",
+            freeze_status: "not_frozen",
+            freeze_reason: "below_native_minimum_shares",
+            native_frozen: false,
+            observed_tick_size: "0.01",
+            observed_minimum_shares: "5",
+            intended_native_shares: "2",
+          },
+        ],
+      }),
+    );
+    assert.equal(rejected.title, "Price-2 rejected");
+    assert.match(rejected.detail, /net 0\.22%/);
+    assert.match(rejected.detail, /below configured 1\.00% threshold/);
+    assert.match(rejected.detail, /PM native order not proved: below native minimum shares/);
+    assert.match(rejected.detail, /polymarket_native_constraints_unproven/);
+    assert.doesNotMatch(rejected.detail, /fill recorded|opened this trade/);
+    assert.equal(rejected.price2?.legs[1]?.freezeReason, "below_native_minimum_shares");
+    const old = activityFromPrice2(
+      attempt({
+        status: "rejected",
+        accepted: false,
+        net_edge: "0.0022",
+        rejection_reason: "polymarket_native_constraints_unproven",
+        native_order_freeze_recorded: false,
+        legs: [
+          {
+            venue: "polymarket",
+            outcome: "home",
+            freeze_status: "details_not_recorded",
+            freeze_reason: "details_not_recorded",
+          },
+        ],
+      }),
+    );
+    assert.match(old.detail, /PM native order not proved: details not recorded/);
+    assert.doesNotMatch(old.detail, /missing tick size|below native minimum/);
+    const feed = readFileSync(join(frontendRoot, "components/activity-feed.tsx"), "utf8");
+    assert.match(feed, /native order freeze details not recorded/);
+    assert.match(feed, /native order not proved/);
+    assert.match(feed, /Configured minimum net edge/);
+  });
 });

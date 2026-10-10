@@ -39,6 +39,9 @@ class PaperOpportunityLeg(BaseModel):
     levels: list[BookLevel] = Field(default_factory=list)
     quote_age_ms: int | None = Field(default=None, ge=0)
     quote_captured_at: datetime | None = None
+    expected_average_odds: Decimal | None = Field(default=None, gt=Decimal("1"))
+    approved_depth_worst_limit: Decimal | None = Field(default=None, gt=Decimal("1"))
+    admitted_levels: list[BookLevel] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def normalize(self) -> "PaperOpportunityLeg":

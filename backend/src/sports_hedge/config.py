@@ -206,6 +206,10 @@ class Settings(BaseSettings):
     matchbook_currency: Literal["GBP", "USD", "EUR", "AUD", "CAD", "HKD"] = "GBP"
     matchbook_price_depth: int = Field(default=5, ge=1, le=50)
     matchbook_minimum_liquidity: float = Field(default=2.0, ge=0)
+    # Exact-ID Price-2 / HOT get_market reads. UNIVERSE listings keep the
+    # heavier minimum-liquidity=2 filter so a £0.50 top is not omitted here.
+    matchbook_price2_price_depth: int = Field(default=20, ge=1, le=50)
+    matchbook_price2_minimum_liquidity: float = Field(default=0.0, ge=0)
     # Provider-side event paging. sport-ids is resolved via GET /edge/rest/lookups/sports.
     matchbook_event_per_page: int = Field(default=100, ge=1, le=100)
     matchbook_event_max_pages: int = Field(default=10, ge=1, le=50)

@@ -33,8 +33,12 @@ class DepthQuoteCandidate(BaseModel):
     net_decimal_odds: Decimal
     cumulative_depth: Decimal
     levels_consumed: int = Field(ge=1)
+    worst_limit_odds: Decimal | None = None
+    expected_average_net_odds: Decimal | None = None
 
     def as_executable_quote(self) -> ExecutableQuote:
+        """Solver input is the conservative worst-limit net of this prefix."""
+
         return ExecutableQuote(
             outcome=self.outcome,
             venue=self.venue,
@@ -54,11 +58,11 @@ class DepthScanResult(BaseModel):
 class DepthAwareCompleteSetScanner:
     """Conservative prefix-depth search over executable back/buy books.
 
-    Each order-book prefix is represented by its weighted-average price and full
-    cumulative depth. If the reciprocal solver ultimately uses less than that
-    cumulative depth, retaining the prefix average is conservative because deeper
-    levels can only worsen (or equal) the average price in a properly ordered back
-    book. The search is deliberately small and deterministic for Phase 1.
+    Each prefix stores the stake-weighted blend (expected snapshot economics)
+    and qualifies using the **worst BACK/BUY level in that prefix**. A single
+    bounded native order may fill entirely at that worst limit, so Price-1
+    sizing, Price-2, and freeze share that conservative net rather than the
+    top-of-book headline. The search is deliberately small and deterministic.
     """
 
     def __init__(self, solver: CompleteSetArbitrageSolver | None = None) -> None:
@@ -174,19 +178,27 @@ def _prefix_candidates(
         cumulative_stake += level.available_stake
         cumulative_return += level.available_stake * level.decimal_odds
         gross_average = cumulative_return / cumulative_stake
+        worst_limit = level.decimal_odds
         try:
-            economics = apply_venue_costs(
+            blend = apply_venue_costs(
                 source.cost,
                 gross_decimal_odds=gross_average,
+                require_gbp=False,
+            )
+            worst = apply_venue_costs(
+                source.cost,
+                gross_decimal_odds=worst_limit,
                 require_gbp=False,
             )
         except CostRuleError as exc:
             cost_reasons.append(exc.reason)
             continue
-        net_average = economics.net_decimal_equivalent
+        net_average = blend.net_decimal_equivalent
+        net_worst = worst.net_decimal_equivalent
         if configured_slippage_bps:
             net_average = apply_odds_haircut(net_average, configured_slippage_bps)
-        if net_average <= 1:
+            net_worst = apply_odds_haircut(net_worst, configured_slippage_bps)
+        if net_worst <= 1:
             continue
         candidates.append(
             DepthQuoteCandidate(
@@ -195,9 +207,11 @@ def _prefix_candidates(
                 source_market_id=source.source_market_id,
                 source_runner_id=source.source_runner_id,
                 gross_weighted_odds=gross_average,
-                net_decimal_odds=net_average,
+                net_decimal_odds=net_worst,
                 cumulative_depth=cumulative_stake,
                 levels_consumed=index,
+                worst_limit_odds=worst_limit,
+                expected_average_net_odds=net_average,
             )
         )
     return candidates, list(dict.fromkeys(cost_reasons))

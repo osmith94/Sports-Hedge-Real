@@ -15,8 +15,6 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sports_hedge.application.executable_liquidity import decision_net_edge
-
 # Initial PAPER validation bound. Cross-venue and constituent books must be
 # retrieved within this window of each other. It is intentionally tighter than
 # the 2,000 ms quote-age gate: two individually fresh books can still be too
@@ -50,6 +48,8 @@ class ExecutionLegQuote:
     quote_age_ms: int | None
     retrieved_at: datetime | None
     retrieval_native_id: str | None = None
+    expected_average_odds: str | None = None
+    approved_depth_worst_limit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +136,44 @@ class ExecutionTiming:
     quote_age_ms: tuple[tuple[str, int | None], ...] = ()
 
 
+NATIVE_ORDER_FREEZE_REASONS = frozenset(
+    {
+        "frozen",
+        "missing_tick_size",
+        "missing_minimum_order_size",
+        "invalid_constraint_metadata",
+        "missing_or_invalid_native_market_or_token",
+        "unsupported_tick_size",
+        "below_native_minimum_shares",
+        "price_rounding_incompatible",
+        "stake_rounding_or_size_incompatible",
+        "native_order_translation_other",
+    }
+)
+DETAILS_NOT_RECORDED_REASON = "details_not_recorded"
+
+
+@dataclass(frozen=True)
+class NativeOrderFreezeDiagnostic:
+    """Local freeze outcome for one attempted native order. Not a veto.
+
+    Captured at Price-2 freeze time from already-held books and the approved
+    leg. Never includes exception text, credentials, or extra venue reads.
+    """
+
+    venue: str
+    frozen: bool
+    reason: str
+    outcome: str | None = None
+    native_market_id: str | None = None
+    native_runner_id: str | None = None
+    observed_tick_size: str | None = None
+    observed_minimum_shares: str | None = None
+    intended_native_stake: str | None = None
+    intended_native_shares: str | None = None
+    intended_limit_price: str | None = None
+
+
 @dataclass(frozen=True)
 class FrozenNativeOrder:
     """Venue-native order frozen at Price-2. Execution submits these values.
@@ -161,6 +199,10 @@ class FrozenNativeOrder:
     ladder_odds: str | None = None
     native_stake: str | None = None
     native_side: str | None = None
+    approved_depth_worst_limit: str | None = None
+    expected_average: str | None = None
+    requested_total: str | None = None
+    admitted_levels: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -205,6 +247,7 @@ class ExecutionSnapshot:
     timing: ExecutionTiming | None = None
     execution_cycle: int = 0
     frozen_orders: tuple[FrozenNativeOrder, ...] = ()
+    native_order_freeze_diagnostics: tuple[NativeOrderFreezeDiagnostic, ...] = ()
     venue_readiness: tuple[VenueReadinessEvidence, ...] = ()
 
     def __post_init__(self) -> None:
@@ -288,6 +331,9 @@ class ExecutionSnapshot:
             "capital_constraint": _capital_json(self.capital_constraint),
             "timing": _timing_json(self.timing),
             "frozen_orders": [_frozen_order_json(item) for item in self.frozen_orders],
+            "native_order_freeze_diagnostics": [
+                _freeze_diagnostic_json(item) for item in self.native_order_freeze_diagnostics
+            ],
             "venue_readiness": [_readiness_json(item) for item in self.venue_readiness],
             "retrievals": [
                 {
@@ -310,6 +356,8 @@ class ExecutionSnapshot:
                     "quote_age_ms": leg.quote_age_ms,
                     "retrieved_at": leg.retrieved_at.isoformat() if leg.retrieved_at else None,
                     "retrieval_native_id": leg.retrieval_native_id,
+                    "expected_average_odds": leg.expected_average_odds,
+                    "approved_depth_worst_limit": leg.approved_depth_worst_limit,
                     "levels": [{"odds": odds, "depth": depth} for odds, depth in leg.levels],
                 }
                 for leg in self.legs
@@ -437,6 +485,8 @@ def leg_quotes_from_decision(
         native_id = None if matched is None else matched.native_id
         if retrieved_at is None and retrieved_at_by_venue is not None and not retrievals:
             retrieved_at = retrieved_at_by_venue.get(venue)
+        expected = getattr(leg, "expected_average_odds", None)
+        worst = getattr(leg, "approved_depth_worst_limit", None)
         quotes.append(
             ExecutionLegQuote(
                 venue=venue,
@@ -450,6 +500,8 @@ def leg_quotes_from_decision(
                 quote_age_ms=leg.quote_age_ms,
                 retrieved_at=retrieved_at,
                 retrieval_native_id=native_id,
+                expected_average_odds=None if expected is None else str(expected),
+                approved_depth_worst_limit=None if worst is None else str(worst),
             )
         )
     return tuple(quotes)
@@ -614,6 +666,22 @@ def _capital_json(item: ExecutionCapitalEvidence | None) -> dict[str, Any] | Non
     }
 
 
+def _freeze_diagnostic_json(item: NativeOrderFreezeDiagnostic) -> dict[str, Any]:
+    return {
+        "venue": item.venue,
+        "frozen": item.frozen,
+        "reason": item.reason,
+        "outcome": item.outcome,
+        "native_market_id": item.native_market_id,
+        "native_runner_id": item.native_runner_id,
+        "observed_tick_size": item.observed_tick_size,
+        "observed_minimum_shares": item.observed_minimum_shares,
+        "intended_native_stake": item.intended_native_stake,
+        "intended_native_shares": item.intended_native_shares,
+        "intended_limit_price": item.intended_limit_price,
+    }
+
+
 def _frozen_order_json(item: FrozenNativeOrder) -> dict[str, Any]:
     return {
         "venue": item.venue,
@@ -633,6 +701,12 @@ def _frozen_order_json(item: FrozenNativeOrder) -> dict[str, Any]:
         "ladder_odds": item.ladder_odds,
         "native_stake": item.native_stake,
         "native_side": item.native_side,
+        "approved_depth_worst_limit": item.approved_depth_worst_limit,
+        "expected_average": item.expected_average,
+        "requested_total": item.requested_total,
+        "admitted_levels": [
+            {"odds": odds, "stake": stake} for odds, stake in item.admitted_levels
+        ],
     }
 
 
@@ -670,6 +744,8 @@ def _timing_json(item: ExecutionTiming | None) -> dict[str, Any] | None:
 
 
 def snapshot_economics(decision: Any) -> tuple[str | None, str | None]:
+    from sports_hedge.application.executable_liquidity import decision_net_edge
+
     edge = decision_net_edge(decision)
     profit = _guaranteed_profit(decision)
     return (None if edge is None else str(edge), None if profit is None else str(profit))

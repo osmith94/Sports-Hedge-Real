@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -397,15 +398,28 @@ async def test_matching_diagnostics_report_no_multi_venue_identity_without_fabri
 
 @pytest.mark.asyncio
 async def test_repeated_universe_cycles_do_not_accumulate_tasks_or_latency() -> None:
+    from sports_hedge.application.event_loop_activity import (
+        gc_pause_total_seconds,
+        install_gc_pause_monitor,
+    )
+
     fixture_count = 16
     collector, repository, _matchbook, _polymarket = _collector(fixture_count)
     try:
+        install_gc_pause_monitor()
+        # Pay leftover-heap collection outside the soak. A single gen2 pause
+        # (966ms on Windows full-suite job 114280897588) inflates second-half
+        # wall without a task leak; the ratio below is non-GC work.
+        gc.collect()
         wall_samples: list[float] = []
+        gc_samples: list[float] = []
         live_tasks_before = len(
             [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
         )
         for _ in range(SYNTHETIC_SOAK_CYCLES):
+            gc_before = gc_pause_total_seconds()
             report, wall_seconds = await _run_universe(collector)
+            gc_samples.append(max(0.0, gc_pause_total_seconds() - gc_before))
             _assert_stable_report(report, fixture_count)
             wall_samples.append(wall_seconds)
             assert collector._inflight == set()
@@ -414,9 +428,17 @@ async def test_repeated_universe_cycles_do_not_accumulate_tasks_or_latency() -> 
         )
         assert live_tasks_after <= live_tasks_before
         assert max(wall_samples) < SYNTHETIC_CYCLE_BUDGET_SECONDS * 0.8
-        first_half = sum(wall_samples[:6]) / 6
-        second_half = sum(wall_samples[6:]) / 6
-        assert second_half <= first_half * 1.75 + 0.02
+        non_gc = [
+            max(0.0, wall - pause) for wall, pause in zip(wall_samples, gc_samples, strict=True)
+        ]
+        first_half = sum(non_gc[:6]) / 6
+        second_half = sum(non_gc[6:]) / 6
+        assert second_half <= first_half * 1.75 + 0.02, (
+            f"non-GC soak second_half={second_half:.4f}s first_half={first_half:.4f}s "
+            f"wall_ms={[round(item * 1000, 1) for item in wall_samples]} "
+            f"gc_ms={[round(item * 1000, 1) for item in gc_samples]} "
+            f"task_delta={live_tasks_after - live_tasks_before}"
+        )
         print(
             json.dumps(
                 {
@@ -429,6 +451,9 @@ async def test_repeated_universe_cycles_do_not_accumulate_tasks_or_latency() -> 
                         3,
                     ),
                     "wall_ms_max": round(max(wall_samples) * 1000, 3),
+                    "gc_ms_max": round(max(gc_samples) * 1000, 3),
+                    "non_gc_ms_first_half": round(first_half * 1000, 3),
+                    "non_gc_ms_second_half": round(second_half * 1000, 3),
                     "task_delta": live_tasks_after - live_tasks_before,
                     "cancels": report.scan_diagnostics["provider_cancels"],
                     "orphans": report.scan_diagnostics["inflight_orphaned"],
