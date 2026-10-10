@@ -231,6 +231,10 @@ async def test_startup_dense_shard_keeps_api_scheduling_gap_under_quarter_second
     Ground truth is ``CallbackProfiler`` (each asyncio callback). A wait_for
     timer probe is recorded for diagnosis; Linux CI host lateness has exceeded
     0.25s here without a >=0.25s application callback.
+
+    ACTIVE TRADE still has to mark ``scheduler`` during the bridge. The first
+    paper-settlement ledger import is stubbed so Windows CI does not confuse
+    that one-shot thread work with worker starvation. STREAM is not started.
     """
 
     monkeypatch.setenv("PAPER_LIVE_REFRESH_ENABLED", "true")
@@ -254,6 +258,15 @@ async def test_startup_dense_shard_keeps_api_scheduling_gap_under_quarter_second
     coordinator._seconds_until_hot = lambda: 0.01  # type: ignore[method-assign]
     coordinator._seconds_until_background = lambda: 0.01  # type: ignore[method-assign]
     coordinator._seconds_until_active_trade = lambda: 0.01  # type: ignore[method-assign]
+    async def skip_first_ledger_import() -> None:
+        # First real settlement builds the paper SQLite ledger in a worker
+        # thread. On Windows CI that import can outlast this dense UNIVERSE
+        # bridge, so ACTIVE TRADE never reaches its scheduler mark even though
+        # HOT/BACKGROUND keep ticking. That is a test race, not lane
+        # starvation. issue572 stubs the same hook. Cadence is unchanged.
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(coordinator, "_maybe_run_paper_settlement", skip_first_ledger_import)
     done = asyncio.Event()
     baseline: dict[tuple[str, str], int] = {}
     partition_holder: dict[str, object] = {}
@@ -336,7 +349,11 @@ async def test_startup_dense_shard_keeps_api_scheduling_gap_under_quarter_second
     for lane in ("hot", "background", "active_trade"):
         during = LOOP_ACTIVITY.mark_counts.get((lane, "scheduler"), 0)
         before = baseline.get((lane, "scheduler"), 0)
-        assert during > before, f"{lane} did not run during the dense UNIVERSE bridge"
+        assert during > before, (
+            f"{lane} did not run during the dense UNIVERSE bridge "
+            f"(scheduler marks during={during} baseline={before} "
+            f"all={dict(LOOP_ACTIVITY.mark_counts)})"
+        )
     assert ("active_trade", "paper_settlement") in LOOP_ACTIVITY.phases_seen
     assert gaps, "health-equivalent probe never woke while workers ran"
     worst = max(gaps)
