@@ -33,7 +33,7 @@ from sports_hedge.application.stream.trigger import (
     StreamBookSignal,
     StreamTriggerPolicy,
 )
-from sports_hedge.config import get_settings
+from sports_hedge.config import Settings
 from sports_hedge.execution.package import execution_armed
 
 CatalogueLoader = Callable[[str], list[Any]]
@@ -182,7 +182,7 @@ class StreamRuntime:
             books_current=books_current,
             candidates_current=candidates_current,
             metrics_scope="session",
-            execution_enabled=execution_armed(get_settings()),
+            execution_enabled=execution_armed(Settings()),
             candidates=candidates,
             limitations=list(PHASE1_LIMITATIONS),
         )
@@ -401,14 +401,16 @@ def get_stream_runtime() -> StreamRuntime:
     global _SHARED
     with _LOCK:
         if _SHARED is None:
-            _SHARED = StreamRuntime()
+            _SHARED = StreamRuntime(shadow=StreamShadowComparer.shared())
         return _SHARED
 
 
 def reset_stream_runtime(runtime: StreamRuntime | None = None) -> StreamRuntime:
     global _SHARED
     with _LOCK:
-        _SHARED = runtime if runtime is not None else StreamRuntime()
+        _SHARED = (
+            runtime if runtime is not None else StreamRuntime(shadow=StreamShadowComparer.shared())
+        )
         return _SHARED
 
 

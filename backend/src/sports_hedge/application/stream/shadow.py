@@ -35,6 +35,7 @@ from sports_hedge.arbitrage.min_net_threshold import catalogue_market_scope
 from sports_hedge.fx.scanner_context import bind_lane_fx
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
+from sports_hedge.config import Settings
 from sports_hedge.paper.models import PaperScanDecision
 from sports_hedge.persistence.operator_scanner_settings import (
     effective_operator_scanner_settings,
@@ -85,11 +86,13 @@ class StreamShadowComparer:
         catalogue_store: Any = None,
         fx_snapshots: list[Any] | None = None,
         fx_unavailable_reason: str | None = None,
+        use_process_authorities: bool = False,
     ) -> None:
         self.matchbook_builder = MatchbookObservationBuilder()
         self.polymarket_builder = PolymarketObservationBuilder()
         self._paper_scan = paper_scan
         self.catalogue_store = catalogue_store
+        self._use_process_authorities = use_process_authorities
         self._explicit_fx = list(fx_snapshots) if fx_snapshots else None
         self._explicit_fx_reason = fx_unavailable_reason
         self._fx_snapshots: list[Any] = list(fx_snapshots or [])
@@ -98,10 +101,17 @@ class StreamShadowComparer:
         self.candidates: list[StreamCandidate] = []
         self.decisions: dict[str, Any] = {}
 
+    @classmethod
+    def shared(cls, **kwargs: Any) -> StreamShadowComparer:
+        kwargs.setdefault("use_process_authorities", True)
+        return cls(**kwargs)
+
     @property
     def paper_scan(self) -> PaperScanService:
         if self._paper_scan is None:
-            self._paper_scan = _shared_paper_scan()
+            self._paper_scan = (
+                _shared_paper_scan() if self._use_process_authorities else _isolated_paper_scan()
+            )
         return self._paper_scan
 
     @paper_scan.setter
@@ -236,12 +246,17 @@ class StreamShadowComparer:
             kwargs["fx_unavailable_reason"] = self._fx_reason
         settings = getattr(self.paper_scan, "settings", None)
         if settings is not None:
-            operator = effective_operator_scanner_settings(settings)
-            kwargs["minimum_net_edge"] = operator.min_net_edge
             kwargs["market_scope"] = catalogue_market_scope(identity)
-            kwargs["outright_min_net_edge"] = operator.outright_min_net_edge
-            kwargs["maximum_execution_risk"] = operator.max_execution_risk
             kwargs["assumed_latency_ms"] = int(settings.simulated_latency_ms)
+            if self._use_process_authorities:
+                operator = effective_operator_scanner_settings(settings)
+                kwargs["minimum_net_edge"] = operator.min_net_edge
+                kwargs["outright_min_net_edge"] = operator.outright_min_net_edge
+                kwargs["maximum_execution_risk"] = operator.max_execution_risk
+            else:
+                kwargs["minimum_net_edge"] = settings.min_net_edge
+                kwargs["outright_min_net_edge"] = settings.outright_min_net_edge
+                kwargs["maximum_execution_risk"] = int(settings.max_execution_risk)
         return kwargs
 
     def _refresh_fx(self, as_of: datetime) -> None:
@@ -256,6 +271,11 @@ class StreamShadowComparer:
             self._fx_bound_at = as_of
             return
         if self._fx_bound_at is not None and as_of - self._fx_bound_at < _FX_BIND_TTL:
+            return
+        if not self._use_process_authorities:
+            self._fx_snapshots = []
+            self._fx_reason = None
+            self._fx_bound_at = as_of
             return
         engine = _existing_price_engine()
         if engine is not None and getattr(engine, "_scanner_fx_bound", False):
@@ -280,11 +300,11 @@ class StreamShadowComparer:
 
     def _polymarket_fee_snapshot_payload(self, identity: Any) -> dict[str, Any] | None:
         store = self.catalogue_store
-        if store is None:
+        if store is None and self._use_process_authorities:
             engine = _existing_price_engine()
             store = None if engine is None else getattr(engine, "catalogue_store", None)
-        if store is None:
-            store = _process_catalogue_store()
+            if store is None:
+                store = _process_catalogue_store()
             self.catalogue_store = store
         snapshot_id = getattr(identity, "polymarket_fee_snapshot_id", None)
         if store is None or not snapshot_id:
@@ -430,7 +450,10 @@ def _process_catalogue_store() -> Any | None:
 
 
 def _isolated_paper_scan() -> PaperScanService:
-    return PaperScanService(MarketIntelligenceService(SqliteMarketIntelligenceRepository()))
+    return PaperScanService(
+        MarketIntelligenceService(SqliteMarketIntelligenceRepository()),
+        settings=Settings(),
+    )
 
 
 def _oldest_required_stream_ts(
