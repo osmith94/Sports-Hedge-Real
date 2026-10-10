@@ -198,8 +198,9 @@ class Settings(BaseSettings):
 
     sports_hedge_mode: Literal["paper", "real"] = "paper"
     sports_hedge_execution_enabled: bool = False
-    # Wave 40 opt-in. Default off. The dry-run Real launcher must not set this.
-    # Caps live in execution.live_canary and are not environment-overridable.
+    # Wave 40 opt-in test seam. Default off. The dry-run Real launcher must not
+    # set this. Operator capital limits stay on existing Max Event / Opportunity /
+    # One-Time settings; this flag is not a stake override.
     sports_hedge_live_canary_enabled: bool = False
     sports_hedge_live_canary_operator_confirmed: bool = False
     sports_hedge_live_canary_session_id: str | None = None

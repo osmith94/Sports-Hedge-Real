@@ -132,9 +132,11 @@ export function RuntimeModeClock() {
           <div className="desktop-exit-dialog">
             <h2>REAL-MONEY EXECUTION</h2>
             <p>
-              Turning ON may wager real money on Matchbook and Polymarket. First canary: one
-              opportunity, £3 opening both legs, £5 session aggregate. Toggle OFF stops new
-              submits and does not cancel orders already sent.
+              Turning ON may wager real money using the current operator Max Event / Max
+              Opportunity / Max One-Time limits of £{health?.live_canary?.max_event_gbp ?? "—"} / £
+              {health?.live_canary?.max_opportunity_gbp ?? "—"} / £
+              {health?.live_canary?.max_one_time_gbp ?? "—"}. Toggle OFF stops new submits and
+              does not cancel orders already sent.
             </p>
             <p>Type ARM LIVE CANARY to confirm.</p>
             <ExecutionConfirm
@@ -195,7 +197,7 @@ function ExecutionConfirm({
           disabled={phrase !== "ARM LIVE CANARY"}
           onClick={() => void onConfirm(phrase)}
         >
-          Confirm live canary
+          Confirm EXECUTION ON
         </button>
       </div>
     </>

@@ -296,27 +296,6 @@ def live_hedge_is_complete(trade: Any) -> bool:
     return _latest_live_remainder(trade) not in _UNSAFE_LIVE_REMAINDERS
 
 
-def _canary_reservation_status(package: Any) -> str:
-    """Map a venue package to the durable canary budget state.
-
-    Requested GBP stays reserved after any write. Unknown or partial fills
-    block further canary opens. Zero-fill failure still counts as placed
-    notional so a second opportunity cannot consume the session.
-    """
-
-    if package is None:
-        return "unknown"
-    orders = list(getattr(package, "orders", []) or [])
-    if any(getattr(order, "filled_size", None) is None for order in orders):
-        return "unknown"
-    outcome = getattr(package, "outcome", None)
-    if outcome is LivePackageOutcome.FULLY_FILLED:
-        return "filled"
-    if outcome is LivePackageOutcome.PARTIAL:
-        return "partial"
-    return "failed"
-
-
 def iterative_trade_is_open(trade: Any) -> bool:
     """OPEN paper, or a fully reconciled live hedge, that may take another Price-2."""
 
@@ -3206,45 +3185,19 @@ class PaperOperationsService:
         ):
             return
         from sports_hedge.execution.live_canary import (
-            canary_kind,
             canary_submit_refusal,
-            get_live_canary_store,
             live_canary_enabled,
-            live_canary_session_id,
-            plan_outlay_gbp,
         )
 
-        canary_reservation = None
-        canary_store = None
         if live_canary_enabled(self.settings):
             canary_reason = canary_submit_refusal(
                 plan, settings=self.settings, tranche_id=tranche_id
             )
             if canary_reason is not None:
                 return
-            gbp = plan_outlay_gbp(plan)
-            if gbp is None:
-                return
-            session_id = live_canary_session_id(self.settings)
-            if not session_id:
-                return
-            canary_store = get_live_canary_store(self.settings)
-            canary_reservation = canary_store.reserve(
-                session_id=session_id,
-                package_id=opening_package_id(trade_id, tranche_id),
-                opportunity_id=plan.opportunity_id,
-                tranche_id=tranche_id,
-                gbp=gbp,
-                kind=canary_kind(tranche_id),
-                now=when,
-            )
-            if not canary_reservation.ok:
-                return
         package_id = opening_package_id(trade_id, tranche_id)
         store = self._live_attempt_store()
         if store.get(package_id) is not None:
-            if canary_reservation is not None and canary_store is not None:
-                canary_store.release(canary_reservation.reservation_id or package_id)
             return
         snapshot_json = scrubbed_snapshot_json(plan)
         reserved = store.reserve(
@@ -3260,8 +3213,6 @@ class PaperOperationsService:
             }
         )
         if not reserved:
-            if canary_reservation is not None and canary_store is not None:
-                canary_store.release(canary_reservation.reservation_id or package_id)
             return
         result = run_blocking(
             run_live_opening(
@@ -3278,16 +3229,6 @@ class PaperOperationsService:
         package = result.package
         facts = [] if package is None else order_audit_facts(package.orders, result.requests)
         outcome = None if package is None else package.outcome.value
-        if canary_store is not None and canary_reservation is not None:
-            reservation_id = canary_reservation.reservation_id or package_id
-            if not result.sent:
-                canary_store.release(reservation_id)
-            else:
-                canary_store.complete(
-                    reservation_id,
-                    status=_canary_reservation_status(package),
-                    now=when,
-                )
         with self._opening_persist_lock:
             self._opening_persist_active = True
             try:

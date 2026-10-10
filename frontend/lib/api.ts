@@ -1886,8 +1886,9 @@ export type RuntimeHealth = {
     trading_permission?: boolean;
     label?: string;
     not_ready_reasons?: string[];
-    opening_tranche_gbp?: string;
-    session_cap_gbp?: string;
+    max_event_gbp?: string;
+    max_opportunity_gbp?: string;
+    max_one_time_gbp?: string;
     preflight_at?: string | null;
   };
 };

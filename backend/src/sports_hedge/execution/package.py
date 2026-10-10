@@ -79,16 +79,19 @@ def execution_capability(settings: Settings) -> dict[str, bool | str]:
 def execution_armed(settings: Settings) -> bool:
     """True only in real mode when runtime-armed or an explicit test/startup flag is on.
 
-    The Real launcher boots with execution disabled. Wave 40 arms a bounded
-    canary through process runtime state, which resets OFF on every restart.
+    The Real launcher boots with execution disabled. Wave 40 arms live
+    execution through process runtime state, which resets OFF on every restart.
     ``SPORTS_HEDGE_EXECUTION_ENABLED`` remains the Wave-3 test seam and must
-    stay false in the Windows Real launcher.
+    stay false in the Windows Real launcher. An explicit operator OFF/halt
+    closes new-order permission even if the startup flag is true in tests.
     """
 
     if settings.sports_hedge_mode != "real":
         return False
-    from sports_hedge.execution.live_canary import live_runtime_armed
+    from sports_hedge.execution.live_canary import live_runtime_armed, new_orders_halted
 
+    if new_orders_halted():
+        return False
     if live_runtime_armed():
         return True
     return settings.sports_hedge_execution_enabled is True
