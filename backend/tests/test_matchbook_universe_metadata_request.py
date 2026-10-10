@@ -49,6 +49,8 @@ async def test_metadata_listing_omits_prices_and_get_market_keeps_them() -> None
         await venue.get_market(44, 9)
         priced_market = captured[-1]
         assert priced_market["include-prices"] == "true"
-        assert priced_market["price-depth"] == settings.matchbook_price_depth
+        assert priced_market["price-depth"] == settings.matchbook_price2_price_depth
+        assert priced_market["minimum-liquidity"] == settings.matchbook_price2_minimum_liquidity
+        assert priced_list["minimum-liquidity"] == settings.matchbook_minimum_liquidity
     finally:
         await venue.aclose()

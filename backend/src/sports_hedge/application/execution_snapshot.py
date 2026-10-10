@@ -50,6 +50,8 @@ class ExecutionLegQuote:
     quote_age_ms: int | None
     retrieved_at: datetime | None
     retrieval_native_id: str | None = None
+    expected_average_odds: str | None = None
+    approved_depth_worst_limit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,10 @@ class FrozenNativeOrder:
     ladder_odds: str | None = None
     native_stake: str | None = None
     native_side: str | None = None
+    approved_depth_worst_limit: str | None = None
+    expected_average: str | None = None
+    requested_total: str | None = None
+    admitted_levels: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -310,6 +316,8 @@ class ExecutionSnapshot:
                     "quote_age_ms": leg.quote_age_ms,
                     "retrieved_at": leg.retrieved_at.isoformat() if leg.retrieved_at else None,
                     "retrieval_native_id": leg.retrieval_native_id,
+                    "expected_average_odds": leg.expected_average_odds,
+                    "approved_depth_worst_limit": leg.approved_depth_worst_limit,
                     "levels": [{"odds": odds, "depth": depth} for odds, depth in leg.levels],
                 }
                 for leg in self.legs
@@ -437,6 +445,8 @@ def leg_quotes_from_decision(
         native_id = None if matched is None else matched.native_id
         if retrieved_at is None and retrieved_at_by_venue is not None and not retrievals:
             retrieved_at = retrieved_at_by_venue.get(venue)
+        expected = getattr(leg, "expected_average_odds", None)
+        worst = getattr(leg, "approved_depth_worst_limit", None)
         quotes.append(
             ExecutionLegQuote(
                 venue=venue,
@@ -450,6 +460,8 @@ def leg_quotes_from_decision(
                 quote_age_ms=leg.quote_age_ms,
                 retrieved_at=retrieved_at,
                 retrieval_native_id=native_id,
+                expected_average_odds=None if expected is None else str(expected),
+                approved_depth_worst_limit=None if worst is None else str(worst),
             )
         )
     return tuple(quotes)
@@ -633,6 +645,12 @@ def _frozen_order_json(item: FrozenNativeOrder) -> dict[str, Any]:
         "ladder_odds": item.ladder_odds,
         "native_stake": item.native_stake,
         "native_side": item.native_side,
+        "approved_depth_worst_limit": item.approved_depth_worst_limit,
+        "expected_average": item.expected_average,
+        "requested_total": item.requested_total,
+        "admitted_levels": [
+            {"odds": odds, "stake": stake} for odds, stake in item.admitted_levels
+        ],
     }
 
 

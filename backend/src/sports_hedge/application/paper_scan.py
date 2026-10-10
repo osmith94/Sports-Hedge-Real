@@ -55,6 +55,7 @@ from sports_hedge.normalization.identity import (
     canonical_source_event_id,
     canonical_source_market_id,
 )
+from sports_hedge.execution.depth_plan import stamp_fill_leg_depth_plan
 from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.paper.liquidity import PaperLiquiditySnapshot
 from sports_hedge.arbitrage.allocation.adapters import (
@@ -923,18 +924,20 @@ def _fill_legs_from_observations(
             if requested <= 0:
                 continue
             legs.append(
-                PaperOpportunityLeg(
-                    outcome=outcome,
-                    venue=observation.venue,
-                    source_market_id=observation.market.source_market_id,
-                    source_runner_id=book.source_runner_id,
-                    source_event_id=str(observation.market.event.source_event_id),
-                    currency=observation.native_currency,
-                    requested_stake=requested,
-                    displayed_odds=best.decimal_odds,
-                    levels=list(book.back_levels),
-                    quote_age_ms=observation.quote_age_ms,
-                    quote_captured_at=observation.observed_at,
+                stamp_fill_leg_depth_plan(
+                    PaperOpportunityLeg(
+                        outcome=outcome,
+                        venue=observation.venue,
+                        source_market_id=observation.market.source_market_id,
+                        source_runner_id=book.source_runner_id,
+                        source_event_id=str(observation.market.event.source_event_id),
+                        currency=observation.native_currency,
+                        requested_stake=requested,
+                        displayed_odds=best.decimal_odds,
+                        levels=list(book.back_levels),
+                        quote_age_ms=observation.quote_age_ms,
+                        quote_captured_at=observation.observed_at,
+                    )
                 )
             )
     return legs
@@ -1002,7 +1005,11 @@ def apply_allocation_to_fill_legs(
             outcome=leg.outcome,
         )
         match = stake_by_id[key]
-        resized.append(leg.model_copy(update={"requested_stake": match.stake_native}))
+        resized.append(
+            stamp_fill_leg_depth_plan(
+                leg.model_copy(update={"requested_stake": match.stake_native})
+            )
+        )
     return resized
 
 
