@@ -237,6 +237,37 @@ def test_stale_stream_book_fails_before_scan_pair() -> None:
     assert "stream_constituent_stale" in compared[0].rejection_reasons
 
 
+def test_stream_scan_kwargs_do_not_invent_capital_caps() -> None:
+    scan = _RecordingScan(decision=_qualifying_decision())
+    record = _fee_record()
+    comparer = StreamShadowComparer(
+        scan,  # type: ignore[arg-type]
+        catalogue_store=_FeeStore(record),
+        fx_snapshots=[
+            FxRateSnapshot(currency="USD", gbp_per_unit=Decimal("0.75"), source="ecb_eurofxref", captured_at=NOW)
+        ],
+    )
+    books, quotes = _books_and_quotes(now=NOW)
+    comparer.compare(
+        streamable_markets([_row(polymarket_fee_snapshot_id=record.snapshot_id)]),
+        books,
+        quotes,
+        now=NOW,
+    )
+    kwargs = scan.calls[0]["kwargs"]
+    forbidden = {
+        "capital_limit_gbp",
+        "max_event_gbp",
+        "max_opportunity_gbp",
+        "max_one_time_gbp",
+        "session_budget_gbp",
+        "first_trade_only",
+    }
+    assert forbidden.isdisjoint(kwargs)
+    assert kwargs["maximum_execution_risk"] == scan.settings.max_execution_risk
+    assert kwargs["minimum_net_edge"] == scan.settings.min_net_edge
+
+
 def test_paper_scan_ignores_diagnostic_quote_age_label() -> None:
     service = _wired_scan()
     mb_event, mb_market = matchbook_payloads()

@@ -237,6 +237,12 @@ class StreamShadowComparer:
         return results
 
     def _scan_kwargs(self, identity: Any) -> dict[str, Any]:
+        """Match HOT `_scan_kwargs`. Leave capital to `policy_from_settings`.
+
+        Do not pass `capital_limit_gbp` or invented Max Event / Opportunity /
+        One-Time values. PaperScanService already sizes from persisted operator
+        settings.
+        """
         kwargs: dict[str, Any] = {
             "fixture_canonical_event_id": identity.canonical_event_id,
         }

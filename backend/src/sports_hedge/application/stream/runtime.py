@@ -49,6 +49,7 @@ PHASE1_LIMITATIONS = [
     "Diagnostic GET /stream/status does not call providers.",
     "Candidate edges stay telemetry until the existing Price-2 snapshot accepts. Venue orders still require mode=real and SPORTS_HEDGE_EXECUTION_ENABLED.",
     "STREAM reuses the shared venue-cost resolver, persisted Polymarket fee snapshot, FX service and operator min-net. Missing fee/FX still fail closed.",
+    "Capital sizing stays on existing PaperScanService / policy_from_settings (persisted Max Event / Max Opportunity / Max One-Time). STREAM does not invent session, first-trade, or canary caps.",
     "An empty WS [] is not a STREAM→Price-2 pass. The handoff requires a populated token book and a coalesced Matchbook quote.",
 ]
 
