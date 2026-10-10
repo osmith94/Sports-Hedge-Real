@@ -104,7 +104,7 @@ def _mb_leg(*, stake: str, levels: list[BookLevel] | None = None) -> PaperOpport
 
 
 def _pm_leg(*, stake: str, levels: list[BookLevel] | None = None) -> PaperOpportunityLeg:
-    book = levels or [_level("2.10", "100")]
+    book = levels or [_level("2.50", "100")]
     return stamp_fill_leg_depth_plan(
         PaperOpportunityLeg(
             outcome="away",
@@ -210,7 +210,7 @@ def test_five_pound_sweep_uses_second_level_worst_limit_not_top_of_book() -> Non
     assert by_venue["matchbook"].approved_depth_worst_limit == "2.00"
     assert by_venue["matchbook"].expected_average == "2.02"
     assert by_venue["matchbook"].admitted_levels == (("2.20", "0.50"), ("2.00", "4.50"))
-    assert by_venue["polymarket"].limit_price == "0.5"
+    assert by_venue["polymarket"].limit_price == "0.4"
     assert by_venue["polymarket"].order_type == PM_FAK
     assert Decimal(by_venue["polymarket"].native_amount) == Decimal("6.25")
     assert Decimal(by_venue["matchbook"].native_stake) == Decimal("5.00")
