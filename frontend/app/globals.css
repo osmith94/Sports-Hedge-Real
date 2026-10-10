@@ -620,6 +620,9 @@ tr:last-child td { border-bottom: none; }
 }
 .opportunity-monitor { margin-bottom: 16px; }
 .hot-fixtures-panel { margin-bottom: 16px; }
+.stream-panel { margin-bottom: 16px; }
+.stream-actions, .stream-pin-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.stream-pin-controls { margin: 12px 0; }
 .hot-zone-panel {
   border-color: rgba(124, 242, 176, .32);
   box-shadow: 0 0 0 1px rgba(124, 242, 176, .1);

@@ -20,6 +20,7 @@ import {
   toneClass,
 } from "../lib/fixture-inventory-operator";
 import { PaperDeploymentPreview } from "./paper-deployment-preview";
+import { StreamPinControls } from "./stream-pin-controls";
 import {
   coverageDisplayGroups,
   coverageRowLabel,
@@ -119,6 +120,8 @@ export function FixtureInventoryWorkspace({
           . OPEN only after complete validated paper entry. PAPER MODE · execution disabled.
         </p>
       ) : null}
+
+      <StreamPinControls canonicalEventId={fixture.canonical_event_id} />
 
       <PaperDeploymentPreview opportunities={preparable} focusOpportunityId={focusOpportunityId} />
 

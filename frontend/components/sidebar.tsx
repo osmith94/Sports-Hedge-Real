@@ -11,6 +11,7 @@ const navGroups = [
     title: "Arbitrage",
     items: [
       { href: "/", label: "Operations console", icon: "ARB" },
+      { href: "/stream", label: "STREAM", icon: "STR" },
       { href: "/arbitrage/priority-alerts", label: "Priority Alerts", icon: "PA" },
     ],
   },
