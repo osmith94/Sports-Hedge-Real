@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 from sports_hedge.application.stream.coalescer import StreamMatchbookCoalescer
+from sports_hedge.application.stream.handoff import StreamPrice2Handoff
 from sports_hedge.application.stream.observer import (
     STATUS_DISABLED,
     STATUS_NOT_SELECTED,
@@ -37,14 +38,15 @@ CatalogueLoader = Callable[[str], list[Any]]
 MatchbookFetcher = Callable[[str, str], Awaitable[dict[str, Any]]]
 
 PHASE1_LIMITATIONS = [
-    "Phase 1 shadow-only: STREAM does not open paper, call Price-2, or place venue orders.",
+    "STREAM hands a populated native-token PM book plus coalesced exact-ID Matchbook depth to the existing Price-2 / opening path. It does not add a second solver or dispatcher.",
     "At most one manually selected fixture. No automatic HOT/BACKGROUND promotion.",
     "Polymarket public market WS only. No user/order channel, wallet, or credentials.",
     "Matchbook exact-ID fetch is coalesced through shared provider access at STREAM priority.",
     "Matchbook refresh is significance-aware: baseline/reconnect, 2pp default probability-point moves, material depth, or potential net edge against a credible Matchbook snapshot. Negligible ticks update the book only.",
     "Periodic Matchbook reconciliation is lower priority than event-driven work and still uses the STREAM lane.",
     "Diagnostic GET /stream/status does not call providers.",
-    "Candidate edges are telemetry, not executable quotes.",
+    "Candidate edges stay telemetry until the existing Price-2 snapshot accepts. Venue orders still require mode=real and SPORTS_HEDGE_EXECUTION_ENABLED.",
+    "An empty WS [] is not a STREAM→Price-2 pass. The handoff requires a populated token book and a coalesced Matchbook quote.",
 ]
 
 
@@ -59,6 +61,7 @@ class StreamRuntime:
         shadow: StreamShadowComparer | None = None,
         edge_probe: EdgeProbe | None = None,
         periodic_seconds: float = PERIODIC_RECONCILE_SECONDS,
+        price2_handoff: StreamPrice2Handoff | None = None,
     ) -> None:
         self._catalogue_loader = catalogue_loader
         self._matchbook_fetch = matchbook_fetch
@@ -75,10 +78,12 @@ class StreamRuntime:
         self.shadow = shadow or StreamShadowComparer()
         self.triggers = StreamTriggerPolicy(edge_probe=edge_probe or self._potential_edge)
         self.periodic_seconds = periodic_seconds
+        self.handoff = price2_handoff or StreamPrice2Handoff()
         self.paper_opened = False
         self.orders_placed = False
         self._lock = asyncio.Lock()
         self._periodic_task: asyncio.Task[None] | None = None
+        self._price2_tasks: set[asyncio.Task[None]] = set()
 
     def status(self) -> StreamStatus:
         pin = self.pin
@@ -106,10 +111,15 @@ class StreamRuntime:
                 pair_age_ms=item.pair_age_ms,
                 skew_ms=item.skew_ms,
                 data_class=item.data_class,
+                executable=item.catalogue_row_id in self.handoff.accepted_rows,
+                price2=item.catalogue_row_id in self.handoff.accepted_rows,
+                paper_entry=self.handoff.paper_opened and item.catalogue_row_id in self.handoff.accepted_rows,
             )
             for item in self.shadow.candidates
         ]
+        populated = 0 if observer is None else observer.books.healthy_token_count()
         return StreamStatus(
+            phase="wave37_stream_price2",
             enabled=selected and not self.paused,
             paused=self.paused,
             connection_status=connection,
@@ -133,9 +143,8 @@ class StreamRuntime:
             unknown_token_count=0 if books is None else books.unknown_token_count,
             ignored_best_bid_ask_count=0 if books is None else books.ignored_bbo_count,
             resync_count=0 if books is None else books.resync_count,
-            last_error=stats.last_error
-            if observer is None
-            else (observer.last_error or stats.last_error),
+            last_error=self.handoff.last_error
+            or (stats.last_error if observer is None else (observer.last_error or stats.last_error)),
             last_trigger_reason=stats.last_trigger_reason,
             last_probability_delta=stats.last_probability_delta,
             last_dispatch_delay_ms=stats.last_dispatch_delay_ms,
@@ -143,8 +152,12 @@ class StreamRuntime:
             price_move_probability_points=format(PRICE_MOVE_PROBABILITY_POINTS, "f"),
             token_cap=MAX_STREAM_TOKENS,
             max_fixtures=MAX_STREAM_FIXTURES,
-            paper_opened=self.paper_opened,
-            orders_placed=self.orders_placed,
+            paper_opened=self.paper_opened or self.handoff.paper_opened,
+            orders_placed=self.orders_placed or self.handoff.orders_placed,
+            populated_pm_book_count=populated,
+            coalesced_matchbook_quote_count=len(self.coalescer.quotes),
+            price2_attempt_count=self.handoff.attempt_count,
+            price2_accepted_count=self.handoff.accepted_count,
             candidates=candidates,
             limitations=list(PHASE1_LIMITATIONS),
         )
@@ -224,6 +237,15 @@ class StreamRuntime:
             except asyncio.CancelledError:
                 pass
         await self.coalescer.stop()
+        pending = list(self._price2_tasks)
+        self._price2_tasks.clear()
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         observer = self.observer
         self.observer = None
         self.triggers.note_reset()
@@ -280,6 +302,32 @@ class StreamRuntime:
             if observer.status != "subscribed":
                 return
         self.shadow.compare(pin, observer.books, self.coalescer.quotes)
+        self._schedule_price2()
+
+    def _schedule_price2(self) -> None:
+        pin = self.pin
+        observer = self.observer
+        if pin is None or observer is None or self.paused:
+            return
+        if observer.books.healthy_token_count() <= 0 or not self.coalescer.quotes:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _run() -> None:
+            await self.handoff.maybe_open(
+                pin=pin,
+                candidates=list(self.shadow.candidates),
+                decisions=dict(self.shadow.decisions),
+            )
+            self.paper_opened = self.paper_opened or self.handoff.paper_opened
+            self.orders_placed = self.orders_placed or self.handoff.orders_placed
+
+        task = loop.create_task(_run(), name="stream-price2-handoff")
+        self._price2_tasks.add(task)
+        task.add_done_callback(self._price2_tasks.discard)
 
     def _potential_edge(self, market: Any, now: datetime) -> Decimal | None:
         pin = self.pin

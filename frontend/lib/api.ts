@@ -2869,6 +2869,10 @@ export type StreamStatus = {
   diagnostic_reads_fetch_providers: boolean;
   paper_opened: boolean;
   orders_placed: boolean;
+  populated_pm_book_count?: number;
+  coalesced_matchbook_quote_count?: number;
+  price2_attempt_count?: number;
+  price2_accepted_count?: number;
   candidates: StreamCandidateStatus[];
   limitations: string[];
 };

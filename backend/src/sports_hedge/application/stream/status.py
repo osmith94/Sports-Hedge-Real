@@ -23,7 +23,7 @@ class StreamCandidateStatus(BaseModel):
 
 class StreamStatus(BaseModel):
     module: str = "STREAM"
-    phase: str = "phase_1_shadow_only"
+    phase: str = "wave37_stream_price2"
     enabled: bool
     paused: bool
     connection_status: str
@@ -58,6 +58,10 @@ class StreamStatus(BaseModel):
     diagnostic_reads_fetch_providers: bool = False
     paper_opened: bool = False
     orders_placed: bool = False
+    populated_pm_book_count: int = 0
+    coalesced_matchbook_quote_count: int = 0
+    price2_attempt_count: int = 0
+    price2_accepted_count: int = 0
     candidates: list[StreamCandidateStatus] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
 

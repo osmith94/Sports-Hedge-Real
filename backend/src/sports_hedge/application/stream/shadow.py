@@ -1,6 +1,8 @@
 """Diagnostic STREAM comparison. Reuses observation builders and paper scan_pair.
 
-Never opens paper, never calls Price-2, never places orders.
+Diagnostic STREAM comparison. Reuses observation builders and paper scan_pair.
+
+Price-2 / paper opening is a separate handoff after coalesced Matchbook quotes.
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ class StreamShadowComparer:
         self.polymarket_builder = PolymarketObservationBuilder()
         self.paper_scan = paper_scan or _isolated_paper_scan()
         self.candidates: list[StreamCandidate] = []
+        self.decisions: dict[str, Any] = {}
 
     def compare(
         self,
@@ -61,6 +64,7 @@ class StreamShadowComparer:
     ) -> list[StreamCandidate]:
         evaluated = now or datetime.now(UTC)
         results: list[StreamCandidate] = []
+        decisions: dict[str, Any] = {}
         for market in pin.markets:
             if market.unavailable_reason:
                 continue
@@ -174,7 +178,9 @@ class StreamShadowComparer:
                 )
                 continue
             results.append(_candidate_from_decision(identity, decision, stream_ts, quote, pair_age_ms, skew_ms))
+            decisions[identity.catalogue_row_id] = decision
         self.candidates = results
+        self.decisions = decisions
         return results
 
 

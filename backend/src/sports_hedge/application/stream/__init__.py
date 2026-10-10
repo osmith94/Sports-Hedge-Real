@@ -1,6 +1,6 @@
-"""STREAM Phase 1: one-fixture Polymarket market-feed shadow surveillance.
+"""STREAM: one-fixture Polymarket market-feed into existing Price-2.
 
-Default OFF. Read-only. Does not replace HOT/BACKGROUND/UNIVERSE or Price-2.
+Default OFF. Public market WS only. Does not replace HOT/BACKGROUND/UNIVERSE.
 """
 
 from sports_hedge.application.stream.protocol import STREAM_LANE

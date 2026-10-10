@@ -26,6 +26,8 @@ from sports_hedge.execution.clients import (
 )
 from sports_hedge.execution.depth_plan import (
     approved_back_limit_odds,
+    conservative_complete_set_solution,
+    exact_frozen_settlement,
     qualifies_at_conservative_limits,
     stamp_fill_leg_depth_plan,
     sweep_back_levels,
@@ -194,13 +196,20 @@ def test_five_pound_sweep_uses_second_level_worst_limit_not_top_of_book() -> Non
         VenueName.MATCHBOOK: _cost(VenueName.MATCHBOOK, action=MarketAction.BACK),
         VenueName.POLYMARKET: _cost(VenueName.POLYMARKET, action=MarketAction.BUY),
     }
-    fx = {"GBP": Decimal("1"), "USD": GBP_PER_USD}
+    fx = {"GBP": Decimal(1), "USD": GBP_PER_USD}
+    matched = [mb, _pm_leg(stake="5.00")]
     assert qualifies_at_conservative_limits(
-        [mb, pm],
+        matched,
         costs=costs,
         gbp_per_unit=fx,
         minimum_net_edge=Decimal("0.01"),
     )
+    total_gbp, min_pnl, states = exact_frozen_settlement(
+        matched, costs=costs, gbp_per_unit=fx
+    )
+    assert total_gbp > 0
+    assert min_pnl > 0
+    assert set(states) == {"home", "away"}
     frozen = freeze_native_orders(
         type("Decision", (), {"fill_legs": [mb, pm]})(),
         polymarket_books=_pm_books(),
@@ -264,7 +273,7 @@ def test_unprofitable_second_level_downsizes_instead_of_submitting_five() -> Non
         qualifies_at_conservative_limits(
             [mb_leg, pm_leg],
             costs=costs,
-            gbp_per_unit={"GBP": Decimal("1"), "USD": GBP_PER_USD},
+            gbp_per_unit={"GBP": Decimal(1), "USD": GBP_PER_USD},
             minimum_net_edge=Decimal("0.01"),
         )
         is False
@@ -289,7 +298,7 @@ def test_sub_minimum_top_level_still_contributes_to_valid_sweep() -> None:
     assert len(frozen) == 1
     assert frozen[0].limit_price == "0.5"
     assert frozen[0].approved_depth_worst_limit == "2.00"
-    assert Decimal(frozen[0].native_shares) >= Decimal("5")
+    assert Decimal(frozen[0].native_shares) >= Decimal(5)
 
 
 def test_tick_mismatch_on_multi_level_plan_fails_closed() -> None:
@@ -318,7 +327,7 @@ def test_single_level_matchbook_freeze_still_snaps_the_ladder() -> None:
         source_runner_id="101",
         source_event_id="evt-mb",
         currency="GBP",
-        requested_stake=Decimal("4"),
+        requested_stake=Decimal(4),
         displayed_odds=Decimal("2.09"),
     )
     frozen = freeze_native_orders(type("Decision", (), {"fill_legs": [leg]})())
@@ -345,7 +354,7 @@ def test_prefix_candidates_qualify_on_worst_limit_not_blend() -> None:
     )
     candidates, _ = prefix_depth_candidates(source, configured_slippage_bps=None)
     deep = next(item for item in candidates if item.levels_consumed == 2)
-    assert deep.gross_weighted_odds != deep.net_decimal_odds or True
+    assert deep.gross_weighted_odds != deep.net_decimal_odds
     assert deep.worst_limit_odds == Decimal("2.00")
     assert deep.net_decimal_odds == Decimal("2.00")
     assert deep.expected_average_net_odds == deep.gross_weighted_odds
@@ -410,7 +419,7 @@ def test_consumed_best_level_is_not_spent_twice_on_the_next_tranche() -> None:
     opening = [_level("2.20", "0.50"), _level("2.00", "100")]
     leftover = remaining_book_levels(opening, Decimal("0.50"))
     assert leftover[0].decimal_odds == Decimal("2.00")
-    assert leftover[0].available_stake == Decimal("100")
+    assert leftover[0].available_stake == Decimal(100)
     plan = sweep_back_levels(leftover, Decimal("5.00"))
     assert plan.worst_limit_odds == Decimal("2.00")
     assert all(item.decimal_odds != Decimal("2.20") for item in plan.levels)
@@ -478,7 +487,7 @@ def test_fill_legs_stamp_worst_limit_from_observations() -> None:
                     source_market_id="mb-mkt",
                     stake=Decimal("5.00"),
                     net_decimal_odds=Decimal("2.00"),
-                    state_return=Decimal("10"),
+                    state_return=Decimal(10),
                 )
             ],
         ),
@@ -509,7 +518,7 @@ def test_fill_legs_stamp_worst_limit_from_observations() -> None:
         _Obs(),
         _Right(),
         depth_scan=scan,
-        effective_fx={"GBP": Decimal("1"), "USD": GBP_PER_USD},
+        effective_fx={"GBP": Decimal(1), "USD": GBP_PER_USD},
     )
     assert len(legs) == 1
     assert legs[0].requested_stake == Decimal("5.00")
@@ -555,3 +564,73 @@ async def test_run_live_opening_sends_nothing_when_disarmed() -> None:
     assert isinstance(result, LiveDispatchResult)
     assert result.sent is False
     assert result.refusal == "execution_disabled"
+
+
+def test_theoretical_solver_ratio_is_not_proof_for_the_frozen_pair() -> None:
+    mb = _mb_leg(stake="10.00")
+    pm = _pm_leg(stake="1.00", levels=[_level("2.10", "100")])
+    costs = {
+        VenueName.MATCHBOOK: _cost(VenueName.MATCHBOOK, action=MarketAction.BACK),
+        VenueName.POLYMARKET: _cost(VenueName.POLYMARKET, action=MarketAction.BUY),
+    }
+    fx = {"GBP": Decimal(1), "USD": GBP_PER_USD}
+    theoretical = conservative_complete_set_solution( [mb, pm], costs=costs, gbp_per_unit=fx)
+    assert theoretical.is_arbitrage is True
+    assert theoretical.roi >= Decimal("0.01")
+    assert (
+        qualifies_at_conservative_limits(
+            [mb, pm],
+            costs=costs,
+            gbp_per_unit=fx,
+            minimum_net_edge=Decimal("0.01"),
+        )
+        is False
+    )
+    _total, minimum, state_pnl = exact_frozen_settlement([mb, pm], costs=costs, gbp_per_unit=fx)
+    assert minimum <= 0 or min(state_pnl.values()) < 0
+
+
+def test_generalized_dnb_refund_state_is_included_in_exact_payoff() -> None:
+    from sports_hedge.application.complete_set import GeneralizedStateModel
+
+    mb = stamp_fill_leg_depth_plan(
+        PaperOpportunityLeg(
+            outcome="home",
+            venue=VenueName.MATCHBOOK,
+            source_market_id="mb-dnb",
+            source_runner_id="101",
+            source_event_id="evt-mb",
+            currency="GBP",
+            requested_stake=Decimal("5.00"),
+            displayed_odds=Decimal("2.20"),
+            levels=[_level("2.20", "50")],
+        )
+    )
+    pm = stamp_fill_leg_depth_plan(
+        PaperOpportunityLeg(
+            outcome="away",
+            venue=VenueName.POLYMARKET,
+            source_market_id="pm-dnb",
+            source_runner_id=TOKEN,
+            source_event_id="evt-pm",
+            currency="USD",
+            requested_stake=Decimal("6.25"),
+            displayed_odds=Decimal("2.20"),
+            levels=[_level("2.20", "50")],
+        )
+    )
+    costs = {
+        VenueName.MATCHBOOK: _cost(VenueName.MATCHBOOK, action=MarketAction.BACK),
+        VenueName.POLYMARKET: _cost(VenueName.POLYMARKET, action=MarketAction.BUY),
+    }
+    fx = {"GBP": Decimal(1), "USD": GBP_PER_USD}
+    total, minimum, states = exact_frozen_settlement(
+        [mb, pm],
+        costs=costs,
+        gbp_per_unit=fx,
+        state_model=GeneralizedStateModel.DRAW_NO_BET,
+    )
+    assert set(states) == {"home", "draw", "away"}
+    assert states["draw"] == Decimal(0)
+    assert total == Decimal("10.00")
+    assert minimum > 0

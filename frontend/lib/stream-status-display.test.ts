@@ -14,7 +14,7 @@ import {
 
 const idle: StreamStatus = {
   module: "STREAM",
-  phase: "phase_1_shadow_only",
+  phase: "wave37_stream_price2",
   enabled: false,
   paused: false,
   connection_status: "not_selected",
@@ -48,7 +48,7 @@ describe("stream-status-display", () => {
     expect(streamFixtureName(idle)).toMatch(/No fixture selected/);
   });
 
-  it("candidate copy stays shadow-only", () => {
+  it("candidate copy distinguishes telemetry from Price-2", () => {
     const live: StreamStatus = {
       ...idle,
       enabled: true,
@@ -72,9 +72,9 @@ describe("stream-status-display", () => {
     };
     expect(isStreamOff(live)).toBe(false);
     expect(streamFixtureName(live)).toBe("Arsenal v Chelsea");
-    expect(streamCandidateSummary(live)).toMatch(/not executable/);
-    expect(STREAM_COPY).toMatch(/not paper entry/i);
-    expect(STREAM_SHADOW_LABEL).toMatch(/NOT PRICE-2/);
+    expect(streamCandidateSummary(live)).toMatch(/Price-2/i);
+    expect(STREAM_COPY).toMatch(/Price-2/i);
+    expect(STREAM_SHADOW_LABEL).toMatch(/EXECUTION DISARMED/);
   });
 
   it("frontend STREAM surfaces do not call Price-2 or paper OPEN", () => {
