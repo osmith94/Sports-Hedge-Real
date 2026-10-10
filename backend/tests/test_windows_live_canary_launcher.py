@@ -37,6 +37,7 @@ def test_top_right_execution_toggle_exists() -> None:
     assert "ARM LIVE CANARY" in provider
     assert "armLiveCanary" in provider
     assert "disarmLiveCanary" in provider
+    assert "getOperatorScannerSettings" in provider
     assert "does not cancel" in provider
     assert "Max Event" in provider
     assert "£3" not in provider

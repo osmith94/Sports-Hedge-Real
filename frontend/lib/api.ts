@@ -1726,6 +1726,10 @@ export async function saveVenueParticipation(
   return response.json() as Promise<LiveRefreshStatus>;
 }
 
+export function getOperatorScannerSettings(): Promise<OperatorScannerSettings> {
+  return request("/paper/operator-scanner-settings");
+}
+
 export async function saveOperatorScannerSettings(
   update: OperatorScannerSettingsUpdate,
 ): Promise<LiveRefreshStatus> {

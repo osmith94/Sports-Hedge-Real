@@ -5,6 +5,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import {
   armLiveCanary,
   disarmLiveCanary,
+  getOperatorScannerSettings,
   getRuntimeHealth,
   heartbeatLiveCanary,
   type RuntimeHealth,
@@ -65,6 +66,11 @@ export function RuntimeModeClock() {
   const [checking, setChecking] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmLimits, setConfirmLimits] = useState<{
+    max_event_gbp?: string;
+    max_opportunity_gbp?: string;
+    max_one_time_gbp?: string;
+  } | null>(null);
 
   useEffect(() => {
     let stopped = false;
@@ -121,6 +127,15 @@ export function RuntimeModeClock() {
               return;
             }
             setConfirmOpen(true);
+            void getOperatorScannerSettings()
+              .then((saved) =>
+                setConfirmLimits({
+                  max_event_gbp: saved.max_event_gbp,
+                  max_opportunity_gbp: saved.max_opportunity_gbp,
+                  max_one_time_gbp: saved.max_one_time_gbp,
+                }),
+              )
+              .catch(() => setConfirmLimits(null));
           }}
         >
           {toggleLabel}
@@ -133,10 +148,11 @@ export function RuntimeModeClock() {
             <h2>REAL-MONEY EXECUTION</h2>
             <p>
               Turning ON may wager real money using the current operator Max Event / Max
-              Opportunity / Max One-Time limits of £{health?.live_canary?.max_event_gbp ?? "—"} / £
-              {health?.live_canary?.max_opportunity_gbp ?? "—"} / £
-              {health?.live_canary?.max_one_time_gbp ?? "—"}. Toggle OFF stops new submits and
-              does not cancel orders already sent.
+              Opportunity / Max One-Time limits of £
+              {confirmLimits?.max_event_gbp ?? health?.live_canary?.max_event_gbp ?? "—"} / £
+              {confirmLimits?.max_opportunity_gbp ?? health?.live_canary?.max_opportunity_gbp ?? "—"}{" "}
+              / £{confirmLimits?.max_one_time_gbp ?? health?.live_canary?.max_one_time_gbp ?? "—"}.
+              Toggle OFF stops new submits and does not cancel orders already sent.
             </p>
             <p>Type ARM LIVE CANARY to confirm.</p>
             <ExecutionConfirm

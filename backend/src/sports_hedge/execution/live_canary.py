@@ -175,11 +175,20 @@ def snapshot_payload(plan: PaperFillPlan) -> dict[str, Any] | None:
 
 
 def operator_limits_payload(settings: Settings) -> dict[str, str]:
+    """Status/health limits. Do not open paper_settings.sqlite from GET /health."""
+
     from sports_hedge.persistence.operator_scanner_settings import (
-        effective_operator_scanner_settings,
+        bound_runtime_operator_scanner_settings_store,
+        env_operator_scanner_settings,
+        resolve_operator_scanner_settings,
     )
 
-    operator = effective_operator_scanner_settings(settings)
+    store = bound_runtime_operator_scanner_settings_store()
+    operator = (
+        resolve_operator_scanner_settings(store, settings)
+        if store is not None
+        else env_operator_scanner_settings(settings)
+    )
     return {
         "max_event_gbp": format(operator.max_event_gbp, "f"),
         "max_opportunity_gbp": format(operator.max_opportunity_gbp, "f"),
