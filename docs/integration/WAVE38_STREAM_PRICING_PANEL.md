@@ -1,5 +1,8 @@
 # Wave 38 — STREAM pricing repair and compact operator panel
 
+> **Operator limit correction (2026-10-10):** The operator has confirmed that Max Event / Max Opportunity / Max One-Time are existing persisted dashboard settings (shown as £7/£7/£5 in a PAPER-mode screenshot), NOT hard-coded canary limits. Any earlier reference in this spec to £3/£5 or fixed £5 event/opportunity test ceilings is superseded. This wave must use actual effective operator settings from `effective_operator_scanner_settings(settings)` and existing `policy_from_settings`, never override, add a separate session cap, or modify runtime deployment controls. This wave is not authorised to turn on live execution. See updated [Wave 40 contract](WAVE40_LIVE_CANARY.md) on PR #44's branch.
+
+
 ## Purpose and operator evidence
 
 After merging PR #41 (main merge `8d20bbb`), the operator observed active Polymarket market-WS subscriptions and coalesced Matchbook exact-ID requests, but zero trustworthy STREAM comparisons / Price-2 attempts for a pinned Real Madrid v Villarreal event. `GET /stream/status` while paused retained nine diagnostic rows with *the same* reasons:
