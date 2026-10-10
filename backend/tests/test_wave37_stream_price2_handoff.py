@@ -39,6 +39,14 @@ from sports_hedge.paper.models import PaperScanDecision
 NOW = datetime(2026, 10, 10, 12, tzinfo=UTC)
 
 
+def test_desktop_host_import_does_not_circular_import() -> None:
+    import sports_hedge.api.desktop_host as desktop_host
+    from sports_hedge.application.executable_liquidity import decision_net_edge
+
+    assert desktop_host is not None
+    assert callable(decision_net_edge)
+
+
 def _decision() -> PaperScanDecision:
     return PaperScanDecision(
         canonical_market_id="mkt-stream",

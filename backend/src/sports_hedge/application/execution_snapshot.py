@@ -15,8 +15,6 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sports_hedge.application.executable_liquidity import decision_net_edge
-
 # Initial PAPER validation bound. Cross-venue and constituent books must be
 # retrieved within this window of each other. It is intentionally tighter than
 # the 2,000 ms quote-age gate: two individually fresh books can still be too
@@ -746,6 +744,8 @@ def _timing_json(item: ExecutionTiming | None) -> dict[str, Any] | None:
 
 
 def snapshot_economics(decision: Any) -> tuple[str | None, str | None]:
+    from sports_hedge.application.executable_liquidity import decision_net_edge
+
     edge = decision_net_edge(decision)
     profit = _guaranteed_profit(decision)
     return (None if edge is None else str(edge), None if profit is None else str(profit))
