@@ -3210,6 +3210,7 @@ class PaperOperationsService:
             canary_submit_refusal,
             get_live_canary_store,
             live_canary_enabled,
+            live_canary_session_id,
             plan_outlay_gbp,
         )
 
@@ -3224,7 +3225,7 @@ class PaperOperationsService:
             gbp = plan_outlay_gbp(plan)
             if gbp is None:
                 return
-            session_id = (self.settings.sports_hedge_live_canary_session_id or "").strip()
+            session_id = live_canary_session_id(self.settings)
             if not session_id:
                 return
             canary_store = get_live_canary_store(self.settings)

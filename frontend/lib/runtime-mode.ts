@@ -3,10 +3,14 @@ export type RuntimeHealth = {
   execution_enabled?: boolean | null;
   live_canary?: {
     enabled?: boolean | null;
+    runtime_armed?: boolean | null;
     capture_active?: boolean | null;
     halt_new_orders?: boolean | null;
     trading_permission?: boolean | null;
     label?: string | null;
+    not_ready_reasons?: string[] | null;
+    opening_tranche_gbp?: string | null;
+    session_cap_gbp?: string | null;
   } | null;
 };
 
@@ -70,45 +74,21 @@ export function runtimeModeFromHealth(
       simulationSection: false,
     };
   }
-  const canary = health?.live_canary?.enabled === true;
-  if (canary) {
-    const halted = health?.live_canary?.halt_new_orders === true;
-    const clockState = halted
-      ? "LIVE CANARY · HALT NEW ORDERS"
-      : enabled
-        ? "LIVE CANARY · REAL-MONEY ORDERS"
-        : "LIVE CANARY · EXECUTION FLAG OFF";
-    return {
-      known: true,
-      mode: "real",
-      executionEnabled: enabled,
-      clock: `GBP · ${clockState}`,
-      subtitle: "live canary operations terminal",
-      footerMode: "LIVE CANARY",
-      footerNote: halted
-        ? "HALT NEW ORDERS. Existing venue orders are not claimed cancelled."
-        : "LIVE REAL-MONEY CANARY. Not paper capture. One opportunity, £3 opening, £5 session.",
-      operationsEyebrow: "Live canary",
-      operationsSubtitle: halted
-        ? "New live orders are halted. Monitor residual exposure and venue history. This is not paper mode."
-        : "Bounded live canary. Paper autofill stays off. Do not treat paper P&L as a venue fill.",
-      readModelLabel: "LIVE CANARY READ MODEL",
-      offlineReadModelLabel: "LIVE CANARY API OFFLINE",
-      simulationSection: true,
-    };
-  }
-  const execution = enabled ? "EXECUTION ENABLED" : "EXECUTION DISABLED";
+  const runtimeArmed = health?.live_canary?.runtime_armed === true;
+  const execution = runtimeArmed ? "EXECUTION ON" : "EXECUTION OFF";
   return {
     known: true,
     mode: "real",
-    executionEnabled: enabled,
+    executionEnabled: runtimeArmed || enabled,
     clock: `GBP · REAL MODE · ${execution}`,
     subtitle: "real operations terminal",
     footerMode: "REAL MODE",
-    footerNote: enabled ? "LIVE ORDER EXECUTION ENABLED" : "LIVE ORDER EXECUTION DISABLED",
+    footerNote: runtimeArmed
+      ? "LIVE REAL-MONEY CANARY ARMED. Toggle OFF stops new submits and does not cancel existing venue orders."
+      : "EXECUTION OFF. Scanner continues. No new live orders. Not paper mode.",
     operationsEyebrow: "Operations console",
-    operationsSubtitle: enabled
-      ? "Live venue feeds, cross-venue discovery, pricing and execution monitoring. Live order execution is enabled."
+    operationsSubtitle: runtimeArmed
+      ? "Bounded live canary is ON. Paper autofill stays off. Do not treat paper P&L as a venue fill."
       : "Live venue feeds, cross-venue discovery, pricing and execution monitoring. Live order execution currently disabled.",
     readModelLabel: "LIVE VENUE READ MODEL",
     offlineReadModelLabel: "VENUE READ MODEL OFFLINE",

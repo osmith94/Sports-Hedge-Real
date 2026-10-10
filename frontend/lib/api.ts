@@ -1880,10 +1880,15 @@ export type RuntimeHealth = {
   execution_enabled?: boolean;
   live_canary?: {
     enabled?: boolean;
+    runtime_armed?: boolean;
     capture_active?: boolean;
     halt_new_orders?: boolean;
     trading_permission?: boolean;
     label?: string;
+    not_ready_reasons?: string[];
+    opening_tranche_gbp?: string;
+    session_cap_gbp?: string;
+    preflight_at?: string | null;
   };
 };
 
@@ -1891,8 +1896,32 @@ export function getRuntimeHealth(): Promise<RuntimeHealth> {
   return request<RuntimeHealth>("/health");
 }
 
-export async function haltLiveCanaryNewOrders(): Promise<RuntimeHealth["live_canary"]> {
-  const response = await fetch(`${API_BASE}/live-canary/halt-new-orders`, {
+export async function armLiveCanary(phrase: string): Promise<RuntimeHealth["live_canary"]> {
+  const response = await fetch(`${API_BASE}/live-canary/arm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phrase }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<RuntimeHealth["live_canary"]>;
+}
+
+export async function disarmLiveCanary(): Promise<RuntimeHealth["live_canary"]> {
+  const response = await fetch(`${API_BASE}/live-canary/disarm`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<RuntimeHealth["live_canary"]>;
+}
+
+export async function heartbeatLiveCanary(): Promise<RuntimeHealth["live_canary"]> {
+  const response = await fetch(`${API_BASE}/live-canary/heartbeat`, {
     method: "POST",
     cache: "no-store",
   });

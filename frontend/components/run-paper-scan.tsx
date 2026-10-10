@@ -31,7 +31,6 @@ import {
   saveOperatorScannerSettings,
   saveUniverseScope,
   stopPaperScanner,
-  haltLiveCanaryNewOrders,
 } from "../lib/api";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
@@ -774,22 +773,17 @@ export function RunPaperScan() {
           </div>
         </div>
         <div className="heading-actions">
-          <span className="status-badge">{runtime.footerMode}</span>
+          <span className="status-badge">
+            {runtime.mode === "paper"
+              ? "PAPER MODE · NO EXECUTION"
+              : runtime.clock.includes("EXECUTION ON")
+                ? "REAL MODE · EXECUTION ON"
+                : "REAL MODE · EXECUTION OFF"}
+          </span>
           {liveRefresh?.live_canary_capture_enabled ? (
-            <span className="status-badge">LIVE CANARY CAPTURE ON</span>
+            <span className="status-badge">LIVE EXECUTION ARMED</span>
           ) : liveRefresh?.paper_autofill_enabled ? (
             <span className="status-badge">AUTO PAPER CAPTURE ON</span>
-          ) : null}
-          {runtime.footerMode === "LIVE CANARY" ? (
-            <button
-              type="button"
-              className="status-badge"
-              onClick={() => {
-                void haltLiveCanaryNewOrders().catch(() => undefined);
-              }}
-            >
-              HALT NEW ORDERS
-            </button>
           ) : null}
         </div>
       </div>

@@ -18,11 +18,12 @@ from typing import Any
 
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
-from sports_hedge.execution.package import execution_armed
 from sports_hedge.paper.chain import PaperFillPlan
 from sports_hedge.paper.trades import OPENING_TRANCHE_ID
 
 OPERATOR_CONFIRMATION_PHRASE = "ARM LIVE CANARY"
+DEFAULT_SESSION_ID = "wave40-live-canary"
+ARM_LEASE_SECONDS = 45
 OPENING_TRANCHE_GBP = Decimal("3.00")
 SESSION_CAP_GBP = Decimal("5.00")
 MAX_OPPORTUNITIES = 1
@@ -60,6 +61,10 @@ CREATE TABLE IF NOT EXISTS live_canary_reservations (
 _lock = threading.Lock()
 _STORE: LiveCanaryStore | None = None
 _FACTS: LiveCanaryTradingFacts | None = None
+_RUNTIME_ARMED = False
+_RUNTIME_HEARTBEAT: datetime | None = None
+_RUNTIME_SESSION_ID = DEFAULT_SESSION_ID
+_RUNTIME_PREFLIGHT_AT: str | None = None
 
 
 @dataclass(frozen=True)
@@ -419,10 +424,13 @@ def get_live_canary_store(settings: Settings) -> LiveCanaryStore:
 
 
 def reset_live_canary_runtime() -> None:
-    global _STORE, _FACTS
+    global _STORE, _FACTS, _RUNTIME_ARMED, _RUNTIME_HEARTBEAT, _RUNTIME_PREFLIGHT_AT
     with _lock:
         _STORE = None
         _FACTS = None
+        _RUNTIME_ARMED = False
+        _RUNTIME_HEARTBEAT = None
+        _RUNTIME_PREFLIGHT_AT = None
 
 
 def set_live_canary_trading_facts(facts: LiveCanaryTradingFacts | None) -> None:
@@ -434,8 +442,56 @@ def live_canary_trading_facts() -> LiveCanaryTradingFacts | None:
     return _FACTS
 
 
+def live_runtime_armed() -> bool:
+    """Process arm bit. Expired leases fail closed. Restarts always start OFF."""
+
+    global _RUNTIME_ARMED, _RUNTIME_HEARTBEAT
+    with _lock:
+        if not _RUNTIME_ARMED:
+            return False
+        if _RUNTIME_HEARTBEAT is None:
+            _RUNTIME_ARMED = False
+            return False
+        age = (datetime.now(UTC) - _RUNTIME_HEARTBEAT).total_seconds()
+        if age > ARM_LEASE_SECONDS:
+            _RUNTIME_ARMED = False
+            return False
+        return True
+
+
+def set_live_runtime_arm(
+    armed: bool,
+    *,
+    session_id: str = DEFAULT_SESSION_ID,
+    heartbeat: datetime | None = None,
+) -> None:
+    global _RUNTIME_ARMED, _RUNTIME_HEARTBEAT, _RUNTIME_SESSION_ID
+    with _lock:
+        _RUNTIME_ARMED = bool(armed)
+        _RUNTIME_SESSION_ID = session_id or DEFAULT_SESSION_ID
+        _RUNTIME_HEARTBEAT = heartbeat or (datetime.now(UTC) if armed else None)
+
+
+def heartbeat_live_runtime() -> bool:
+    global _RUNTIME_HEARTBEAT
+    if not live_runtime_armed():
+        return False
+    with _lock:
+        _RUNTIME_HEARTBEAT = datetime.now(UTC)
+    return True
+
+
+def live_canary_session_id(settings: Settings) -> str:
+    configured = (settings.sports_hedge_live_canary_session_id or "").strip()
+    if configured:
+        return configured
+    return _RUNTIME_SESSION_ID
+
+
 def live_canary_enabled(settings: Settings) -> bool:
-    return settings.sports_hedge_live_canary_enabled is True
+    """Budget/canary gates apply when the dashboard is runtime-armed or tests opt in."""
+
+    return settings.sports_hedge_live_canary_enabled is True or live_runtime_armed()
 
 
 def authorization_path(settings: Settings) -> Path:
@@ -467,6 +523,8 @@ def load_authorization(settings: Settings) -> dict[str, Any] | None:
 
 
 def authorization_valid(settings: Settings) -> bool:
+    if live_runtime_armed():
+        return True
     if not settings.sports_hedge_live_canary_operator_confirmed:
         return False
     return load_authorization(settings) is not None
@@ -474,6 +532,8 @@ def authorization_valid(settings: Settings) -> bool:
 
 def live_canary_capture_active(settings: Settings) -> bool:
     """Scanner may auto-capture live without PAPER_AUTOFILL_ENABLED."""
+
+    from sports_hedge.execution.package import execution_armed
 
     return (
         live_canary_enabled(settings)
@@ -635,18 +695,27 @@ def _fx_rate(payload: dict[str, Any], currency: str) -> Decimal | None:
 def trading_permission_reasons(
     settings: Settings,
     facts: LiveCanaryTradingFacts | None,
+    *,
+    for_arm: bool = False,
+    require_facts: bool = True,
 ) -> list[str]:
     reasons: list[str] = []
-    if not live_canary_enabled(settings):
-        reasons.append("canary_unarmed")
-    if not execution_armed(settings):
-        reasons.append("execution_disabled")
-    if not settings.sports_hedge_live_canary_operator_confirmed:
-        reasons.append("canary_operator_unconfirmed")
-    if not authorization_valid(settings):
-        reasons.append("canary_authorization_missing")
+    if settings.sports_hedge_mode != "real":
+        reasons.append("not_real_mode")
+    if not for_arm:
+        from sports_hedge.execution.package import execution_armed
+
+        if not live_canary_enabled(settings):
+            reasons.append("canary_unarmed")
+        if not execution_armed(settings):
+            reasons.append("execution_disabled")
+        if not settings.sports_hedge_live_canary_operator_confirmed and not live_runtime_armed():
+            reasons.append("canary_operator_unconfirmed")
+        if not authorization_valid(settings):
+            reasons.append("canary_authorization_missing")
     if facts is None:
-        reasons.append("canary_preflight_not_collected")
+        if require_facts:
+            reasons.append("canary_preflight_not_collected")
         return reasons
     if not facts.polymarket_geoblock_permitted:
         reasons.append(facts.polymarket_geoblock_reason or "geoblock_blocked")
@@ -735,24 +804,29 @@ def canary_submit_refusal(
 
 
 def public_canary_status(settings: Settings) -> dict[str, Any]:
-    session_id = (settings.sports_hedge_live_canary_session_id or "").strip() or None
+    session_id = live_canary_session_id(settings)
     facts = _FACTS
-    permission_reasons = trading_permission_reasons(settings, facts)
-    snapshot: dict[str, Any] = {}
-    if session_id:
-        snapshot = get_live_canary_store(settings).session_snapshot(session_id)
-        if snapshot.get("halt_new_orders"):
-            permission_reasons.append("canary_halt_new_orders")
-        if snapshot.get("blocked_reason"):
-            permission_reasons.append(str(snapshot["blocked_reason"]))
+    permission_reasons = trading_permission_reasons(
+        settings, facts, require_facts=facts is not None
+    )
+    snapshot = get_live_canary_store(settings).session_snapshot(session_id)
+    if snapshot.get("halt_new_orders"):
+        permission_reasons.append("canary_halt_new_orders")
+    if snapshot.get("blocked_reason"):
+        permission_reasons.append(str(snapshot["blocked_reason"]))
+    runtime_on = live_runtime_armed()
     ready = not permission_reasons and live_canary_enabled(settings)
     return {
         "enabled": live_canary_enabled(settings),
-        "operator_confirmed": bool(settings.sports_hedge_live_canary_operator_confirmed),
+        "runtime_armed": runtime_on,
+        "execution_toggle": "ON" if runtime_on else "OFF",
+        "operator_confirmed": bool(
+            settings.sports_hedge_live_canary_operator_confirmed or runtime_on
+        ),
         "authorization_valid": authorization_valid(settings),
         "session_id": session_id,
         "capture_active": live_canary_capture_active(settings),
-        "halt_new_orders": bool(snapshot.get("halt_new_orders")),
+        "halt_new_orders": (not runtime_on) or bool(snapshot.get("halt_new_orders")),
         "authorized_opportunity_id": snapshot.get("authorized_opportunity_id"),
         "reserved_gbp": snapshot.get("reserved_gbp", "0"),
         "opening_tranche_gbp": format(OPENING_TRANCHE_GBP, "f"),
@@ -763,10 +837,44 @@ def public_canary_status(settings: Settings) -> dict[str, Any]:
         "not_ready_reasons": permission_reasons,
         "live_execution_ready_is_not_permission": True,
         "paper_autofill_enabled": settings.paper_autofill_enabled,
-        "label": "LIVE CANARY" if live_canary_enabled(settings) else "DISARMED",
+        "disarm_does_not_cancel_existing": True,
+        "preflight_at": _RUNTIME_PREFLIGHT_AT,
+        "label": "EXECUTION ON" if runtime_on else "EXECUTION OFF",
         "reservations": snapshot.get("reservations", []),
         "blocked_reason": snapshot.get("blocked_reason"),
     }
+
+
+async def arm_live_runtime(settings: Settings, *, phrase: str) -> dict[str, Any]:
+    global _RUNTIME_PREFLIGHT_AT
+    if phrase != OPERATOR_CONFIRMATION_PHRASE:
+        return {
+            **public_canary_status(settings),
+            "armed": False,
+            "not_ready_reasons": ["canary_operator_unconfirmed"],
+        }
+    facts = _FACTS if _FACTS is not None else await collect_live_canary_facts(settings)
+    _RUNTIME_PREFLIGHT_AT = datetime.now(UTC).isoformat()
+    reasons = trading_permission_reasons(settings, facts, for_arm=True)
+    if reasons:
+        set_live_runtime_arm(False)
+        status = public_canary_status(settings)
+        status["armed"] = False
+        status["not_ready_reasons"] = reasons
+        status["preflight_at"] = _RUNTIME_PREFLIGHT_AT
+        return status
+    set_live_runtime_arm(True, session_id=live_canary_session_id(settings))
+    get_live_canary_store(settings).ensure_session(live_canary_session_id(settings))
+    status = public_canary_status(settings)
+    status["armed"] = True
+    return status
+
+
+def disarm_live_runtime(settings: Settings) -> dict[str, Any]:
+    """Stop new submits. Does not cancel orders already sent to a venue."""
+
+    set_live_runtime_arm(False)
+    return public_canary_status(settings)
 
 
 def _decimal(value: Any) -> Decimal:

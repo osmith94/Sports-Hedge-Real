@@ -12,7 +12,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sports_hedge.api.main import app
-from sports_hedge.application.paper_operations import PaperOperationsService, paper_trade_id
+from sports_hedge.application.paper_operations import (
+    PaperOperationsError,
+    PaperOperationsService,
+    paper_trade_id,
+)
 from sports_hedge.arbitrage.watchlist.economics import classification_for
 from sports_hedge.arbitrage.watchlist.models import NearOpportunity, OpportunityStatus
 from sports_hedge.arbitrage.watchlist.repository import SqliteWatchlistRepository
@@ -28,7 +32,10 @@ from sports_hedge.execution.live_canary import (
     LiveCanaryTradingFacts,
     OPENING_TRANCHE_GBP,
     SESSION_CAP_GBP,
+    arm_live_runtime,
+    disarm_live_runtime,
     get_live_canary_store,
+    live_runtime_armed,
     public_canary_status,
     reset_live_canary_runtime,
     set_live_canary_trading_facts,
@@ -237,7 +244,10 @@ def test_unarmed_and_real_dry_run_submit_nothing(tmp_path: Path) -> None:
     ledger = SqlitePaperLedger(tmp_path / "dry.sqlite")
     plan = _plan()
     ops = _ops(dry, runtime, ledger, plan)
-    ops.capture_opening_fill(plan.opportunity_id, now=NOW)
+    try:
+        ops.capture_opening_fill(plan.opportunity_id, now=NOW)
+    except PaperOperationsError:
+        pass
     assert mb.calls == []
     assert pm.calls == []
     armed_only = Settings(sports_hedge_mode="real", sports_hedge_execution_enabled=True, paper_autofill_enabled=False)
@@ -462,6 +472,36 @@ def test_live_execution_ready_is_not_permission(tmp_path: Path) -> None:
     assert body["live_execution_ready_is_not_permission"] is True
     assert body["trading_permission"] is False
     assert "canary_operator_unconfirmed" in body["not_ready_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_arm_without_startup_execution_flag(tmp_path: Path) -> None:
+    set_live_canary_trading_facts(PERMITTED)
+    settings = Settings(
+        sports_hedge_mode="real",
+        sports_hedge_execution_enabled=False,
+        paper_autofill_enabled=False,
+        sports_hedge_live_canary_db_path=str(tmp_path / "runtime.sqlite"),
+    )
+    assert execution_armed(settings) is False
+    assert live_runtime_armed() is False
+    refused = await arm_live_runtime(settings, phrase="nope")
+    assert refused["runtime_armed"] is False
+    result = await arm_live_runtime(settings, phrase="ARM LIVE CANARY")
+    assert result["runtime_armed"] is True
+    assert execution_armed(settings) is True
+    runtime, mb, pm = _runtime()
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "rt.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls and pm.calls
+    disarm_live_runtime(settings)
+    assert execution_armed(settings) is False
+    before = len(mb.calls)
+    try:
+        ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    except PaperOperationsError:
+        pass
+    assert len(mb.calls) == before
 
 
 def test_default_settings_keep_canary_off() -> None:

@@ -84,8 +84,8 @@ export function VenueHealthBar() {
             );
           })}
           {refresh?.live_canary_capture_enabled ? (
-            <span className="status-item status-item-capture" aria-label="LIVE CANARY CAPTURE ON">
-              LIVE CANARY CAPTURE ON
+            <span className="status-item status-item-capture" aria-label="LIVE EXECUTION ARMED">
+              LIVE EXECUTION ARMED
             </span>
           ) : refresh?.paper_autofill_enabled ? (
             <span className="status-item status-item-capture" aria-label="AUTO PAPER CAPTURE ON">

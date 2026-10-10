@@ -171,7 +171,9 @@ def refusal_reason(
 ) -> str | None:
     """Why this plan must not be submitted. None means the existing package may run."""
 
-    if not (settings.sports_hedge_mode == "real" and settings.sports_hedge_execution_enabled is True):
+    from sports_hedge.execution.package import execution_armed
+
+    if not execution_armed(settings):
         return "execution_disabled"
     if not _accepted_plan(plan):
         return "decision_not_accepted"

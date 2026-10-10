@@ -15,33 +15,32 @@ describe("runtime mode from /health", () => {
 
   it("says real with execution disabled when health says real and execution is false", () => {
     const view = runtimeModeFromHealth({ mode: "real", execution_enabled: false });
-    assert.equal(view.clock, "GBP · REAL MODE · EXECUTION DISABLED");
+    assert.equal(view.clock, "GBP · REAL MODE · EXECUTION OFF");
     assert.equal(view.subtitle, "real operations terminal");
     assert.equal(view.footerMode, "REAL MODE");
-    assert.equal(view.footerNote, "LIVE ORDER EXECUTION DISABLED");
+    assert.match(view.footerNote, /EXECUTION OFF/);
     assert.match(view.operationsSubtitle, /Live order execution currently disabled/);
     assert.equal(view.simulationSection, true);
     assert.equal(readModelBadge(view, true), "LIVE VENUE READ MODEL");
     assert.doesNotMatch(view.clock, /PAPER/);
   });
 
-  it("does not soften execution enabled", () => {
+  it("does not treat startup execution_enabled as the dashboard ON state", () => {
     const view = runtimeModeFromHealth({ mode: "real", execution_enabled: true });
-    assert.equal(view.clock, "GBP · REAL MODE · EXECUTION ENABLED");
-    assert.equal(view.footerNote, "LIVE ORDER EXECUTION ENABLED");
-    assert.match(view.operationsSubtitle, /Live order execution is enabled/);
+    assert.equal(view.clock, "GBP · REAL MODE · EXECUTION OFF");
+    assert.equal(view.footerMode, "REAL MODE");
   });
 
-  it("labels an armed live canary as real-money, never paper capture", () => {
+  it("labels runtime-armed execution ON without calling it paper", () => {
     const view = runtimeModeFromHealth({
       mode: "real",
-      execution_enabled: true,
-      live_canary: { enabled: true, capture_active: true, halt_new_orders: false },
+      execution_enabled: false,
+      live_canary: { enabled: true, runtime_armed: true, capture_active: true, halt_new_orders: false },
     });
-    assert.equal(view.clock, "GBP · LIVE CANARY · REAL-MONEY ORDERS");
-    assert.equal(view.footerMode, "LIVE CANARY");
+    assert.equal(view.clock, "GBP · REAL MODE · EXECUTION ON");
+    assert.equal(view.footerMode, "REAL MODE");
     assert.doesNotMatch(view.clock, /PAPER/);
-    assert.match(view.footerNote, /Not paper capture/);
+    assert.match(view.footerNote, /does not cancel/);
   });
 
   it("fails unknown instead of defaulting to paper", () => {

@@ -1,14 +1,20 @@
 # Wave 40 live canary — operator runbook
 
-This is capability preparation. It does **not** authorize Cursor, CI, or a merge to place bets, set live flags on `main`, deploy, restart a PC, or touch credentials.
+There is **one Real mode** and **one Windows launcher**. Execution boots **OFF**. A top-right dashboard toggle arms a bounded live canary after confirmation and read-only preflight.
 
-The ordinary Real launcher (`scripts/windows/Start-SportsHedge-Real.ps1`) stays dry-run: `SPORTS_HEDGE_EXECUTION_ENABLED=false` and `PAPER_AUTOFILL_ENABLED=false`.
+This does **not** authorize Cursor, CI, or a merge to place bets, set live flags on `main`, deploy, restart a PC, or touch credentials.
+
+```text
+scripts\windows\Start-SportsHedge-Real.bat
+```
+
+`SPORTS_HEDGE_EXECUTION_ENABLED=false` and `PAPER_AUTOFILL_ENABLED=false` stay the dry-run defaults. Do not hand-edit them to arm.
 
 ## What the £5 cap means
 
 The durable canary session reserves **combined requested GBP outlay** (both legs, FX from the accepted Price-2 snapshot, rounded up to a penny) **before any venue write**. Pending, partial, unknown-ACK, failed-after-submit, and filled amounts all count. The reservation is released only when the process never attempted a venue write.
 
-It is **not** a guarantee of fill, profit, or matched hedge. An unmatched filled leg can lose more than residual session room. Fees and FX are the snapshot's own economics, not a new haircut.
+It is **not** a guarantee of fill, profit, or matched hedge. An unmatched filled leg can lose more than residual session room.
 
 Hard constants (not env-overridable):
 
@@ -18,42 +24,22 @@ Hard constants (not env-overridable):
 - minimum guaranteed net edge **0.20%**
 - Price-2 skew **500 ms**, quote age **2000 ms**
 
-If native minima make £3 infeasible, the UI/health reason is `canary_native_minimum_exceeds_budget` / NOT READY. Stakes are never raised to satisfy an exchange minimum.
+If native minima make £3 infeasible, status is NOT READY. Stakes are never raised.
 
-## Prepare (operator machine only)
+Server **restarts always OFF**. Session spend and unresolved venue attempts remain durable. Re-arming cannot spend above the remaining £5.
 
-1. Integrate and review Wave 38 STREAM fee/FX (#42) and Wave 39 Matchbook Price-2 tail refresh (#43) with this branch. Do not arm live on a split Price-2.
-2. Confirm Matchbook and Polymarket accounts, wallet, `exchange_v3` allowance, free-funds, and **current-territory** permission for **both** venues. Polymarket geoblock uses the **current outbound IP** and fails closed. Do not use a VPN/proxy or claim permission from prior travel.
-3. Leave `.env` credentials in place on the operator machine. This runbook does not print or rotate them.
-4. Independent venue UIs should be open so you can verify order history if an ACK is unknown.
+## Toggle ON
 
-## Start one-off canary
+1. Integrate Wave 38 (#42) and Wave 39 (#43) before using live Price-2.
+2. Confirm current-territory permission for **both** venues. Polymarket geoblock is current outbound IP, fail closed. No VPN/proxy.
+3. In the top-right header, EXECUTION OFF → confirm **REAL-MONEY EXECUTION** → type `ARM LIVE CANARY`.
+4. While preflight runs the switch shows **CHECKING**, not ON. Fail reasons stay OFF.
+5. ON is real only after the backend acknowledges. A browser refresh reads server state and does not auto-arm.
 
-```text
-scripts\windows\Start-SportsHedge-LiveCanary.bat
-```
+`/health.execution.live_execution_ready` is **not** trading permission.
 
-Type exactly `ARM LIVE CANARY`. Unattended start is refused.
+## Toggle OFF
 
-Expect `/health` to show `mode=real`, `execution_enabled=true`, `live_canary.enabled=true`, `paper_autofill_enabled=false`. **Do not** treat `execution.live_execution_ready` as trading permission.
+OFF (or `POST /live-canary/disarm`) stops **new** submits immediately, including in-flight capture races. It does **not** cancel orders already submitted. Monitor venue histories for unknown ACK. Do not retry ambiguous client orders after restart.
 
-The console must say **LIVE CANARY**, not AUTO PAPER CAPTURE / PAPER-only.
-
-## Observe
-
-1. At most one registered MB–PM package should be able to reserve.
-2. Opening combined outlay ≤ £3; a later top-up only after **both** opening legs are positively reconciled and fully hedged, remaining session ≤ £5.
-3. Differentiate accepted / no fill / partial / unknown / fully hedged in Activity, journal, `/health.live_canary`, and `/health.orphaned_live_executions`.
-4. After an unknown ACK or restart, do **not** retry the same client order. Inspect venue histories manually.
-
-## Stop new submits
-
-`POST http://127.0.0.1:8000/live-canary/halt-new-orders` or the console **HALT NEW ORDERS** control.
-
-This is durable **HALT NEW ORDERS**. It does **not** cancel resting or unknown venue orders.
-
-Then `scripts\windows\Stop-SportsHedge-LiveCanary.bat`. A later Real dry-run start must still report execution OFF.
-
-## Fail-closed preflight
-
-Read-only Matchbook and Polymarket preflight stay operator-local after merge. Cursor must not run them against live credentials.
+A lost heartbeat / expired arm lease fails closed to OFF.
