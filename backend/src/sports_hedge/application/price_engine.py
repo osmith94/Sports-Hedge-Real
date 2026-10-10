@@ -113,6 +113,7 @@ from sports_hedge.application.provider_access import (
 from sports_hedge.application.quote_freshness import (
     QuoteAgeAssessment,
     matchbook_market_quote_age,
+    polymarket_books_quote_age,
     retrieval_quote_age,
 )
 from sports_hedge.application.scan_lanes import (
@@ -2301,10 +2302,8 @@ class CataloguePriceEngine:
         market = _canonical_polymarket_market(identity)
         if market is None:
             raise ValueError("polymarket_identity")
-        age = _oldest_retrieval_age(
-            [item.retrieved_at for item in polymarket_books.values()],
-            evaluated_at=evaluated_at,
-            required=len(identity.polymarket_token_ids) or 1,
+        age = self._polymarket_execution_quote_age(
+            identity, polymarket_books, evaluated_at
         )
         return self.polymarket_builder.build(
             {"id": identity.polymarket_event_id, "title": f"{identity.home_canonical} vs {identity.away_canonical}"},
@@ -2440,10 +2439,18 @@ class CataloguePriceEngine:
         timing_token = _EXECUTION_REPRICE_CALLS.set(calls)
         work = self._execution_scheduler_work(runtime, venues)
         bookset = _ExecutionBookSet()
+        tail_refresh = None
         try:
             bookset = await self._execution_fetch_venues(
                 identity,
                 venues,
+                runtime=runtime,
+                scheduler_work=work,
+            )
+            bookset, tail_refresh = await self._maybe_matchbook_tail_refresh(
+                identity,
+                venues,
+                bookset=bookset,
                 runtime=runtime,
                 scheduler_work=work,
             )
@@ -2458,6 +2465,7 @@ class CataloguePriceEngine:
             started_at=started_at,
             assembly_ms=assembly_ms,
             calls=calls,
+            tail_refresh=tail_refresh,
         )
         book_count = int(bookset.matchbook is not None) + len(bookset.kalshi_books) + len(
             bookset.polymarket_books
@@ -2484,6 +2492,7 @@ class CataloguePriceEngine:
         started_at: datetime,
         assembly_ms: int,
         calls: list[dict[str, Any]],
+        tail_refresh: Any = None,
     ) -> Any:
         """Scan only a complete set. Always return a structured snapshot."""
 
@@ -2565,6 +2574,7 @@ class CataloguePriceEngine:
             decision=decision,
             oldest_quote_age_ms=traced.oldest_quote_age_ms(),
             diagnostics=traced,
+            tail_refresh=tail_refresh,
         )
         returned: PaperScanDecision | None = None
         pending_real = False
@@ -2607,6 +2617,7 @@ class CataloguePriceEngine:
         decision: PaperScanDecision | None,
         oldest_quote_age_ms: int | None,
         diagnostics: Any = None,
+        tail_refresh: Any = None,
     ) -> Any:
         from sports_hedge.application.execution_reprice import (
             PHASE_BOOK_RETRIEVED,
@@ -2697,6 +2708,7 @@ class CataloguePriceEngine:
             net_edge=edge,
             guaranteed_profit=profit,
             timing=timing,
+            matchbook_tail_refresh=tail_refresh,
             **provenance,
         )
 
@@ -3018,6 +3030,146 @@ class CataloguePriceEngine:
         if len(venues) != 2:
             bookset.complete = False
         return bookset
+
+    async def _maybe_matchbook_tail_refresh(
+        self,
+        identity: DerivedPriceEngineItem,
+        venues: tuple[VenueName, ...],
+        *,
+        bookset: _ExecutionBookSet,
+        runtime: PriceEngineRuntimeItem,
+        scheduler_work: SchedulerWork,
+    ) -> tuple[_ExecutionBookSet, Any]:
+        """At most one exact-ID Matchbook retry when MB is the old skew outlier.
+
+        Polymarket books and their retrieval timestamps are never retried here.
+        A failed tail leaves the original MB payload in the audit set but marks
+        the complete-set false so the pair cannot be accepted on stale prices.
+        """
+
+        from sports_hedge.application.execution_snapshot import (
+            MATCHBOOK_TAIL_REFRESH_FAILED,
+            MATCHBOOK_TAIL_REFRESH_SKIPPED_COHERENT,
+            MATCHBOOK_TAIL_REFRESH_SKIPPED_INCOMPLETE,
+            MATCHBOOK_TAIL_REFRESH_SKIPPED_MB_NOT_OLDEST,
+            MATCHBOOK_TAIL_REFRESH_SKIPPED_NOT_MB_PM,
+            MATCHBOOK_TAIL_REFRESH_SKIPPED_PM_INTERNAL_SKEW,
+            MATCHBOOK_TAIL_REFRESH_SKIPPED_PM_STALE,
+            MATCHBOOK_TAIL_REFRESH_SUCCESS,
+            MatchbookTailRefreshAudit,
+            _settings_int,
+            execution_max_snapshot_skew_ms,
+        )
+
+        settings = getattr(self.paper_scan, "settings", None)
+        max_skew = execution_max_snapshot_skew_ms(settings)
+        max_age = _settings_int(settings, "paper_entry_max_quote_age_ms", 2000)
+        original_skew = _bookset_retrieval_skew_ms(bookset)
+        pm_stamps = tuple(
+            (token, book.retrieved_at) for token, book in bookset.polymarket_books.items()
+        )
+        original_mb_at = None if bookset.matchbook is None else bookset.matchbook.retrieved_at
+
+        def _audit(*, attempted: bool, outcome: str, final_skew: int | None = None) -> MatchbookTailRefreshAudit:
+            return MatchbookTailRefreshAudit(
+                attempted=attempted,
+                outcome=outcome,
+                original_skew_ms=original_skew,
+                final_skew_ms=original_skew if final_skew is None else final_skew,
+                original_matchbook_retrieved_at=original_mb_at,
+                final_matchbook_retrieved_at=(
+                    original_mb_at if bookset.matchbook is None else bookset.matchbook.retrieved_at
+                ),
+                polymarket_retrieved_at=pm_stamps,
+            )
+
+        required = tuple(dict.fromkeys(venues))
+        if set(required) != {VenueName.MATCHBOOK, VenueName.POLYMARKET}:
+            return bookset, _audit(attempted=False, outcome=MATCHBOOK_TAIL_REFRESH_SKIPPED_NOT_MB_PM)
+        if (
+            not bookset.complete
+            or bookset.matchbook is None
+            or not bookset.polymarket_books
+            or not _polymarket_books_complete(identity, bookset.polymarket_books)
+        ):
+            return bookset, _audit(attempted=False, outcome=MATCHBOOK_TAIL_REFRESH_SKIPPED_INCOMPLETE)
+
+        pm_times = [book.retrieved_at for book in bookset.polymarket_books.values()]
+        mb_at = bookset.matchbook.retrieved_at
+        pm_internal = max(0, int((max(pm_times) - min(pm_times)).total_seconds() * 1000))
+        if original_skew is None:
+            return bookset, _audit(attempted=False, outcome=MATCHBOOK_TAIL_REFRESH_SKIPPED_INCOMPLETE)
+        if original_skew <= max_skew:
+            return bookset, _audit(attempted=False, outcome=MATCHBOOK_TAIL_REFRESH_SKIPPED_COHERENT)
+        if pm_internal > max_skew:
+            return bookset, _audit(
+                attempted=False, outcome=MATCHBOOK_TAIL_REFRESH_SKIPPED_PM_INTERNAL_SKEW
+            )
+        if any(item <= mb_at for item in pm_times):
+            return bookset, _audit(
+                attempted=False, outcome=MATCHBOOK_TAIL_REFRESH_SKIPPED_MB_NOT_OLDEST
+            )
+
+        evaluated_at = self.now()
+        pm_age = self._polymarket_execution_quote_age(
+            identity, bookset.polymarket_books, evaluated_at
+        )
+        if pm_age.quote_age_ms is None or pm_age.quote_age_ms > max_age:
+            return bookset, _audit(attempted=False, outcome=MATCHBOOK_TAIL_REFRESH_SKIPPED_PM_STALE)
+
+        lane = scheduler_work.normalized_lane or LANE_EXECUTION_CANDIDATE
+        try:
+            refreshed = await self._execution_fetch_matchbook(
+                identity,
+                lane=lane,
+                runtime=runtime,
+                scheduler_work=scheduler_work,
+            )
+        except Exception:
+            bookset.complete = False
+            return bookset, _audit(attempted=True, outcome=MATCHBOOK_TAIL_REFRESH_FAILED)
+        if refreshed is None:
+            bookset.complete = False
+            return bookset, _audit(attempted=True, outcome=MATCHBOOK_TAIL_REFRESH_FAILED)
+        bookset.matchbook = refreshed
+        return bookset, _audit(
+            attempted=True,
+            outcome=MATCHBOOK_TAIL_REFRESH_SUCCESS,
+            final_skew=_bookset_retrieval_skew_ms(bookset),
+        )
+
+    def _polymarket_execution_quote_age(
+        self,
+        identity: DerivedPriceEngineItem,
+        polymarket_books: Mapping[str, RetrievedVenuePayload],
+        evaluated_at: datetime,
+    ) -> QuoteAgeAssessment:
+        """Prefer venue source clocks; fall back to retrieval when they are absent."""
+
+        required = [
+            str(getattr(item, "native_id", item) or "").strip()
+            for item in identity.polymarket_token_ids
+        ]
+        required = [token for token in required if token] or list(polymarket_books)
+        payloads = {token: item.payload for token, item in polymarket_books.items()}
+        source_age = polymarket_books_quote_age(
+            payloads,
+            required_tokens=required,
+            evaluated_at=evaluated_at,
+        )
+        if source_age.quote_age_ms is not None:
+            return source_age
+        if source_age.reason in {
+            "naive_quote_timestamp",
+            "invalid_quote_timestamp",
+            "future_quote_timestamp",
+        }:
+            return source_age
+        return _oldest_retrieval_age(
+            [item.retrieved_at for item in polymarket_books.values()],
+            evaluated_at=evaluated_at,
+            required=len(required) or 1,
+        )
 
     async def _execution_provider_call(
         self,
@@ -4406,6 +4558,17 @@ def _interleave_hot_fixtures(
         if not added:
             return interleaved
         depth += 1
+
+
+def _bookset_retrieval_skew_ms(bookset: _ExecutionBookSet) -> int | None:
+    times: list[datetime] = []
+    if bookset.matchbook is not None:
+        times.append(bookset.matchbook.retrieved_at)
+    times.extend(item.retrieved_at for item in bookset.kalshi_books.values())
+    times.extend(item.retrieved_at for item in bookset.polymarket_books.values())
+    if not times:
+        return None
+    return max(0, int((max(times) - min(times)).total_seconds() * 1000))
 
 
 def _oldest_retrieval_age(
