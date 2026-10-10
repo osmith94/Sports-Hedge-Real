@@ -82,6 +82,16 @@ export type ActivityPrice2Leg = {
   slotWaitMs: number | null;
   ioMs: number | null;
   timingMatch: "native_id" | null;
+  nativeMarketId: string | null;
+  nativeRunnerId: string | null;
+  nativeFrozen: boolean | null;
+  freezeStatus: "frozen" | "not_frozen" | "details_not_recorded" | null;
+  freezeReason: string | null;
+  observedTickSize: string | null;
+  observedMinimumShares: string | null;
+  intendedNativeStake: string | null;
+  intendedNativeShares: string | null;
+  intendedLimitPrice: string | null;
 };
 
 export type ActivityPrice2VenueTiming = {
@@ -109,6 +119,14 @@ export type ActivityPrice2 = {
   oldestQuoteAgeMs: number | null;
   skewMs: number | null;
   rejectionReason: string | null;
+  minimumNetEdge: string | number | null;
+  economicsVsThreshold:
+    | "below_configured_threshold"
+    | "meets_or_exceeds_configured_threshold"
+    | "threshold_not_recorded"
+    | "net_edge_not_recorded"
+    | null;
+  nativeOrderFreezeRecorded: boolean;
   source: "execution_snapshot_audit" | "lifecycle_rejection";
   dataKind: "historical_recorded";
   legs: ActivityPrice2Leg[];

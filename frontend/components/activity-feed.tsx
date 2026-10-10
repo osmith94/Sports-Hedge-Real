@@ -135,8 +135,22 @@ function Price2Detail({ price2 }: { price2: ActivityPrice2 }) {
                 {leg.timingMatch === "native_id" && leg.ioMs != null
                   ? ` · matched I/O ${leg.ioMs}ms`
                   : ""}
+                {" · "}
+                {freezeLine(leg)}
               </div>
             ))
+          )}
+          {price2.minimumNetEdge != null && price2.minimumNetEdge !== "" ? (
+            <div className="feed-detail">
+              Configured minimum net edge {price2.minimumNetEdge}
+              {price2.economicsVsThreshold === "below_configured_threshold"
+                ? " · economics below threshold (not fill-eligible on edge alone)"
+                : price2.economicsVsThreshold === "meets_or_exceeds_configured_threshold"
+                  ? " · economics met threshold; native-order proof is separate"
+                  : ""}
+            </div>
+          ) : (
+            <div className="feed-detail">Configured minimum net edge not recorded on this audit.</div>
           )}
           {price2.venueTimings.length ? (
             <div className="feed-price2-venue-timing">
@@ -154,6 +168,22 @@ function Price2Detail({ price2 }: { price2: ActivityPrice2 }) {
       )}
     </details>
   );
+}
+
+function freezeLine(leg: ActivityPrice2["legs"][number]): string {
+  if (leg.freezeStatus === "frozen") return "native order frozen";
+  if (leg.freezeStatus === "not_frozen") {
+    const reason = (leg.freezeReason || "unknown/unrecorded").replaceAll("_", " ");
+    const extras = [
+      leg.observedTickSize ? `tick ${leg.observedTickSize}` : null,
+      leg.observedMinimumShares ? `min shares ${leg.observedMinimumShares}` : null,
+      leg.intendedNativeShares ? `intended shares ${leg.intendedNativeShares}` : null,
+      leg.intendedLimitPrice ? `intended price ${leg.intendedLimitPrice}` : null,
+    ].filter(Boolean);
+    const suffix = extras.length ? ` (${extras.join(", ")})` : "";
+    return `native order not proved: ${reason}${suffix}`;
+  }
+  return "native order freeze details not recorded";
 }
 
 function legVenue(venue: string | null): string {

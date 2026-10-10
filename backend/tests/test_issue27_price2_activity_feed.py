@@ -301,6 +301,9 @@ def test_price2_accepted_is_not_a_fill_and_keeps_price1_edge_separate() -> None:
         assert row["legs"][0]["displayed_odds"] == "2.04"
         assert row["legs"][0]["displayed_odds"] != "2.10"
         assert "available_depth" not in row["legs"][0]
+        assert row["legs"][0]["freeze_status"] == "details_not_recorded"
+        assert row["legs"][0]["freeze_reason"] == "details_not_recorded"
+        assert row["native_order_freeze_recorded"] is False
         assert row["data_kind"] == "historical_recorded"
         assert "snapshot_json" not in row
         assert "frozen_orders" not in row

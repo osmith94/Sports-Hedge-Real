@@ -2709,12 +2709,14 @@ class CataloguePriceEngine:
     def _attach_frozen_orders(self, result: Any, bookset: _ExecutionBookSet) -> None:
         if result.snapshot is None or result.decision is None:
             return
-        from sports_hedge.execution.frozen import freeze_native_orders
+        from sports_hedge.execution.frozen import freeze_native_package
 
-        result.snapshot.frozen_orders = freeze_native_orders(
+        package = freeze_native_package(
             result.decision,
             polymarket_books=bookset.polymarket_books,
         )
+        result.snapshot.frozen_orders = package.orders
+        result.snapshot.native_order_freeze_diagnostics = package.diagnostics
 
     def _log_accepted_package(self, result: Any) -> None:
         from sports_hedge.application.execution_reprice import (
