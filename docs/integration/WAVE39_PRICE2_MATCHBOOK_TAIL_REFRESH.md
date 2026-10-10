@@ -1,5 +1,8 @@
 # Wave 39 — Price-2 bounded Matchbook tail refresh after slow Polymarket
 
+> **Operator limit correction (2026-10-10):** The operator has confirmed that Max Event / Max Opportunity / Max One-Time are existing persisted dashboard settings (shown as £7/£7/£5 in a PAPER-mode screenshot), NOT hard-coded canary limits. Any earlier reference in this spec to £3/£5 or fixed £5 event/opportunity test ceilings is superseded. This wave must use actual effective operator settings from `effective_operator_scanner_settings(settings)` and existing `policy_from_settings`, never override, add a separate session cap, or modify runtime deployment controls. This wave is not authorised to turn on live execution. See updated [Wave 40 contract](WAVE40_LIVE_CANARY.md) on PR #44's branch.
+
+
 ## Observed incident — Real Madrid v Villarreal, 2026-10-10
 
 One live-data dry-run price-2 candidate calculated 5.83% net, £0.29 *theoretical* guaranteed profit, but rejected `execution_reprice_skew`. Audit:
