@@ -74,6 +74,7 @@ PRICE_ENGINE_BACKGROUND_LANE = "background"
 PRICE_ENGINE_ACTIVE_TRADE_LANE = "active_trade"
 PRICE_ENGINE_EXECUTION_CANDIDATE_LANE = "execution_candidate"
 PRICE_ENGINE_SETTLEMENT_LANE = "settlement"
+PRICE_ENGINE_STREAM_LANE = "stream"
 # Ungranted BACKGROUND waiters refused because the operator paused the lane.
 BACKGROUND_ADMISSION_PAUSED = "background_admission_paused"
 # Ungranted HOT waiters refused because the operator paused the lane.
@@ -93,6 +94,7 @@ class ProviderPriority(IntEnum):
     UNIVERSE = 3
     MANUAL = 3
     BACKGROUND = 4
+    STREAM = 5
 
 
 def priority_for_lane(lane: ScanLane | str | None) -> ProviderPriority:
@@ -105,6 +107,8 @@ def priority_for_lane(lane: ScanLane | str | None) -> ProviderPriority:
         return ProviderPriority.HOT
     if text in {PRICE_ENGINE_BACKGROUND_LANE, PRICE_ENGINE_SETTLEMENT_LANE}:
         return ProviderPriority.BACKGROUND
+    if text in {PRICE_ENGINE_STREAM_LANE, "stream"}:
+        return ProviderPriority.STREAM
     return ProviderPriority.UNIVERSE
 
 
@@ -491,6 +495,7 @@ class ProviderAccessLayer:
             "hot": {venue.value: 0 for venue in self._limits},
             "universe": {venue.value: 0 for venue in self._limits},
             "background": {venue.value: 0 for venue in self._limits},
+            "stream": {venue.value: 0 for venue in self._limits},
         }
         waiting = {venue.value: 0 for venue in self._limits}
         for venue, waiters in self._waiters.items():
@@ -505,6 +510,8 @@ class ProviderAccessLayer:
                     lane = "hot"
                 elif waiter.priority is ProviderPriority.BACKGROUND:
                     lane = "background"
+                elif waiter.priority is ProviderPriority.STREAM:
+                    lane = "stream"
                 else:
                     lane = "universe"
                 waiting_by_lane[lane][venue.value] += 1
@@ -662,6 +669,8 @@ class ProviderAccessLayer:
             waiter_lane = ScanLane.HOT.value
         elif priority is ProviderPriority.BACKGROUND:
             waiter_lane = PRICE_ENGINE_BACKGROUND_LANE
+        elif priority is ProviderPriority.STREAM:
+            waiter_lane = PRICE_ENGINE_STREAM_LANE
         else:
             waiter_lane = ScanLane.UNIVERSE.value
         resolved_work = work

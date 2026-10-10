@@ -485,7 +485,7 @@ async def test_wait_for_returns_swallowed_cancel_and_old_path_times_out_in_persi
             leftover_phases["cancelling"] = 0 if task is None else task.cancelling()
             report = _hot_leftover_report(cancelled=True)
         persist_started = monotonic()
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.25)
         leftover_phases["persist_after_timeout_s"] = monotonic() - persist_started
         return report
 
