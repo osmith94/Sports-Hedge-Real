@@ -294,6 +294,8 @@ describe("dual cadence operator copy", () => {
     assert.match(bar, /paper_autofill_enabled/);
     assert.match(scan, /AUTO PAPER CAPTURE ON/);
     assert.match(scan, /LIVE EXECUTION ARMED/);
+    assert.match(scan, /REAL MODE · EXECUTION OFF/);
+    assert.match(scan, /runtime\.mode === "paper"/);
     assert.match(layout, /RuntimeModeClock/);
     const runtime = readFileSync(join(frontendRoot, "lib/runtime-mode.ts"), "utf8");
     assert.match(runtime, /PAPER MODE · \$\{execution\}/);

@@ -1247,7 +1247,12 @@ export function RunPaperScan() {
             {economics?.data_kind ? ` (${economics.data_kind.replaceAll("_", " ")})` : ""}.
             Missing or stale required inputs fail closed. Standing capital is Matchbook GBP /
             Polymarket USD / Kalshi USD. Optional extra capital limit is a scan-only cap, not live funds.
-            Polymarket fees are per-market CLOB metadata, not a global zero. PAPER MODE · no execution.
+            Polymarket fees are per-market CLOB metadata, not a global zero.{" "}
+            {runtime.mode === "paper"
+              ? "PAPER MODE · no execution."
+              : runtime.clock.includes("EXECUTION ON")
+                ? "REAL MODE · EXECUTION ON."
+                : "REAL MODE · EXECUTION OFF."}
           </p>
           <div className="matchbook-fee-editor">
             <label className="scan-field">
