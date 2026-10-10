@@ -198,6 +198,14 @@ class Settings(BaseSettings):
 
     sports_hedge_mode: Literal["paper", "real"] = "paper"
     sports_hedge_execution_enabled: bool = False
+    # Wave 40 opt-in. Default off. The dry-run Real launcher must not set this.
+    # Caps live in execution.live_canary and are not environment-overridable.
+    sports_hedge_live_canary_enabled: bool = False
+    sports_hedge_live_canary_operator_confirmed: bool = False
+    sports_hedge_live_canary_session_id: str | None = None
+    sports_hedge_live_canary_db_path: str = "./data/live_canary.sqlite"
+    sports_hedge_live_canary_authorization_path: str | None = None
+    sports_hedge_repo_root: str | None = None
 
     matchbook_username: str | None = None
     matchbook_password: str | None = None

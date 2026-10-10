@@ -922,6 +922,7 @@ export type LiveRefreshStatus = {
   matching_venues?: Venue[];
   server_loop_enabled: boolean;
   paper_autofill_enabled?: boolean;
+  live_canary_capture_enabled?: boolean;
   scanner_stopped?: boolean;
   universe_scans_paused?: boolean;
   hot_pricing_paused?: boolean;
@@ -1877,10 +1878,28 @@ export function getVenueHealth(): Promise<VenueHealth[]> {
 export type RuntimeHealth = {
   mode?: string;
   execution_enabled?: boolean;
+  live_canary?: {
+    enabled?: boolean;
+    capture_active?: boolean;
+    halt_new_orders?: boolean;
+    trading_permission?: boolean;
+    label?: string;
+  };
 };
 
 export function getRuntimeHealth(): Promise<RuntimeHealth> {
   return request<RuntimeHealth>("/health");
+}
+
+export async function haltLiveCanaryNewOrders(): Promise<RuntimeHealth["live_canary"]> {
+  const response = await fetch(`${API_BASE}/live-canary/halt-new-orders`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(await errorDetail(response));
+  }
+  return response.json() as Promise<RuntimeHealth["live_canary"]>;
 }
 
 export function getFixtureDetail(canonicalEventId: string): Promise<FixtureDetailReadModel> {

@@ -31,10 +31,12 @@ import {
   saveOperatorScannerSettings,
   saveUniverseScope,
   stopPaperScanner,
+  haltLiveCanaryNewOrders,
 } from "../lib/api";
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
 import { useLiveStatus } from "./live-status-provider";
+import { useRuntimeMode } from "./runtime-mode-provider";
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { FootballCompetitionsModal } from "./football-competitions-modal";
@@ -230,6 +232,7 @@ function economicsChips(status: EconomicsStatus | null): StripChip[] {
 
 export function RunPaperScan() {
   const router = useRouter();
+  const runtime = useRuntimeMode();
   const [capitalLimit, setCapitalLimit] = useState("");
   const [minNetArbPercent, setMinNetArbPercent] = useState(DEFAULT_MIN_NET_ARB_PERCENT);
   const [outrightMinNetArbPercent, setOutrightMinNetArbPercent] = useState("");
@@ -771,9 +774,22 @@ export function RunPaperScan() {
           </div>
         </div>
         <div className="heading-actions">
-          <span className="status-badge">PAPER MODE · NO EXECUTION</span>
-          {liveRefresh?.paper_autofill_enabled ? (
+          <span className="status-badge">{runtime.footerMode}</span>
+          {liveRefresh?.live_canary_capture_enabled ? (
+            <span className="status-badge">LIVE CANARY CAPTURE ON</span>
+          ) : liveRefresh?.paper_autofill_enabled ? (
             <span className="status-badge">AUTO PAPER CAPTURE ON</span>
+          ) : null}
+          {runtime.footerMode === "LIVE CANARY" ? (
+            <button
+              type="button"
+              className="status-badge"
+              onClick={() => {
+                void haltLiveCanaryNewOrders().catch(() => undefined);
+              }}
+            >
+              HALT NEW ORDERS
+            </button>
           ) : null}
         </div>
       </div>

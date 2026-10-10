@@ -1,6 +1,13 @@
 export type RuntimeHealth = {
   mode?: string | null;
   execution_enabled?: boolean | null;
+  live_canary?: {
+    enabled?: boolean | null;
+    capture_active?: boolean | null;
+    halt_new_orders?: boolean | null;
+    trading_permission?: boolean | null;
+    label?: string | null;
+  } | null;
 };
 
 export type RuntimeModeName = "paper" | "real" | "unknown";
@@ -61,6 +68,33 @@ export function runtimeModeFromHealth(
       readModelLabel: "LIVE PAPER READ MODEL",
       offlineReadModelLabel: "PAPER API OFFLINE",
       simulationSection: false,
+    };
+  }
+  const canary = health?.live_canary?.enabled === true;
+  if (canary) {
+    const halted = health?.live_canary?.halt_new_orders === true;
+    const clockState = halted
+      ? "LIVE CANARY · HALT NEW ORDERS"
+      : enabled
+        ? "LIVE CANARY · REAL-MONEY ORDERS"
+        : "LIVE CANARY · EXECUTION FLAG OFF";
+    return {
+      known: true,
+      mode: "real",
+      executionEnabled: enabled,
+      clock: `GBP · ${clockState}`,
+      subtitle: "live canary operations terminal",
+      footerMode: "LIVE CANARY",
+      footerNote: halted
+        ? "HALT NEW ORDERS. Existing venue orders are not claimed cancelled."
+        : "LIVE REAL-MONEY CANARY. Not paper capture. One opportunity, £3 opening, £5 session.",
+      operationsEyebrow: "Live canary",
+      operationsSubtitle: halted
+        ? "New live orders are halted. Monitor residual exposure and venue history. This is not paper mode."
+        : "Bounded live canary. Paper autofill stays off. Do not treat paper P&L as a venue fill.",
+      readModelLabel: "LIVE CANARY READ MODEL",
+      offlineReadModelLabel: "LIVE CANARY API OFFLINE",
+      simulationSection: true,
     };
   }
   const execution = enabled ? "EXECUTION ENABLED" : "EXECUTION DISABLED";

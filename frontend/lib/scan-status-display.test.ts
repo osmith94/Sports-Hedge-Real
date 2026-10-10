@@ -290,8 +290,11 @@ describe("dual cadence operator copy", () => {
     assert.doesNotMatch(scan, /getLiveRefreshStatus/);
     assert.doesNotMatch(scan, /void collectRef\.current\(\)/);
     assert.match(bar, /AUTO PAPER CAPTURE ON/);
+    assert.match(bar, /LIVE CANARY CAPTURE ON/);
     assert.match(bar, /paper_autofill_enabled/);
     assert.match(scan, /AUTO PAPER CAPTURE ON/);
+    assert.match(scan, /LIVE CANARY CAPTURE ON/);
+    assert.match(scan, /HALT NEW ORDERS/);
     assert.match(layout, /RuntimeModeClock/);
     const runtime = readFileSync(join(frontendRoot, "lib/runtime-mode.ts"), "utf8");
     assert.match(runtime, /PAPER MODE · \$\{execution\}/);

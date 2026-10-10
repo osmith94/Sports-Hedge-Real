@@ -32,6 +32,18 @@ describe("runtime mode from /health", () => {
     assert.match(view.operationsSubtitle, /Live order execution is enabled/);
   });
 
+  it("labels an armed live canary as real-money, never paper capture", () => {
+    const view = runtimeModeFromHealth({
+      mode: "real",
+      execution_enabled: true,
+      live_canary: { enabled: true, capture_active: true, halt_new_orders: false },
+    });
+    assert.equal(view.clock, "GBP · LIVE CANARY · REAL-MONEY ORDERS");
+    assert.equal(view.footerMode, "LIVE CANARY");
+    assert.doesNotMatch(view.clock, /PAPER/);
+    assert.match(view.footerNote, /Not paper capture/);
+  });
+
   it("fails unknown instead of defaulting to paper", () => {
     for (const health of [null, undefined, {}, { mode: "real" }, { execution_enabled: false }]) {
       const view = runtimeModeFromHealth(health);
