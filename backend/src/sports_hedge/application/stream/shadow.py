@@ -24,6 +24,7 @@ from sports_hedge.application.quote_freshness import matchbook_market_quote_age
 from sports_hedge.application.stream.coalescer import MatchbookQuote
 from sports_hedge.application.stream.order_book import StreamOrderBooks
 from sports_hedge.application.stream.pin import StreamFixturePin
+from sports_hedge.application.stream.protocol import FUTURE_TIMESTAMP_SLACK_MS, STALE_AFTER_SECONDS
 from sports_hedge.market_intelligence.repository import SqliteMarketIntelligenceRepository
 from sports_hedge.market_intelligence.service import MarketIntelligenceService
 from sports_hedge.paper.models import PaperScanDecision
@@ -70,15 +71,17 @@ class StreamShadowComparer:
                 for token in market.token_ids
                 if token in books.books and books.books[token].healthy
             }
-            stream_ts = _latest_stream_ts(books, market.token_ids)
-            if quote is None or len(token_payloads) != len(market.token_ids) or stream_ts is None:
+            stream_ts, stream_reason = _oldest_required_stream_ts(
+                books, market.token_ids, now=evaluated
+            )
+            if quote is None or stream_ts is None or len(token_payloads) != len(market.token_ids):
                 results.append(
                     StreamCandidate(
                         catalogue_row_id=identity.catalogue_row_id,
                         register_canonical_key=identity.register_canonical_key,
                         trustworthy=False,
                         net_edge=None,
-                        rejection_reasons=("incomplete_stream_or_matchbook_pair",),
+                        rejection_reasons=(stream_reason or "incomplete_stream_or_matchbook_pair",),
                         stream_quote_at=_iso(stream_ts),
                         matchbook_quote_at=_iso(None if quote is None else quote.retrieved_at),
                         pair_age_ms=None,
@@ -107,6 +110,21 @@ class StreamShadowComparer:
                 quote.payload, retrieved_at=quote.retrieved_at, evaluated_at=evaluated
             )
             pm_age_ms = max(0, int((evaluated - stream_ts).total_seconds() * 1000))
+            if pm_age_ms > int(STALE_AFTER_SECONDS * 1000):
+                results.append(
+                    StreamCandidate(
+                        catalogue_row_id=identity.catalogue_row_id,
+                        register_canonical_key=identity.register_canonical_key,
+                        trustworthy=False,
+                        net_edge=None,
+                        rejection_reasons=("stream_constituent_stale",),
+                        stream_quote_at=_iso(stream_ts),
+                        matchbook_quote_at=_iso(quote.retrieved_at),
+                        pair_age_ms=pm_age_ms,
+                        skew_ms=abs(int((quote.retrieved_at - stream_ts).total_seconds() * 1000)),
+                    )
+                )
+                continue
             skew_ms = abs(int((quote.retrieved_at - stream_ts).total_seconds() * 1000))
             pair_age_ms = max(pm_age_ms, int(mb_age.quote_age_ms or 0))
             try:
@@ -188,18 +206,28 @@ def _isolated_paper_scan() -> PaperScanService:
     return PaperScanService(MarketIntelligenceService(SqliteMarketIntelligenceRepository()))
 
 
-def _latest_stream_ts(books: StreamOrderBooks, token_ids: tuple[str, ...]) -> datetime | None:
+def _oldest_required_stream_ts(
+    books: StreamOrderBooks,
+    token_ids: tuple[str, ...],
+    *,
+    now: datetime,
+) -> tuple[datetime | None, str | None]:
     stamps: list[int] = []
+    now_ms = int(now.timestamp() * 1000)
     for token in token_ids:
         book = books.books.get(token)
-        if book is None:
-            continue
-        for stamp in (book.last_delta_ts_ms, book.last_snapshot_ts_ms):
-            if stamp:
-                stamps.append(stamp)
+        if book is None or not book.healthy:
+            return None, "incomplete_stream_or_matchbook_pair"
+        ts = book.last_applied_ts_ms
+        if ts is None:
+            return None, "missing_token_timestamp"
+        if ts > now_ms + FUTURE_TIMESTAMP_SLACK_MS:
+            return None, "future_token_timestamp"
+        stamps.append(ts)
     if not stamps:
-        return None
-    return datetime.fromtimestamp(max(stamps) / 1000, tz=UTC)
+        return None, "incomplete_stream_or_matchbook_pair"
+    oldest = min(stamps)
+    return datetime.fromtimestamp(oldest / 1000, tz=UTC), None
 
 
 def _iso(value: datetime | None) -> str | None:

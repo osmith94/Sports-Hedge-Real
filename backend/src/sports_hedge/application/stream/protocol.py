@@ -7,6 +7,7 @@ Asset IDs are exact CLOB token IDs, not Gamma event or condition IDs.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any, Mapping
 
 POLYMARKET_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -44,6 +45,32 @@ STALE_AFTER_SECONDS = 15.0
 RECONNECT_BACKOFF_START_SECONDS = 0.5
 RECONNECT_BACKOFF_MAX_SECONDS = 30.0
 STREAM_LANE = "stream"
+# Absolute implied-probability points (0.02 = two percentage points), not odds %.
+PRICE_MOVE_PROBABILITY_POINTS = Decimal("0.02")
+# Ignore sub-threshold probability jitter when deciding Matchbook refresh.
+NOISE_PROBABILITY_POINTS = Decimal("0.0005")
+# Executable ask-size change (shares) that is economically material.
+DEPTH_CHANGE_SHARES = Decimal("50")
+MATCHBOOK_CREDIBLE_AGE_SECONDS = 15.0
+PERIODIC_RECONCILE_SECONDS = 30.0
+RESYNC_MIN_INTERVAL_SECONDS = 2.0
+FUTURE_TIMESTAMP_SLACK_MS = 2000
+TRIGGER_BASELINE = "baseline"
+TRIGGER_PRICE_MOVE = "price_move"
+TRIGGER_POTENTIAL_EDGE = "potential_edge"
+TRIGGER_DEPTH_CHANGE = "depth_change"
+TRIGGER_RECONNECT = "reconnect"
+TRIGGER_PERIODIC = "periodic"
+TRIGGER_REASONS = frozenset(
+    {
+        TRIGGER_BASELINE,
+        TRIGGER_PRICE_MOVE,
+        TRIGGER_POTENTIAL_EDGE,
+        TRIGGER_DEPTH_CHANGE,
+        TRIGGER_RECONNECT,
+        TRIGGER_PERIODIC,
+    }
+)
 
 
 def market_subscribe_payload(token_ids: list[str], *, operation: str | None = None) -> dict[str, Any]:
@@ -65,7 +92,7 @@ def encode_ws_message(payload: Mapping[str, Any] | str) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-def parse_ws_message(raw: str) -> dict[str, Any] | str:
+def parse_ws_message(raw: str) -> dict[str, Any] | list[Any] | str:
     text = str(raw or "")
     if text == PONG_TEXT or text == PING_TEXT:
         return text
@@ -73,9 +100,21 @@ def parse_ws_message(raw: str) -> dict[str, Any] | str:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError("stream_ws_json_invalid") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("stream_ws_payload_not_object")
-    return parsed
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        if not all(isinstance(item, dict) for item in parsed):
+            raise ValueError("stream_ws_array_item_not_object")
+        return parsed
+    raise ValueError("stream_ws_payload_not_object")
+
+
+def iter_ws_events(parsed: dict[str, Any] | list[Any] | str) -> list[dict[str, Any]]:
+    if isinstance(parsed, str):
+        return []
+    if isinstance(parsed, dict):
+        return [parsed]
+    return [item for item in parsed if isinstance(item, dict)]
 
 
 def message_event_type(payload: Mapping[str, Any]) -> str:

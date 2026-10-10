@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -25,7 +26,7 @@ from sports_hedge.application.provider_access import (
     ProviderPriority,
     priority_for_lane,
 )
-from sports_hedge.application.stream.coalescer import StreamMatchbookCoalescer
+from sports_hedge.application.stream.coalescer import MatchbookQuote, StreamMatchbookCoalescer
 from sports_hedge.application.stream.observer import PolymarketMarketObserver
 from sports_hedge.application.stream.order_book import StreamOrderBooks
 from sports_hedge.application.stream.pin import StreamPinError, streamable_markets
@@ -34,8 +35,15 @@ from sports_hedge.application.stream.protocol import (
     EVENT_BOOK,
     EVENT_PRICE_CHANGE,
     PING_TEXT,
+    TRIGGER_BASELINE,
+    TRIGGER_DEPTH_CHANGE,
+    TRIGGER_POTENTIAL_EDGE,
+    TRIGGER_PRICE_MOVE,
+    TRIGGER_RECONNECT,
+    parse_ws_message,
 )
 from sports_hedge.application.stream.runtime import StreamRuntime, reset_stream_runtime
+from sports_hedge.application.stream.shadow import StreamShadowComparer
 from sports_hedge.application.stream.transport import FakeMarketWsTransport, StreamTransportClosed
 from sports_hedge.domain.models import VenueName
 from sports_hedge.venues.rate_limit import ProviderRateLimitedError
@@ -94,6 +102,26 @@ def _book(token: str, *, ts: str = "1700000000000", extra: dict[str, Any] | None
     if extra:
         payload.update(extra)
     return json.dumps(payload)
+
+
+def _delta_sell(token: str, *, price: str = "0.52", size: str = "25", ts: str = "1700000001000") -> str:
+    return json.dumps(
+        {
+            "event_type": EVENT_PRICE_CHANGE,
+            "market": "0xabc",
+            "timestamp": ts,
+            "price_changes": [
+                {
+                    "asset_id": token,
+                    "price": price,
+                    "size": size,
+                    "side": "SELL",
+                    "best_bid": "0.48",
+                    "best_ask": price,
+                }
+            ],
+        }
+    )
 
 
 def _delta(token: str, *, price: str = "0.48", size: str = "10", ts: str = "1700000001000") -> str:
@@ -203,6 +231,37 @@ def test_out_of_order_delta_resyncs_and_does_not_keep_stale_depth() -> None:
     assert books.books[TOKEN_HOME].bids == {}
 
 
+def test_later_older_delta_and_old_snapshot_do_not_roll_back_depth() -> None:
+    books = StreamOrderBooks([TOKEN_HOME])
+    books.apply_message(json.loads(_book(TOKEN_HOME, ts="1700000001000")))
+    assert books.apply_message(json.loads(_delta_sell(TOKEN_HOME, size="40", ts="1700000002000"))) == "delta"
+    assert books.books[TOKEN_HOME].asks["0.52"] == "40"
+    assert books.apply_message(json.loads(_delta_sell(TOKEN_HOME, size="12", ts="1700000001500"))) == "delta_rejected"
+    assert books.books[TOKEN_HOME].healthy is False
+    books.apply_message(json.loads(_book(TOKEN_HOME, ts="1700000003000", extra={"asks": [{"price": "0.52", "size": "40"}]})))
+    assert books.books[TOKEN_HOME].healthy is True
+    rolled = books.apply_message(json.loads(_book(TOKEN_HOME, ts="1700000000500")))
+    assert rolled == "out_of_order"
+    assert books.books[TOKEN_HOME].healthy is False
+    assert books.books[TOKEN_HOME].asks == {}
+
+
+def test_ws_array_frames_apply_each_event() -> None:
+    parsed = parse_ws_message(
+        json.dumps(
+            [
+                json.loads(_book(TOKEN_HOME, ts="1700000000001")),
+                json.loads(_book(TOKEN_DRAW, ts="1700000000001")),
+            ]
+        )
+    )
+    assert isinstance(parsed, list)
+    books = StreamOrderBooks([TOKEN_HOME, TOKEN_DRAW])
+    for item in parsed:
+        assert books.apply_message(item) == "snapshot"
+    assert books.healthy_token_count() == 2
+
+
 @pytest.mark.asyncio
 async def test_fake_ws_subscribe_unsubscribe_heartbeat_and_reconnect() -> None:
     transport = FakeMarketWsTransport()
@@ -248,7 +307,7 @@ async def test_coalesce_burst_rate_limit_and_disabled_skips_provider() -> None:
     )
     coalescer.start()
     for _ in range(20):
-        coalescer.schedule([("8801", "41001")])
+        coalescer.schedule([("8801", "41001")], reason=TRIGGER_PRICE_MOVE)
     await _wait_until(lambda: coalescer.stats.request_count >= 1)
     await _wait_until(lambda: coalescer.stats.coalesced_count >= 1)
     assert coalescer.stats.request_count < 20
@@ -265,7 +324,7 @@ async def test_coalesce_burst_rate_limit_and_disabled_skips_provider() -> None:
         fetch_market=limited, provider_access=access, enabled=True, slot_wait_seconds=0.2
     )
     rate.start()
-    rate.schedule([("8801", "41001")])
+    rate.schedule([("8801", "41001")], reason=TRIGGER_PRICE_MOVE)
     await _wait_until(lambda: rate.stats.rate_limited_count >= 1)
     await rate.stop()
 
@@ -278,7 +337,7 @@ async def test_coalesce_burst_rate_limit_and_disabled_skips_provider() -> None:
 
     disabled = StreamMatchbookCoalescer(fetch_market=forbidden, provider_access=access, enabled=False)
     disabled.start()
-    disabled.schedule([("8801", "41001")])
+    disabled.schedule([("8801", "41001")], reason=TRIGGER_BASELINE)
     await asyncio.sleep(0.05)
     await disabled.stop()
     assert idle_calls == 0
@@ -330,6 +389,7 @@ async def test_runtime_pause_stop_fixture_change_and_no_paper_or_orders() -> Non
         matchbook_fetch=fetch,
         transport_factory=lambda: transport,
         provider_access=ProviderAccessLayer(limits={VenueName.MATCHBOOK: 4}),
+        periodic_seconds=60.0,
     )
     idle = runtime.status()
     assert idle.connection_status == "not_selected"
@@ -382,6 +442,7 @@ async def test_ws_burst_does_not_block_hot_liveness_counter() -> None:
         matchbook_fetch=fetch,
         transport_factory=lambda: transport,
         provider_access=ProviderAccessLayer(limits={VenueName.MATCHBOOK: 4}),
+        periodic_seconds=60.0,
     )
     await runtime.select_fixture("evt-stream-1")
     pulse = asyncio.create_task(hot_pulse())
@@ -413,3 +474,275 @@ def test_status_api_does_not_start_stream_or_place_orders() -> None:
 
 async def _never_fetch(event_id: str, market_id: str) -> dict[str, Any]:
     raise AssertionError(f"provider fetch while disabled: {event_id}/{market_id}")
+
+
+def _ask_book(token: str, ask: str, size: str, *, ts: str) -> str:
+    return _book(
+        token,
+        ts=ts,
+        extra={"asks": [{"price": ask, "size": size}], "hash": f"hash-{token}-{ts}-{ask}-{size}"},
+    )
+
+
+async def _pin_runtime(
+    transport: FakeMarketWsTransport,
+    fetch,
+    *,
+    edge_probe=None,
+    access: ProviderAccessLayer | None = None,
+) -> StreamRuntime:
+    runtime = StreamRuntime(
+        catalogue_loader=lambda _event: [_row()],
+        matchbook_fetch=fetch,
+        transport_factory=lambda: transport,
+        provider_access=access or ProviderAccessLayer(limits={VenueName.MATCHBOOK: 4}),
+        edge_probe=edge_probe,
+        periodic_seconds=60.0,
+    )
+    await runtime.select_fixture("evt-stream-1")
+    await _wait_until(lambda: transport.connect_count == 1)
+    return runtime
+
+
+def test_shadow_uses_oldest_required_token_not_newest() -> None:
+    books = StreamOrderBooks([TOKEN_HOME, TOKEN_DRAW, TOKEN_AWAY])
+    wall_new = datetime(2026, 10, 10, 12, 0, 10, tzinfo=UTC)
+    wall_old = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
+    now_ms = int(wall_new.timestamp() * 1000)
+    old_ms = now_ms - 10_000
+    books.apply_message(json.loads(_book(TOKEN_HOME, ts=str(old_ms))), received_at=wall_old)
+    books.apply_message(json.loads(_book(TOKEN_DRAW, ts=str(now_ms))), received_at=wall_new)
+    books.apply_message(json.loads(_book(TOKEN_AWAY, ts=str(now_ms))), received_at=wall_new)
+    quotes = {
+        "8801:41001": MatchbookQuote(
+            event_id="8801",
+            market_id="41001",
+            payload=_mb_payload(),
+            retrieved_at=wall_new,
+        )
+    }
+    pin = streamable_markets([_row()])
+    compared = StreamShadowComparer().compare(pin, books, quotes, now=wall_new)
+    assert compared
+    oldest = datetime.fromtimestamp(old_ms / 1000, tz=UTC)
+    assert compared[0].stream_quote_at == oldest.isoformat()
+    assert compared[0].pair_age_ms == 10_000
+
+
+def test_shadow_rejects_future_timestamp() -> None:
+    books = StreamOrderBooks([TOKEN_HOME, TOKEN_DRAW, TOKEN_AWAY])
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
+    future = str(int(now.timestamp() * 1000) + 60_000)
+    for token in (TOKEN_HOME, TOKEN_DRAW, TOKEN_AWAY):
+        books.apply_message(json.loads(_book(token, ts=future)), received_at=now)
+    quotes = {
+        "8801:41001": MatchbookQuote(
+            event_id="8801", market_id="41001", payload=_mb_payload(), retrieved_at=now
+        )
+    }
+    compared = StreamShadowComparer().compare(streamable_markets([_row()]), books, quotes, now=now)
+    assert compared[0].trustworthy is False
+    assert "future_token_timestamp" in compared[0].rejection_reasons
+
+
+@pytest.mark.asyncio
+async def test_array_snapshot_frame_then_quiet_token_goes_stale() -> None:
+    transport = FakeMarketWsTransport()
+    observer = PolymarketMarketObserver(
+        [TOKEN_HOME, TOKEN_DRAW],
+        transport_factory=lambda: transport,
+        ping_interval=0.05,
+        pong_timeout=2.0,
+        stale_after=0.12,
+        resync_min_interval=0.05,
+        jitter=lambda: 0.0,
+    )
+    observer.start()
+    await _wait_until(lambda: transport.connect_count == 1)
+    transport.push(
+        json.dumps([json.loads(_book(TOKEN_HOME)), json.loads(_book(TOKEN_DRAW))])
+    )
+    await _wait_until(lambda: observer.status == "subscribed" and observer.books.healthy_token_count() == 2)
+    await asyncio.sleep(0.08)
+    transport.push(_delta_sell(TOKEN_HOME, size="26", ts="1700000008000"))
+    await asyncio.sleep(0.12)
+    await _wait_until(lambda: observer.status == "stale" or not observer.books.books[TOKEN_DRAW].healthy)
+    assert observer.books.books[TOKEN_DRAW].healthy is False
+    await _wait_until(lambda: observer.subscription_resync_count >= 1)
+    await observer.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_pong_is_not_fresh_then_resync_recovers() -> None:
+    transport = FakeMarketWsTransport()
+    observer = PolymarketMarketObserver(
+        [TOKEN_HOME],
+        transport_factory=lambda: transport,
+        ping_interval=0.04,
+        pong_timeout=2.0,
+        stale_after=0.1,
+        resync_min_interval=0.05,
+        jitter=lambda: 0.0,
+    )
+    observer.start()
+    await _wait_until(lambda: transport.connect_count == 1)
+    transport.push(_book(TOKEN_HOME))
+    await _wait_until(lambda: observer.status == "subscribed")
+    await _wait_until(lambda: observer.status == "stale", timeout=2.0)
+    assert observer.books.books[TOKEN_HOME].healthy is False
+    await _wait_until(lambda: observer.subscription_resync_count >= 1)
+    assert any("unsubscribe" in item for item in transport.sent)
+    transport.push(_book(TOKEN_HOME, ts="1700000095000"))
+    await _wait_until(lambda: observer.status == "subscribed" and observer.books.books[TOKEN_HOME].healthy)
+    await observer.stop()
+    assert observer.status == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_pause_stops_resync() -> None:
+    transport = FakeMarketWsTransport()
+    fetches: list[tuple[str, str]] = []
+
+    async def fetch(event_id: str, market_id: str) -> dict[str, Any]:
+        fetches.append((event_id, market_id))
+        return _mb_payload()
+
+    runtime = await _pin_runtime(transport, fetch)
+    transport.push(json.dumps([json.loads(_book(TOKEN_HOME)), json.loads(_book(TOKEN_DRAW)), json.loads(_book(TOKEN_AWAY))]))
+    await _wait_until(lambda: runtime.observer is not None and runtime.observer.status == "subscribed")
+    await runtime.pause()
+    sent_after_pause = list(transport.sent)
+    await asyncio.sleep(0.2)
+    assert transport.sent == sent_after_pause or runtime.observer is None
+    assert runtime.status().connection_status == "paused"
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_significance_aware_matchbook_triggers_and_coalesce() -> None:
+    transport = FakeMarketWsTransport()
+    fetches: list[tuple[str, str]] = []
+    fetch_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(event_id: str, market_id: str) -> dict[str, Any]:
+        fetches.append((event_id, market_id))
+        if len(fetches) == 2:
+            fetch_started.set()
+            await release.wait()
+        return _mb_payload()
+
+    def probe(_market, _now):
+        return Decimal("0.012")
+
+    runtime = await _pin_runtime(transport, fetch, edge_probe=probe)
+    transport.push(
+        json.dumps(
+            [
+                json.loads(_book(TOKEN_HOME, ts="1700000000000")),
+                json.loads(_book(TOKEN_DRAW, ts="1700000000000")),
+                json.loads(_book(TOKEN_AWAY, ts="1700000000000")),
+            ]
+        )
+    )
+    await _wait_until(lambda: runtime.coalescer.stats.request_count == 1)
+    assert runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_BASELINE, 0) == 1
+
+    for index in range(12):
+        transport.push(_delta_sell(TOKEN_HOME, size="26", ts=str(1700000001000 + index)))
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
+    assert runtime.coalescer.stats.request_count == 1
+    assert runtime.coalescer.stats.suppressed_count + runtime.triggers.suppressed_count >= 1
+
+    transport.push(_ask_book(TOKEN_HOME, "0.55", "25", ts="1700000002000"))
+    await _wait_until(lambda: runtime.coalescer.stats.request_count >= 2)
+    assert runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_PRICE_MOVE, 0) >= 1
+
+    await _wait_until(lambda: fetch_started.is_set())
+    for index in range(8):
+        transport.push(_ask_book(TOKEN_HOME, "0.58", "25", ts=str(1700000003000 + index)))
+        await asyncio.sleep(0)
+    release.set()
+    await asyncio.sleep(0.05)
+    assert runtime.coalescer.stats.request_count < 12
+    assert runtime.coalescer.stats.coalesced_count >= 1
+
+    transport.push(_ask_book(TOKEN_HOME, "0.585", "80", ts="1700000004000"))
+    await _wait_until(
+        lambda: runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_DEPTH_CHANGE, 0) >= 1
+        or runtime.coalescer.stats.request_count >= 3
+    )
+
+    transport.push(_ask_book(TOKEN_HOME, "0.590", "80", ts="1700000005000"))
+    await _wait_until(
+        lambda: runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_POTENTIAL_EDGE, 0) >= 1
+    )
+
+    stale_key = "8801:41001"
+    quote = runtime.coalescer.quotes[stale_key]
+    runtime.coalescer.quotes[stale_key] = MatchbookQuote(
+        event_id=quote.event_id,
+        market_id=quote.market_id,
+        payload=quote.payload,
+        retrieved_at=datetime.now(UTC) - timedelta(seconds=60),
+    )
+    before = runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_POTENTIAL_EDGE, 0)
+    transport.push(_ask_book(TOKEN_HOME, "0.595", "80", ts="1700000006000"))
+    await asyncio.sleep(0.08)
+    assert runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_POTENTIAL_EDGE, 0) == before
+    await _wait_until(lambda: runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_BASELINE, 0) >= 2)
+
+    transport.fail(StreamTransportClosed("peer_closed"))
+    await _wait_until(lambda: runtime.observer is not None and runtime.observer.reconnect_count >= 1)
+    await _wait_until(lambda: transport.connect_count >= 2)
+    transport.push(
+        json.dumps(
+            [
+                json.loads(_book(TOKEN_HOME, ts="1700000090000")),
+                json.loads(_book(TOKEN_DRAW, ts="1700000090000")),
+                json.loads(_book(TOKEN_AWAY, ts="1700000090000")),
+            ]
+        )
+    )
+    await _wait_until(lambda: runtime.coalescer.stats.requests_by_trigger.get(TRIGGER_RECONNECT, 0) >= 1)
+    assert runtime.paper_opened is False
+    assert runtime.orders_placed is False
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stream_busy_or_429_does_not_preempt_hot() -> None:
+    layer = ProviderAccessLayer(limits={VenueName.MATCHBOOK: 1})
+    hot_got = asyncio.Event()
+    stream_calls = 0
+
+    async def occupy() -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="hot", stage="hot"):
+            await asyncio.sleep(0.08)
+
+    async def limited(event_id: str, market_id: str) -> dict[str, Any]:
+        nonlocal stream_calls
+        stream_calls += 1
+        raise ProviderRateLimitedError(0.2, provider="matchbook")
+
+    occupy_task = asyncio.create_task(occupy())
+    await asyncio.sleep(0.01)
+    coalescer = StreamMatchbookCoalescer(
+        fetch_market=limited, provider_access=layer, enabled=True, slot_wait_seconds=0.05
+    )
+    coalescer.start()
+    coalescer.schedule([("8801", "41001")], reason=TRIGGER_PRICE_MOVE)
+
+    async def hot_second() -> None:
+        async with layer.acquire(VenueName.MATCHBOOK, lane="hot", stage="hot"):
+            hot_got.set()
+
+    hot = asyncio.create_task(hot_second())
+    await asyncio.wait_for(hot_got.wait(), timeout=1.0)
+    await occupy_task
+    await hot
+    await _wait_until(lambda: coalescer.stats.rate_limited_count >= 1 or coalescer.stats.dropped_count >= 1)
+    await coalescer.stop()
+    assert hot_got.is_set()
+

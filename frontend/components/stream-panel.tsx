@@ -69,8 +69,9 @@ export function StreamPanel() {
           {status.subscribed_market_count}/{status.registered_market_count} registered markets ·{" "}
           {status.token_id_count} token IDs · reconnects {status.reconnect_count} · MB requests{" "}
           {status.matchbook_request_count} · coalesced {status.coalesced_event_count} · dropped{" "}
-          {status.dropped_event_count} · 429s {status.matchbook_rate_limited_count} · bad messages{" "}
-          {status.error_bad_message_count}
+          {status.dropped_event_count} · suppressed {status.suppressed_event_count ?? 0} · 429s{" "}
+          {status.matchbook_rate_limited_count} · last trigger {status.last_trigger_reason || "none"} ·
+          bad messages {status.error_bad_message_count}
         </p>
       ) : null}
       <p className="section-copy">{streamCandidateSummary(status)}</p>

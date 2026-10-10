@@ -42,6 +42,12 @@ class StreamStatus(BaseModel):
     matchbook_rate_limited_count: int = 0
     coalesced_event_count: int = 0
     dropped_event_count: int = 0
+    suppressed_event_count: int = 0
+    last_trigger_reason: str | None = None
+    last_probability_delta: str | None = None
+    last_dispatch_delay_ms: int | None = None
+    matchbook_requests_by_trigger: dict[str, int] = Field(default_factory=dict)
+    price_move_probability_points: str = "0.02"
     error_bad_message_count: int = 0
     unknown_token_count: int = 0
     ignored_best_bid_ask_count: int = 0

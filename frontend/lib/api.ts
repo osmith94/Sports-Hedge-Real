@@ -2832,6 +2832,12 @@ export type StreamStatus = {
   matchbook_rate_limited_count: number;
   coalesced_event_count: number;
   dropped_event_count: number;
+  suppressed_event_count?: number;
+  last_trigger_reason?: string | null;
+  last_probability_delta?: string | null;
+  last_dispatch_delay_ms?: number | null;
+  matchbook_requests_by_trigger?: Record<string, number>;
+  price_move_probability_points?: string;
   error_bad_message_count: number;
   unknown_token_count: number;
   ignored_best_bid_ask_count: number;
