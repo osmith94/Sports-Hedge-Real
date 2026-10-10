@@ -3,7 +3,6 @@ from __future__ import annotations
 from decimal import Decimal
 
 from sports_hedge.accounting.dimensions import CapitalSource
-from sports_hedge.arbitrage.allocation.adapters import request_from_complete_set
 from sports_hedge.arbitrage.allocation.engine import allocate
 from sports_hedge.arbitrage.allocation.models import (
     AllocationBalance,
@@ -11,6 +10,7 @@ from sports_hedge.arbitrage.allocation.models import (
     BankrollAllocationPolicy,
 )
 from sports_hedge.arbitrage.models import ArbitrageSolution
+from sports_hedge.arbitrage.priority_alerts.fill_confidence import score_fill_confidence
 from sports_hedge.arbitrage.priority_alerts.models import (
     AutomatedPoolBalance,
     FillConfidenceInputs,
@@ -19,7 +19,6 @@ from sports_hedge.arbitrage.priority_alerts.models import (
     RecommendedManualSize,
     VenueCurrencyAmount,
 )
-from sports_hedge.arbitrage.priority_alerts.fill_confidence import score_fill_confidence
 from sports_hedge.arbitrage.priority_alerts.thresholds import PriorityAlertThresholds
 from sports_hedge.arbitrage.solver import CompleteSetArbitrageSolver
 
@@ -113,6 +112,8 @@ def allocate_priority_legs(
         merged.operator_recommended_cap_reporting = thresholds.operator_manual_cap
         merged.risk_limit_reporting = thresholds.risk_limit
         merged.venue_limits_native = dict(thresholds.venue_limits)
+    from sports_hedge.arbitrage.allocation.adapters import request_from_complete_set
+
     request = request_from_complete_set(
         legs,
         unconstrained,

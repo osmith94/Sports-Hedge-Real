@@ -24,12 +24,6 @@ from sports_hedge.application.quote_freshness import (
     conservative_combined_basis,
     require_aware_instant,
 )
-from sports_hedge.arbitrage.allocation.adapters import (
-    balances_from_liquidity,
-    estimated_time_to_release,
-    exposures_from_trades,
-    request_from_paper_decision,
-)
 from sports_hedge.arbitrage.allocation.engine import allocate, allocate_requested_size
 from sports_hedge.arbitrage.allocation.models import AllocatedStake, AllocationResult
 from sports_hedge.arbitrage.allocation.policy import policy_from_settings
@@ -624,6 +618,13 @@ class PaperScanService:
         )
         if not arb or standing is None:
             return None, []
+        from sports_hedge.arbitrage.allocation.adapters import (
+            balances_from_liquidity,
+            estimated_time_to_release,
+            exposures_from_trades,
+            request_from_paper_decision,
+        )
+
         policy = policy_from_settings(self.settings)
         balances = balances_from_liquidity(
             standing,
