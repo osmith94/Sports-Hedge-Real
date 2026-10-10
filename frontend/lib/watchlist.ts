@@ -326,6 +326,8 @@ export function price2Kind(status: Price2ActivityObservation["status"]): string 
   return "PRICE2_UNAVAILABLE";
 }
 
+const POLYMARKET_CONSTRAINTS_UNPROVEN = "polymarket_native_constraints_unproven";
+
 export function price2CompactDetail(item: Price2ActivityObservation): string {
   if (item.source === "lifecycle_rejection" || item.status === "incomplete_unavailable") {
     const reason = item.rejection_reason?.trim() || "not recorded";
@@ -333,6 +335,8 @@ export function price2CompactDetail(item: Price2ActivityObservation): string {
   }
   const parts: string[] = [];
   parts.push(`net ${recorded(item.net_edge, (value) => percent(value))}`);
+  const thresholdLine = price2ThresholdLine(item);
+  if (thresholdLine) parts.push(thresholdLine);
   if (item.execution_size != null && item.execution_size !== "") {
     parts.push(`size ${nativeStake(item.execution_size, item.execution_size_currency)}`);
   } else {
@@ -347,6 +351,8 @@ export function price2CompactDetail(item: Price2ActivityObservation): string {
   parts.push(item.skew_ms == null ? "skew not recorded" : `skew ${item.skew_ms}ms`);
   if (item.status === "rejected") {
     parts.push(item.rejection_reason?.trim() || "rejection reason not recorded");
+    const native = price2NativeOrderLine(item);
+    if (native) parts.push(native);
   } else if (item.filled) {
     parts.push("paper fill recorded separately");
   } else if (item.trade_linked) {
@@ -356,6 +362,44 @@ export function price2CompactDetail(item: Price2ActivityObservation): string {
   }
   if (item.execution_cycle != null) parts.push(`cycle ${item.execution_cycle}`);
   return parts.join(" · ");
+}
+
+export function price2ThresholdLine(item: Price2ActivityObservation): string | null {
+  const economics = item.economics_vs_threshold;
+  if (economics === "below_configured_threshold") {
+    return `below configured ${recorded(item.minimum_net_edge, (value) => percent(value))} threshold`;
+  }
+  if (economics === "meets_or_exceeds_configured_threshold") {
+    return `meets configured ${recorded(item.minimum_net_edge, (value) => percent(value))} threshold`;
+  }
+  if (item.status === "rejected" && item.rejection_reason === POLYMARKET_CONSTRAINTS_UNPROVEN) {
+    if (economics === "threshold_not_recorded" || item.minimum_net_edge == null) {
+      return "configured threshold not recorded";
+    }
+  }
+  return null;
+}
+
+export function price2NativeOrderLine(item: Price2ActivityObservation): string | null {
+  const pmFails = (item.legs ?? []).filter(
+    (leg) =>
+      (leg.venue ?? "") === "polymarket" &&
+      (leg.freeze_status === "not_frozen" ||
+        (item.rejection_reason === POLYMARKET_CONSTRAINTS_UNPROVEN &&
+          (leg.freeze_status === "details_not_recorded" || !leg.freeze_status))),
+  );
+  if (item.rejection_reason === POLYMARKET_CONSTRAINTS_UNPROVEN && pmFails.length === 0) {
+    return "PM native order not proved: details not recorded";
+  }
+  if (pmFails.length === 0) return null;
+  const reasons = pmFails.map((leg) => {
+    if (leg.freeze_status === "details_not_recorded" || !leg.freeze_reason) {
+      return "details not recorded";
+    }
+    return leg.freeze_reason.replaceAll("_", " ");
+  });
+  const unique = [...new Set(reasons)];
+  return `PM native order not proved: ${unique.join(", ")}`;
 }
 
 export function price2TimingLine(
@@ -422,6 +466,9 @@ export function activityFromPrice2(item: Price2ActivityObservation): ActivityEve
     oldestQuoteAgeMs: item.oldest_quote_age_ms ?? null,
     skewMs: item.skew_ms ?? null,
     rejectionReason: item.rejection_reason ?? null,
+    minimumNetEdge: item.minimum_net_edge ?? null,
+    economicsVsThreshold: item.economics_vs_threshold ?? null,
+    nativeOrderFreezeRecorded: item.native_order_freeze_recorded === true,
     source: item.source,
     dataKind: "historical_recorded",
     legs: (item.legs ?? []).map((leg) => ({
@@ -435,6 +482,16 @@ export function activityFromPrice2(item: Price2ActivityObservation): ActivityEve
       slotWaitMs: leg.timing_match === "native_id" ? (leg.slot_wait_ms ?? null) : null,
       ioMs: leg.timing_match === "native_id" ? (leg.io_ms ?? null) : null,
       timingMatch: leg.timing_match === "native_id" ? "native_id" : null,
+      nativeMarketId: leg.native_market_id ?? null,
+      nativeRunnerId: leg.native_runner_id ?? null,
+      nativeFrozen: typeof leg.native_frozen === "boolean" ? leg.native_frozen : null,
+      freezeStatus: leg.freeze_status ?? "details_not_recorded",
+      freezeReason: leg.freeze_reason ?? null,
+      observedTickSize: leg.observed_tick_size ?? null,
+      observedMinimumShares: leg.observed_minimum_shares ?? null,
+      intendedNativeStake: leg.intended_native_stake ?? null,
+      intendedNativeShares: leg.intended_native_shares ?? null,
+      intendedLimitPrice: leg.intended_limit_price ?? null,
     })),
     venueTimings: (item.venue_timings ?? []).map((timing) => ({
       venue: timing.venue,
