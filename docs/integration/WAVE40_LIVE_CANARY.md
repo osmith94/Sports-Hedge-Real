@@ -21,6 +21,19 @@ Screenshot supplied by operator of an existing **PAPER MODE** controls section s
 - Clear audit through `candidate -> Price-2 attempted -> rejected/accepted -> native orders attempted -> each exchange ACK/fill -> partial/unmatched/unknown -> reconciled -> active trade / realised P&L`. A `Price-2 accepted` quote is *not* a trade entered. Keep audit logs meaningful for troubleshooting real outcomes and never claim speculative gross or net edges were realised.
 - A successful single trade does not prove all venue/fill failure paths, and small position size does not guarantee both legs execute. However, **the goal of this wave is testing the intended system at the existing immaterial configured limits**, not shipping a different single-trade workflow.
 
+## Existing Paper/Real configuration parity — do not rebuild
+
+The operator has reconfirmed: **Real mode already has these exact same three placement controls.** This is not a request to implement, duplicate, migrate or redesign the Max Event / Max Opportunity / Max One-Time controls. Their existing values and save paths must be preserved in both modes, and switching Execution ON/OFF must not alter any of them.
+
+**Verified existing shared code:**
+- `frontend/components/run-paper-scan.tsx` already displays/loads/saves these three fields via the backend's operator settings API. There is currently a misleading literal `PAPER MODE · NO EXECUTION` in its section heading at ~line 774 (and another prose label at ~line 1240). Make mode wording derive from actual runtime state, showing Real mode accurately; leave the form/controls themselves alone.
+- `backend/src/sports_hedge/api/paper.py` implements `GET /operator-scanner-settings` and `PUT /operator-scanner-settings` through the existing coordinator/store; the historical `paper` module name is not a reason to duplicate the settings in a `real` module.
+- `backend/src/sports_hedge/persistence/operator_scanner_settings.py::effective_operator_scanner_settings` resolves the shared source.
+- `backend/src/sports_hedge/arbitrage/allocation/policy.py::policy_from_settings` already reads shared `max_event_gbp/max_opportunity_gbp/max_one_time_gbp`, with existing venue/treasury/portfolio constraints; `application/paper_scan.py` uses that policy.
+- `application/paper_operations.py` and `application/price_engine.py` also read effective operator settings, without independent Real/Paper cap sets.
+
+**Only missing feature:** the backend-authoritative runtime execution arming toggle and appropriate dynamic header/status labels. Minimise changes to scanner controls and pricing/allocation; avoid introducing mode-based branch logic for fee/capital limits. If Real mode renders a Paper badge, fix the badge, not the allocation authority. A Real-mode dashboard has the same controls and live market data whether Execution is ON or OFF.
+
 ## Integration scope
 
 - Coordinate with [PR #42](https://github.com/osmith94/Sports-Hedge-Real/pull/42) (STREAM shared venue fee/FX + compact UI) and [PR #43](https://github.com/osmith94/Sports-Hedge-Real/pull/43) (one bounded Matchbook post-PM tail refresh for Price-2). STREAM must still use the same authoritative Price-2; do not add a second solver/order path. Avoid parallel overlapping edits and rebase/test conflicts.
