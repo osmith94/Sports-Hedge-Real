@@ -16,8 +16,12 @@ what a health request queued behind them actually waits for.
 Liveness SLA (see ``extreme_stress_liveness_failures``):
 
 - Normal scanner SLA, every workload: no non-GC synchronous slice >= 0.25s.
-- Representative ~275-fixture workload: no callback >= 0.25s including GC,
-  heartbeat < 0.25s. The 0.25s bound is not relaxed there.
+  ``HeartbeatProbe.worst_non_gc_s`` is the health-timer form of that SLA.
+  Raw ``worst_s`` still reports wall-clock lateness, which can include
+  interpreter gen2 of the workload's own unfrozen allocations even after
+  ``gc.freeze()`` of earlier tests. That is not permission to raise 0.25s.
+- Representative ~275-fixture workload: no callback >= 0.25s including GC.
+  Heartbeat non-GC lateness stays < 0.25s. The 0.25s bound is not relaxed.
 - Extreme synthetic stress only (for example 1,600-fixture identity): a
   scheduling gap may reach < 0.50s only when the part of it that is not
   Python garbage collection stays < 0.25s, and no single GC pause reaches
@@ -232,22 +236,40 @@ class CallbackProfiler:
 
 
 class HeartbeatProbe:
-    """A cheap coroutine that must keep running, like ``GET /health``."""
+    """A cheap coroutine that must keep running, like ``GET /health``.
+
+    Each beat records wall-clock lateness and the event-loop-thread GC that
+    ran in that interval, using the same subtraction as
+    ``probe_gc_attributed_gaps``. ``worst_s`` is raw lateness; the 0.25s
+    scanner SLA is ``worst_non_gc_s``.
+    """
 
     def __init__(self, interval_s: float = 0.02) -> None:
         self.interval_s = interval_s
         self.lateness: list[float] = []
+        self.gaps: list[SchedulingGap] = []
         self.beats = 0
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
     async def _run(self) -> None:
+        from sports_hedge.application.event_loop_activity import (
+            gc_pause_total_seconds,
+            install_gc_pause_monitor,
+        )
+
+        install_gc_pause_monitor()
         loop = asyncio.get_running_loop()
         while not self._stop.is_set():
             due = loop.time() + self.interval_s
+            gc_before = gc_pause_total_seconds()
             await asyncio.sleep(self.interval_s)
+            gc_after = gc_pause_total_seconds()
+            gap = max(0.0, loop.time() - due)
+            gc_s = max(0.0, gc_after - gc_before)
             self.beats += 1
-            self.lateness.append(max(0.0, loop.time() - due))
+            self.lateness.append(gap)
+            self.gaps.append(SchedulingGap(gap, gc_s))
 
     def start(self) -> HeartbeatProbe:
         self._task = asyncio.create_task(self._run())
@@ -261,6 +283,37 @@ class HeartbeatProbe:
     @property
     def worst_s(self) -> float:
         return max(self.lateness, default=0.0)
+
+    @property
+    def worst_non_gc_s(self) -> float:
+        return max((gap.non_gc_s for gap in self.gaps), default=0.0)
+
+    def report(self) -> str:
+        worst = max(self.gaps, key=lambda gap: gap.gap_s, default=SchedulingGap(0.0, 0.0))
+        return (
+            f"heartbeat_worst_ms={int(self.worst_s * 1000)} "
+            f"heartbeat_worst_non_gc_ms={int(self.worst_non_gc_s * 1000)} "
+            f"heartbeat_worst_gap_gc_ms={int(worst.gc_s * 1000)} "
+            f"beats={self.beats}"
+        )
+
+
+def stream_runtime_is_unstarted() -> bool:
+    """STREAM Phase 1 stays off until Send to STREAM. Liveness benches must not start it."""
+
+    from sports_hedge.application.stream import runtime as stream_runtime
+
+    shared = stream_runtime._SHARED
+    if shared is None:
+        return True
+    status = shared.status()
+    return (
+        not status.enabled
+        and status.connection_status in {"not_selected", "disabled"}
+        and shared.observer is None
+        and status.paper_opened is False
+        and status.orders_placed is False
+    )
 
 
 NORMAL_LIVENESS_SLA_S = 0.25
