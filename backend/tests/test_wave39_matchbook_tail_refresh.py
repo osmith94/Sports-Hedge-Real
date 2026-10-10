@@ -11,6 +11,7 @@ import inspect
 import json
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -51,10 +52,16 @@ from sports_hedge.application.price_engine import (
     CataloguePriceEngine,
     RetrievedVenuePayload,
 )
+from sports_hedge.arbitrage.allocation.policy import policy_from_settings
 from sports_hedge.arbitrage.models import PayoffSolution
 from sports_hedge.arbitrage.payoff_scan import PayoffScanResult
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
+from sports_hedge.persistence.operator_scanner_settings import (
+    SqliteOperatorScannerSettingsStore,
+    bind_runtime_operator_scanner_settings_store,
+    effective_operator_scanner_settings,
+)
 from sports_hedge.venues.rate_limit import ProviderRateLimitedError
 
 TOKEN_HOME = "713856789012345678901"
@@ -91,13 +98,7 @@ class OddsAwareScan(StubPaperScan):
     def __init__(self) -> None:
         super().__init__(_eligible())
         self.seen_best: list[Decimal] = []
-        self.settings = Settings(
-            min_net_edge=0.002,
-            max_one_time_gbp=3,
-            max_event_gbp=5,
-            max_opportunity_gbp=5,
-            sports_hedge_execution_enabled=False,
-        )
+        self.settings = Settings(sports_hedge_execution_enabled=False)
 
     def scan_pair(self, left, right, **kwargs):
         del kwargs
@@ -262,6 +263,50 @@ def test_wave39_does_not_relax_skew_age_or_arm_execution() -> None:
     assert ".list_markets(" not in source
     assert "place_order" not in source
     assert source.count("await self._execution_fetch_matchbook") == 1
+
+
+def test_wave39_preserves_persisted_operator_capital_caps(tmp_path: Path) -> None:
+    """Dashboard Max Event / Opportunity / One-Time stay operator-owned.
+
+    A PAPER screenshot of £7/£7/£5 is an example of persisted values, not a
+    new code default. Wave 39 must not hard-code £3/£5 canary caps.
+    """
+
+    for fn in (
+        CataloguePriceEngine._maybe_matchbook_tail_refresh,
+        CataloguePriceEngine._reprice_exact_books,
+        CataloguePriceEngine._finish_execution_reprice,
+        CataloguePriceEngine._execution_snapshot,
+    ):
+        source = inspect.getsource(fn)
+        assert "max_one_time_gbp=3" not in source
+        assert "max_event_gbp=5" not in source
+        assert "max_opportunity_gbp=5" not in source
+        assert "session_budget" not in source
+        assert "first_trade" not in source
+    store = SqliteOperatorScannerSettingsStore(tmp_path / "wave39-operator.sqlite")
+    bind_runtime_operator_scanner_settings_store(store)
+    try:
+        store.save_settings(
+            min_net_edge=Decimal("0.002"),
+            max_execution_risk=60,
+            max_event_gbp=Decimal("7"),
+            max_opportunity_gbp=Decimal("7"),
+            max_one_time_gbp=Decimal("5"),
+        )
+        settings = Settings(sports_hedge_execution_enabled=False)
+        operator = effective_operator_scanner_settings(settings)
+        policy = policy_from_settings(settings)
+        assert operator.max_event_gbp == Decimal("7")
+        assert operator.max_opportunity_gbp == Decimal("7")
+        assert operator.max_one_time_gbp == Decimal("5")
+        assert policy.max_event_reporting == operator.max_event_gbp
+        assert policy.max_opportunity_reporting == operator.max_opportunity_gbp
+        assert policy.max_one_time_reporting == operator.max_one_time_gbp
+        assert settings.sports_hedge_execution_enabled is False
+    finally:
+        bind_runtime_operator_scanner_settings_store(None)
+        store.close()
 
 
 @pytest.mark.asyncio
