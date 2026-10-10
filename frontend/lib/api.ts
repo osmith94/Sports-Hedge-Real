@@ -1951,6 +1951,13 @@ export function getWatchlistActivity(query = "limit=100"): Promise<OpportunityLi
 
 export type Price2AttemptStatus = "accepted" | "rejected" | "incomplete_unavailable";
 
+export type Price2FreezeStatus = "frozen" | "not_frozen" | "details_not_recorded";
+export type Price2EconomicsVsThreshold =
+  | "below_configured_threshold"
+  | "meets_or_exceeds_configured_threshold"
+  | "threshold_not_recorded"
+  | "net_edge_not_recorded";
+
 export type Price2LegProjection = {
   venue?: string | null;
   outcome?: string | null;
@@ -1962,6 +1969,16 @@ export type Price2LegProjection = {
   slot_wait_ms?: number | null;
   io_ms?: number | null;
   timing_match?: "native_id" | null;
+  native_market_id?: string | null;
+  native_runner_id?: string | null;
+  native_frozen?: boolean | null;
+  freeze_status?: Price2FreezeStatus | null;
+  freeze_reason?: string | null;
+  observed_tick_size?: string | null;
+  observed_minimum_shares?: string | null;
+  intended_native_stake?: string | null;
+  intended_native_shares?: string | null;
+  intended_limit_price?: string | null;
 };
 
 export type Price2VenueTiming = {
@@ -1996,6 +2013,10 @@ export type Price2ActivityObservation = {
   oldest_quote_age_ms?: number | null;
   skew_ms?: number | null;
   rejection_reason?: string | null;
+  minimum_net_edge?: string | number | null;
+  minimum_net_edge_source?: string | null;
+  economics_vs_threshold?: Price2EconomicsVsThreshold | null;
+  native_order_freeze_recorded?: boolean;
   fixture_label?: string | null;
   market_family?: string | null;
   canonical_event_id?: string | null;

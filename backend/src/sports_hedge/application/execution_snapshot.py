@@ -136,6 +136,44 @@ class ExecutionTiming:
     quote_age_ms: tuple[tuple[str, int | None], ...] = ()
 
 
+NATIVE_ORDER_FREEZE_REASONS = frozenset(
+    {
+        "frozen",
+        "missing_tick_size",
+        "missing_minimum_order_size",
+        "invalid_constraint_metadata",
+        "missing_or_invalid_native_market_or_token",
+        "unsupported_tick_size",
+        "below_native_minimum_shares",
+        "price_rounding_incompatible",
+        "stake_rounding_or_size_incompatible",
+        "native_order_translation_other",
+    }
+)
+DETAILS_NOT_RECORDED_REASON = "details_not_recorded"
+
+
+@dataclass(frozen=True)
+class NativeOrderFreezeDiagnostic:
+    """Local freeze outcome for one attempted native order. Not a veto.
+
+    Captured at Price-2 freeze time from already-held books and the approved
+    leg. Never includes exception text, credentials, or extra venue reads.
+    """
+
+    venue: str
+    frozen: bool
+    reason: str
+    outcome: str | None = None
+    native_market_id: str | None = None
+    native_runner_id: str | None = None
+    observed_tick_size: str | None = None
+    observed_minimum_shares: str | None = None
+    intended_native_stake: str | None = None
+    intended_native_shares: str | None = None
+    intended_limit_price: str | None = None
+
+
 @dataclass(frozen=True)
 class FrozenNativeOrder:
     """Venue-native order frozen at Price-2. Execution submits these values.
@@ -205,6 +243,7 @@ class ExecutionSnapshot:
     timing: ExecutionTiming | None = None
     execution_cycle: int = 0
     frozen_orders: tuple[FrozenNativeOrder, ...] = ()
+    native_order_freeze_diagnostics: tuple[NativeOrderFreezeDiagnostic, ...] = ()
     venue_readiness: tuple[VenueReadinessEvidence, ...] = ()
 
     def __post_init__(self) -> None:
@@ -288,6 +327,9 @@ class ExecutionSnapshot:
             "capital_constraint": _capital_json(self.capital_constraint),
             "timing": _timing_json(self.timing),
             "frozen_orders": [_frozen_order_json(item) for item in self.frozen_orders],
+            "native_order_freeze_diagnostics": [
+                _freeze_diagnostic_json(item) for item in self.native_order_freeze_diagnostics
+            ],
             "venue_readiness": [_readiness_json(item) for item in self.venue_readiness],
             "retrievals": [
                 {
@@ -611,6 +653,22 @@ def _capital_json(item: ExecutionCapitalEvidence | None) -> dict[str, Any] | Non
         "opportunity_deployed_gbp": item.opportunity_deployed_gbp,
         "opportunity_room_gbp": item.opportunity_room_gbp,
         "max_one_time_gbp": item.max_one_time_gbp,
+    }
+
+
+def _freeze_diagnostic_json(item: NativeOrderFreezeDiagnostic) -> dict[str, Any]:
+    return {
+        "venue": item.venue,
+        "frozen": item.frozen,
+        "reason": item.reason,
+        "outcome": item.outcome,
+        "native_market_id": item.native_market_id,
+        "native_runner_id": item.native_runner_id,
+        "observed_tick_size": item.observed_tick_size,
+        "observed_minimum_shares": item.observed_minimum_shares,
+        "intended_native_stake": item.intended_native_stake,
+        "intended_native_shares": item.intended_native_shares,
+        "intended_limit_price": item.intended_limit_price,
     }
 
 
