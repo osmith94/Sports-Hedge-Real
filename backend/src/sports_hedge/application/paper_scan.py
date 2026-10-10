@@ -39,6 +39,15 @@ from sports_hedge.arbitrage.payoff_scan import (
 )
 from sports_hedge.arbitrage.priority_alerts.models import LegExecutionMode
 from sports_hedge.arbitrage.watchlist.economics import INFORMATIONAL_NONBLOCKING_REASONS
+
+# Diagnostic STREAM labels. Not quote-age / freshness failures.
+_QUOTE_AGE_DIAGNOSTIC_LABELS = frozenset(
+    {
+        "stream_shadow_not_price2",
+        "stream_shadow_not_executable",
+        "stream_shadow_candidate",
+    }
+)
 from sports_hedge.config import Settings, get_settings
 from sports_hedge.domain.football import CanonicalOutcome
 from sports_hedge.domain.models import MarketScope, VenueName
@@ -231,7 +240,10 @@ class PaperScanService:
         for observation in (left, right):
             reason = observation.metadata.get("quote_age_reason")
             if isinstance(reason, str) and reason.strip():
-                rejections.append(reason)
+                token = reason.strip()
+                if token in _QUOTE_AGE_DIAGNOSTIC_LABELS:
+                    continue
+                rejections.append(token)
         if quote_age_ms is None and "unknown_quote_age" not in rejections:
             rejections.append("unknown_quote_age")
 

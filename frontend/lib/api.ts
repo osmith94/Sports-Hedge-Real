@@ -2830,6 +2830,10 @@ export type StreamCandidateStatus = {
   executable: boolean;
   price2: boolean;
   paper_entry: boolean;
+  data_valid?: boolean;
+  economics_state?: string;
+  top_reason?: string | null;
+  current?: boolean;
 };
 
 export type StreamStatus = {
@@ -2873,6 +2877,13 @@ export type StreamStatus = {
   coalesced_matchbook_quote_count?: number;
   price2_attempt_count?: number;
   price2_accepted_count?: number;
+  valid_pair_count?: number;
+  potential_arb_count?: number;
+  paper_fill_count?: number;
+  books_current?: boolean;
+  candidates_current?: boolean;
+  metrics_scope?: string;
+  execution_enabled?: boolean;
   candidates: StreamCandidateStatus[];
   limitations: string[];
 };
