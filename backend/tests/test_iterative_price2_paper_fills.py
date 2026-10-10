@@ -266,8 +266,26 @@ async def test_concurrent_follow_up_does_not_fetch_twice(tmp_path, monkeypatch) 
         )
 
     driver = asyncio.create_task(_drive())
+    wait_started = asyncio.create_task(started.wait())
     try:
-        await asyncio.wait_for(started.wait(), timeout=5)
+        done, _pending = await asyncio.wait(
+            {driver, wait_started},
+            timeout=30,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not started.is_set():
+            fetches = 0
+            driver_error = None
+            if driver.done():
+                try:
+                    fetches = len(driver.result().matchbook.get_market_calls)
+                except BaseException as exc:  # noqa: BLE001 - surface driver crash
+                    driver_error = exc
+            raise AssertionError(
+                "iterative Matchbook get_market never reached the in-flight "
+                f"follow-up (driver_done={driver.done()} fetches={fetches} "
+                f"driver_error={driver_error!r})"
+            )
         rows = ready["watchlist"].repository.list_opportunities()
         opportunity_id = rows[0].opportunity_id
         plan = ready["operations"]._plans[opportunity_id]
@@ -293,6 +311,8 @@ async def test_concurrent_follow_up_does_not_fetch_twice(tmp_path, monkeypatch) 
         assert [row["cycle_outcome"] for row in audits] == ["filled", "rejected"]
     finally:
         release.set()
+        if not wait_started.done():
+            wait_started.cancel()
         if not driver.done():
             await driver
 

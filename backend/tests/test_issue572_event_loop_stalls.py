@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import itertools
 import threading
 import time
@@ -748,3 +749,16 @@ async def test_extreme_stress_policy_still_fails_a_real_application_stall() -> N
     assert any(item.startswith("non-GC callback") for item in failures), failures
     summary = extreme_stress_summary("stall", gaps, profiler.profile.slow, longest_gc_pause_s=0.0)
     assert "non_gc_excursions=1" in summary, summary
+
+
+def test_identity_membership_keys_do_not_scan_the_whole_alias_map() -> None:
+    """UNIVERSE market_evaluation hottest frame on Windows full-suite 114280897588.
+
+    Scanning ``_aliases.items()`` per fixture is O(aliases) on the event loop.
+    The reverse index must stay the membership authority. Do not relax the
+    0.25s non-GC heartbeat bound to hide that scan.
+    """
+
+    src = inspect.getsource(FixtureCurrentStateStore._identity_membership_keys)
+    assert "_aliases_by_target" in src
+    assert "for alias, dest in self._aliases.items()" not in src

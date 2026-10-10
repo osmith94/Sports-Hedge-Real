@@ -553,39 +553,54 @@ async def capture_with_execution_reprice(
     # Persist (and any armed live dispatch) off this event loop. run_blocking()
     # would otherwise join a worker on the scanner thread until fake or real
     # venue transports finish. Reserve → submit → persist stay one function.
-    entry_history = await asyncio.to_thread(
-        persist_price_engine_item_capture,
-        refreshed.decision,
-        service=service,
-        watchlist=watchlist,
-        refreshed_venues=refreshed.refreshed_venues,
-        pricing_lane=pricing_lane,
-        execution_authoritative=True,
-        execution_snapshot_json=snapshot_json,
-    )
-    await continue_iterative_paper_fills(
-        opportunity_id=opportunity_id,
-        runtime=runtime,
-        engine=engine,
-        watchlist=watchlist,
-        pricing_lane=pricing_lane,
-        entry_decision=refreshed.decision,
-    )
-    paper_opened, orders_placed, trade_id, submitted = _recorded_opening_evidence(
-        watchlist, opportunity_id
-    )
-    return ExecutionCaptureResult(
-        discovery_history=discovery_history,
-        discovery_decision=discovery,
-        entry_decision=refreshed.decision,
-        entry_history=list(entry_history or []),
-        snapshot=refreshed.snapshot,
-        price2_accepted=price2_entry_authorized(refreshed.snapshot),
-        paper_opened=paper_opened,
-        orders_placed=orders_placed,
-        paper_trade_id=trade_id,
-        orders_submitted=submitted,
-    )
+    # Claim iteration before persist so a concurrent TOP_UP cannot fetch the
+    # same native books while the opening write is still in to_thread.
+    claimed = bool(opportunity_id) and _claim_iteration(opportunity_id)
+    try:
+        entry_history = await asyncio.to_thread(
+            persist_price_engine_item_capture,
+            refreshed.decision,
+            service=service,
+            watchlist=watchlist,
+            refreshed_venues=refreshed.refreshed_venues,
+            pricing_lane=pricing_lane,
+            execution_authoritative=True,
+            execution_snapshot_json=snapshot_json,
+        )
+        if claimed:
+            await continue_iterative_paper_fills(
+                opportunity_id=opportunity_id,
+                runtime=runtime,
+                engine=engine,
+                watchlist=watchlist,
+                pricing_lane=pricing_lane,
+                entry_decision=refreshed.decision,
+                already_claimed=True,
+            )
+        elif opportunity_id:
+            log_execution_phase(
+                PHASE_REJECTED,
+                reason=EXECUTION_REPRICE_DUPLICATE,
+                opportunity_id=opportunity_id,
+            )
+        paper_opened, orders_placed, trade_id, submitted = _recorded_opening_evidence(
+            watchlist, opportunity_id
+        )
+        return ExecutionCaptureResult(
+            discovery_history=discovery_history,
+            discovery_decision=discovery,
+            entry_decision=refreshed.decision,
+            entry_history=list(entry_history or []),
+            snapshot=refreshed.snapshot,
+            price2_accepted=price2_entry_authorized(refreshed.snapshot),
+            paper_opened=paper_opened,
+            orders_placed=orders_placed,
+            paper_trade_id=trade_id,
+            orders_submitted=submitted,
+        )
+    finally:
+        if claimed:
+            _release_iteration(opportunity_id)
 
 
 def _claim_iteration(opportunity_id: str) -> bool:
@@ -668,6 +683,7 @@ async def continue_iterative_paper_fills(
     watchlist: WatchlistService,
     pricing_lane: str | None,
     entry_decision: PaperScanDecision,
+    already_claimed: bool = False,
 ) -> None:
     """Immediately reprice and fill while a fresh accepted snapshot remains.
 
@@ -679,13 +695,14 @@ async def continue_iterative_paper_fills(
     previous snapshot.
     """
 
-    if not opportunity_id or not _claim_iteration(opportunity_id):
-        if opportunity_id:
-            log_execution_phase(
-                PHASE_REJECTED,
-                reason=EXECUTION_REPRICE_DUPLICATE,
-                opportunity_id=opportunity_id,
-            )
+    if not opportunity_id:
+        return
+    if not already_claimed and not _claim_iteration(opportunity_id):
+        log_execution_phase(
+            PHASE_REJECTED,
+            reason=EXECUTION_REPRICE_DUPLICATE,
+            opportunity_id=opportunity_id,
+        )
         return
     try:
         decision = entry_decision
@@ -762,4 +779,5 @@ async def continue_iterative_paper_fills(
                 execution_cycle=snapshot.execution_cycle,
             )
     finally:
-        _release_iteration(opportunity_id)
+        if not already_claimed:
+            _release_iteration(opportunity_id)
