@@ -2972,12 +2972,27 @@ class PaperOperationsService:
             from sports_hedge.execution.live_canary import live_canary_capture_active
 
             if not live_canary_capture_active(self.settings):
+                self._record_live_pre_submit_refusal(opportunity_id, "canary_capture_inactive")
                 return None
         plan = self._plans.get(opportunity_id)
         if plan is None:
+            self._record_live_pre_submit_refusal(opportunity_id, "missing_frozen_fill_plan")
             return None
         self._dispatch_live_opening(plan, now=simulate_kwargs.get("now"))
         return None
+
+    def _record_live_pre_submit_refusal(self, opportunity_id: str, reason: str) -> None:
+        """Close the existing bound fill attempt with its exact refusal reason.
+
+        No new live package is reserved; no order is submitted, and no
+        successful trade or fill is implied. This uses the durable watchlist
+        rejection journal rather than silently dropping a qualified entry.
+        """
+        self._record_entry_rejection(
+            opportunity_id,
+            f"live_pre_submit:{reason}",
+            occurred_at=datetime.now(UTC),
+        )
 
     def _live_attempt_store(self) -> LiveExecutionAttemptStore:
         if self.ledger is not None and getattr(self.ledger, "live_attempts", None) is not None:
@@ -3176,37 +3191,35 @@ class PaperOperationsService:
         matchbook = None if runtime is None else runtime.matchbook
         kalshi = None if runtime is None else runtime.kalshi
         polymarket = None if runtime is None else runtime.polymarket
-        if refusal_reason(
-            plan,
-            settings=self.settings,
-            matchbook=matchbook,
-            kalshi=kalshi,
-            polymarket=polymarket,
-        ):
-            return
-        from sports_hedge.execution.live_canary import (
-            canary_submit_refusal,
-            live_canary_enabled,
-        )
-
-        if live_canary_enabled(self.settings):
-            canary_reason = canary_submit_refusal(
-                plan, settings=self.settings, tranche_id=tranche_id
-            )
-            if canary_reason is not None:
-                return
         from sports_hedge.execution.package import (
             execution_armed,
             live_submit_freshness_refusal,
         )
 
-        if not execution_armed(self.settings):
+        # One authoritative pre-submit decision. Current location/account
+        # evidence was fetched before Price-2; no venue HTTP probe here.
+        reason = refusal_reason(
+            plan,
+            settings=self.settings,
+            matchbook=matchbook,
+            kalshi=kalshi,
+            polymarket=polymarket,
+        )
+        if reason is not None:
+            self._record_live_pre_submit_refusal(plan.opportunity_id, reason)
             return
-        if live_submit_freshness_refusal(plan, settings=self.settings):
+        if not execution_armed(self.settings):
+            self._record_live_pre_submit_refusal(plan.opportunity_id, "execution_disabled")
+            return
+        freshness_reason = live_submit_freshness_refusal(plan, settings=self.settings)
+        if freshness_reason is not None:
+            self._record_live_pre_submit_refusal(plan.opportunity_id, freshness_reason)
             return
         package_id = opening_package_id(trade_id, tranche_id)
         store = self._live_attempt_store()
         if store.get(package_id) is not None:
+            # An existing live attempt must never trigger another dispatch.
+            # Do not mutate the watchlist for a concurrently active package.
             return
         snapshot_json = scrubbed_snapshot_json(plan)
         reserved = store.reserve(
@@ -3249,6 +3262,10 @@ class PaperOperationsService:
                     updated_at=when,
                 )
                 if package is None:
+                    self._record_live_pre_submit_refusal(
+                        plan.opportunity_id,
+                        result.refusal or "live_package_not_created",
+                    )
                     return
                 self._persist_live_package(
                     plan,
