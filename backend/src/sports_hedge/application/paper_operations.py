@@ -3195,6 +3195,15 @@ class PaperOperationsService:
             )
             if canary_reason is not None:
                 return
+        from sports_hedge.execution.package import (
+            execution_armed,
+            live_submit_freshness_refusal,
+        )
+
+        if not execution_armed(self.settings):
+            return
+        if live_submit_freshness_refusal(plan, settings=self.settings):
+            return
         package_id = opening_package_id(trade_id, tranche_id)
         store = self._live_attempt_store()
         if store.get(package_id) is not None:

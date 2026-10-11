@@ -225,6 +225,7 @@ async def run_live_opening(
     kalshi: KalshiExecutionClient | None,
     polymarket: PolymarketExecutionClient | None = None,
     clock: Callable[[], datetime] | None = None,
+    freshness_clock: Callable[[], datetime] | None = None,
 ) -> LiveDispatchResult:
     """Submit once, then cancel a known Matchbook resting remainder."""
 
@@ -237,6 +238,19 @@ async def run_live_opening(
     )
     if reason is not None:
         return LiveDispatchResult(sent=False, refusal=reason)
+    from sports_hedge.execution.package import (
+        execution_armed,
+        live_submit_freshness_refusal,
+        wall_clock_utc,
+    )
+
+    if not execution_armed(settings):
+        return LiveDispatchResult(sent=False, refusal="execution_disabled")
+    stale = live_submit_freshness_refusal(
+        plan, settings=settings, now=(freshness_clock or wall_clock_utc)()
+    )
+    if stale is not None:
+        return LiveDispatchResult(sent=False, refusal=stale)
     legs = [leg for leg in plan.legs if leg.requested_stake > 0]
     requests = [
         request
@@ -260,6 +274,7 @@ async def run_live_opening(
         kalshi=kalshi,
         polymarket=polymarket,
         clock=clock,
+        freshness_clock=freshness_clock,
     )
     orders, remainder = await release_matchbook_remainders(
         package.orders,

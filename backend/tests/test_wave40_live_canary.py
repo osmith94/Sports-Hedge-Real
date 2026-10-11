@@ -107,9 +107,12 @@ def _arm(settings: Settings) -> None:
 
 
 def _snapshot(*, stake: str, extra: dict | None = None, **fields: object) -> str:
+    evaluated = datetime.now(UTC).isoformat()
     payload: dict[str, object] = {
         "snapshot_id": "exec:canary:1",
         "accepted": True,
+        "evaluated_at": evaluated,
+        "started_at": evaluated,
         "skew_ms": 12,
         "max_skew_ms": 500,
         "oldest_quote_age_ms": 80,
