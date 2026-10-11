@@ -1,6 +1,6 @@
 # Wave 40 live execution — operator runbook
 
-There is **one Real mode** and **one Windows launcher**. Execution boots **OFF**. A top-right dashboard toggle arms **continuous** Real execution after confirmation and read-only preflight.
+There is **one Real mode** and **one Windows launcher**. Execution boots **OFF**. A top-right dashboard toggle arms **continuous** Real execution immediately after one explicit confirmation. The ON switch records operator intent; it does **not** perform trading/account/geoblock preflights.
 
 This does **not** authorize Cursor, CI, or a merge to place bets, set live flags on `main`, deploy, restart a PC, or touch credentials.
 
@@ -22,11 +22,11 @@ Server **restarts always OFF**. Open/unknown/orphan ledger state persists so the
 
 ## Toggle ON
 
-1. Integrate Wave 38 (#42) and Wave 39 (#43) before using live Price-2.
-2. Confirm current-territory permission for **both** venues. Polymarket geoblock is current outbound IP, fail closed. No VPN/proxy.
-3. In the top-right header, EXECUTION OFF → one **REAL-MONEY EXECUTION** confirmation → click **Confirm EXECUTION ON**. Confirmation shows the **actual** operator limits, not invented £3/£5 constants. There is no typed phrase. A page visit never arms.
-4. While preflight runs the switch shows **CHECKING**, not ON. Fail reasons stay OFF.
-5. ON stays ON during normal HOT/BACKGROUND/STREAM scanning until the operator switches OFF or a real risk/venue block. A browser refresh reads server state and does not auto-arm.
+1. In the top-right header, EXECUTION OFF → one **REAL-MONEY EXECUTION** confirmation → click **Confirm EXECUTION ON**. Confirmation shows the **actual** saved operator limits; there is no typed phrase or extra cap. A page visit never arms.
+2. The backend sets **EXECUTION ON** without probing venue accounts, Matchbook currency, Polymarket geoblocking, funds, FX, orphan orders or market data. Neither a slow exchange nor failed preflight may hold the ON switch OFF.
+3. ON stays ON during HOT/BACKGROUND/STREAM scanning until the operator switches OFF or the backend restarts. Browser refresh reads server ON/OFF state; it never auto-arms.
+4. **Separately, before each actual live order**, existing current-IP venue eligibility, credentials/allowance/funds, native currency, fees/FX, unknown orders, accepted Price-2, native minimums, persisted operator caps and risk protections remain mandatory. A blocked/unreachable venue denies that order **without toggling execution OFF**. Never bypass geoblocking or use VPN/proxy to circumvent venue restrictions. No fabricated books or orders.
+5. GET /live-canary/preflight is optional operator diagnosis, not a prerequisite to ON. A fast GET /health has no venue calls. ON is *not* a claim that current trading permission has been verified.
 
 `/health.execution.live_execution_ready` is **not** trading permission.
 
