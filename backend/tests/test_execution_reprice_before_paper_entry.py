@@ -193,6 +193,7 @@ def test_reprice_source_does_not_discover_or_place_orders() -> None:
             CataloguePriceEngine.reprice_for_paper_entry,
             CataloguePriceEngine._reprice_exact_books,
             CataloguePriceEngine._execution_fetch_venues,
+            CataloguePriceEngine._maybe_matchbook_tail_refresh,
             CataloguePriceEngine._execution_fetch_matchbook,
             CataloguePriceEngine._execution_fetch_kalshi,
             CataloguePriceEngine._execution_fetch_polymarket,
