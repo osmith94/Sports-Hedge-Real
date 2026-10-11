@@ -3186,7 +3186,14 @@ class PaperOperationsService:
         when = now or datetime.now(UTC)
         from sports_hedge.execution.composition import bind_process_execution_runtime
 
-        bind_process_execution_runtime(self.settings)
+        try:
+            bind_process_execution_runtime(self.settings)
+        except Exception:  # noqa: BLE001 — cannot assume clients exist after failed binding
+            LOGGER.exception("real execution transport setup refused before submission")
+            self._record_live_pre_submit_refusal(
+                plan.opportunity_id, "execution_transport_setup_failed"
+            )
+            return
         runtime = self.execution_runtime
         matchbook = None if runtime is None else runtime.matchbook
         kalshi = None if runtime is None else runtime.kalshi
