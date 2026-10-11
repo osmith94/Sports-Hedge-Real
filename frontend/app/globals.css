@@ -1033,3 +1033,26 @@ table.paper-trade-compact td { padding: 6px 8px; }
 .sound-alert-toggle { border: 1px solid var(--line-strong); background: var(--panel); color: var(--muted); border-radius: 9px; padding: 7px 10px; font-size: 10px; font-weight: 750; cursor: pointer; white-space: nowrap; }
 .sound-alert-toggle.is-on { color: var(--accent); border-color: rgba(124, 242, 176, .35); background: var(--accent-soft); }
 .sound-alert-notice { color: var(--amber); font-size: 10px; max-width: 220px; }
+
+/* Read-only Price-2 audit summary; all figures are bounded recorded samples. */
+.price2-perf-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.price2-perf-summary > div { background: var(--panel-raised); border: 1px solid var(--line); padding: 10px; border-radius: 8px; display: grid; gap: 5px; }
+.price2-perf-summary span, .price2-perf-facts span { font-size: 10px; color: var(--muted); }
+.price2-perf-summary strong { font-size: 18px; font-variant-numeric: tabular-nums; }
+.price2-perf-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.price2-perf-facts > div { display: grid; gap: 5px; }
+.price2-perf-facts strong { font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.price2-perf-subhead { font-size: 11px; font-weight: 750; margin-top: 14px; margin-bottom: 7px; }
+.price2-perf-subhead span { font-weight: 400; color: var(--muted-2); }
+.price2-perf-table-wrap { overflow-x: auto; }
+.price2-perf-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.price2-perf-table th { text-align: left; color: var(--muted); font-weight: 650; }
+.price2-perf-table th, .price2-perf-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.price2-perf-breakdowns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.price2-perf-reasons { margin: 0; padding: 0; list-style: none; font-size: 10px; }
+.price2-perf-reasons li { display: flex; gap: 8px; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 5px 0; }
+.price2-perf-reasons li span { overflow-wrap: anywhere; }
+.price2-perf-reasons strong { font-variant-numeric: tabular-nums; }
+.price2-perf-foot { margin-top: 12px; line-height: 1.6; }
+@media (max-width: 760px) { .price2-perf-summary, .price2-perf-facts, .price2-perf-breakdowns { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) { .price2-perf-facts, .price2-perf-breakdowns { grid-template-columns: 1fr; } }
