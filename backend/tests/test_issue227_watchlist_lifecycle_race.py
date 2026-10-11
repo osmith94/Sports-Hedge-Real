@@ -267,18 +267,23 @@ def test_reopened_connection_observe_cannot_regress_filled(tmp_path: Path) -> No
                 errors.append(exc)
 
         def observe_worker() -> None:
-            other = WatchlistService(
-                SqliteWatchlistRepository(watch_path),
-                max_quote_age_ms=10_000,
-            )
+            other: WatchlistService | None = None
             try:
-                assert open_ready.wait(timeout=5)
+                # Open the second Windows SQLite handle only after persist has
+                # reached record_paper_fill. Opening it first can lock the file
+                # and prevent persist from ever setting open_ready.
+                assert open_ready.wait(timeout=5), "persist never reached watchlist FILLED"
+                other = WatchlistService(
+                    SqliteWatchlistRepository(watch_path),
+                    max_quote_age_ms=10_000,
+                )
                 overlap.wait(timeout=5)
                 other.observe_paper_decision(second, history)
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
             finally:
-                other.repository.close()
+                if other is not None:
+                    other.repository.close()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(persist_worker), pool.submit(observe_worker)]
