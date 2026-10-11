@@ -274,5 +274,7 @@ def test_nonlocal_arm_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         headers=LOCAL_ORIGIN,
     )
     assert local.status_code == 200
-    assert local.json()["runtime_armed"] is False
-    assert live_runtime_armed() is False
+    assert local.json()["runtime_armed"] is True
+    assert local.json()["trading_permission"] is False
+    assert "geoblock_blocked" in local.json()["not_ready_reasons"]
+    assert live_runtime_armed() is True
