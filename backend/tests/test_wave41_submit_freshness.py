@@ -55,7 +55,7 @@ def _reset(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> N
     reset_live_canary_runtime()
     set_live_canary_trading_facts(None)
     bind_runtime_operator_scanner_settings_store(None)
-    if request.node.name != "test_slow_preflight_does_not_submit_elapsed_price2":
+    if request.node.name != "test_missing_preprice2_readiness_denies_without_slow_postprice2_probe":
         monkeypatch.setattr(
             "sports_hedge.execution.package.wall_clock_utc",
             lambda: FROZEN_SUBMIT,
@@ -84,12 +84,15 @@ def _expired_facts() -> LiveCanaryTradingFacts:
     )
 
 
-def test_slow_preflight_does_not_submit_elapsed_price2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_preprice2_readiness_denies_without_slow_postprice2_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _canary_settings(tmp_path)
     set_live_runtime_arm(True)
     set_live_canary_trading_facts(_expired_facts())
 
+    calls = {"n": 0}
+
     async def _slow(_settings: Settings) -> LiveCanaryTradingFacts:
+        calls["n"] += 1
         await asyncio.sleep(3.05)
         return PERMITTED
 
@@ -111,10 +114,30 @@ def test_slow_preflight_does_not_submit_elapsed_price2(tmp_path: Path, monkeypat
     ops.capture_opening_fill(plan.opportunity_id, now=NOW)
     assert mb.calls == []
     assert pm.calls == []
+    # No slow account/territory probe may run after Price-2. Missing current
+    # evidence fails closed immediately and is persisted as a refusal.
+    assert calls["n"] == 0
+    assert ops.ledger is not None
+    assert ops.ledger.live_attempts.list_all() == []
+    events = ops.watchlist.activity(limit=20, opportunity_id=plan.opportunity_id)
+    assert any(
+        event.event_type.value == "paper_fill_rejected"
+        and "live_pre_submit:canary_preflight_not_collected" in event.detail
+        for event in events
+    )
+    # The independent elapsed-quote guard still fails closed when truly old.
+    now = datetime.now(UTC)
+    stale_plan = _plan(
+        snapshot=_snapshot(
+            stake="1.50",
+            evaluated_at=(now - timedelta(seconds=3)).isoformat(),
+            started_at=(now - timedelta(seconds=3)).isoformat(),
+        )
+    )
     assert live_submit_freshness_refusal(
-        plan,
+        stale_plan,
         settings=settings,
-        now=datetime.now(UTC),
+        now=now,
     ) == LIVE_SUBMIT_QUOTE_AGE_ELAPSED
 
 
