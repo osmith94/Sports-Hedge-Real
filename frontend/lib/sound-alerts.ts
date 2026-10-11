@@ -57,15 +57,21 @@ export function audibleEvents(
  * avalanche from multi-event polls. Distinct milestones get their own cues.
  */
 export class SoundEventTracker {
-  private seen = new Set<string>();
+  private seen = new Map<string, number>();
 
   constructor(private readonly enabledAt: number) {}
 
   consume(events: readonly AudibleEvent[]): SoundCue[] {
     const newEvents: AudibleEvent[] = [];
+    const newest = Math.max(this.enabledAt, ...events.map((event) => event.at));
+    // Keep only IDs that can still reappear in the bounded two-minute query.
+    // Prevent an all-day operator session from accumulating unbounded IDs.
+    for (const [id, when] of this.seen) {
+      if (when < newest - SOUND_LOOKBACK_MS) this.seen.delete(id);
+    }
     for (const event of events) {
       if (event.at < this.enabledAt || this.seen.has(event.id)) continue;
-      this.seen.add(event.id);
+      this.seen.set(event.id, event.at);
       newEvents.push(event);
     }
     // Do not play multiple copies of the same sound from one scanner burst.
