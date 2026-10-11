@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,7 @@ from sports_hedge.paper.chain import PaperFillPlan
 
 OPERATOR_CONFIRMATION_PHRASE = "ARM LIVE CANARY"
 _QUANTUM = Decimal("0.01")
+TRADING_FACTS_MAX_AGE = timedelta(seconds=30)
 
 _lock = threading.Lock()
 _FACTS: LiveCanaryTradingFacts | None = None
@@ -45,7 +46,9 @@ class LiveCanaryTradingFacts:
     matchbook_free_funds_positive: bool = False
     matchbook_currency_compatible: bool | None = True
     outstanding_unknown_orders: bool = False
-    fee_fx_known: bool = True
+    fee_fx_known: bool = False
+    collected_at: datetime | None = None
+    injected: bool = False
 
 
 def reset_live_canary_runtime() -> None:
@@ -59,7 +62,13 @@ def reset_live_canary_runtime() -> None:
 
 def set_live_canary_trading_facts(facts: LiveCanaryTradingFacts | None) -> None:
     global _FACTS
-    _FACTS = facts
+    if facts is None:
+        _FACTS = None
+        return
+    if facts.injected or facts.collected_at is not None:
+        _FACTS = facts
+        return
+    _FACTS = replace(facts, injected=True, collected_at=datetime.now(UTC))
 
 
 def live_canary_trading_facts() -> LiveCanaryTradingFacts | None:
@@ -358,8 +367,6 @@ def trading_permission_reasons(
         reasons.append("matchbook_currency_mismatch")
     if facts.outstanding_unknown_orders:
         reasons.append("outstanding_unknown_orders")
-    if not facts.fee_fx_known:
-        reasons.append("canary_fee_fx_unknown")
     return reasons
 
 
@@ -375,6 +382,13 @@ async def collect_live_canary_facts(settings: Settings) -> LiveCanaryTradingFact
     permitted = bool(getattr(eligibility, "permitted", False))
     geo_reason = str(getattr(eligibility, "reason", "geoblock_not_checked") or "geoblock_not_checked")
     allowance_reason = polymarket.get("trading_readiness_reason")
+    outstanding = False
+    try:
+        from sports_hedge.execution.orphans import orphaned_live_executions
+
+        outstanding = bool(orphaned_live_executions())
+    except Exception:
+        outstanding = False
     return LiveCanaryTradingFacts(
         polymarket_geoblock_permitted=permitted,
         polymarket_geoblock_reason=geo_reason,
@@ -389,20 +403,38 @@ async def collect_live_canary_facts(settings: Settings) -> LiveCanaryTradingFact
         matchbook_authenticated=bool(matchbook.get("authenticated_read")),
         matchbook_free_funds_positive=bool(matchbook.get("balance_positive")),
         matchbook_currency_compatible=matchbook.get("currency_compatible"),
-        fee_fx_known=True,
+        outstanding_unknown_orders=outstanding,
+        fee_fx_known=False,
+        collected_at=datetime.now(UTC),
+        injected=False,
     )
 
 
-def resolve_trading_facts(settings: Settings) -> LiveCanaryTradingFacts | None:
-    """Injected test facts win. Otherwise collect once at submit, never from /health."""
+def trading_facts_are_current(facts: LiveCanaryTradingFacts | None) -> bool:
+    """Injected test facts stay. Collected geo/allowance evidence expires."""
 
-    if _FACTS is not None:
+    if facts is None:
+        return False
+    if facts.injected:
+        return True
+    if facts.collected_at is None:
+        return False
+    age = datetime.now(UTC) - facts.collected_at
+    return age <= TRADING_FACTS_MAX_AGE
+
+
+def resolve_trading_facts(settings: Settings) -> LiveCanaryTradingFacts | None:
+    """Fresh enough facts, or a new read-only collect. Never used by GET /health."""
+
+    if trading_facts_are_current(_FACTS):
         return _FACTS
     if not live_canary_enabled(settings):
         return None
     from sports_hedge.execution.dispatch import run_blocking
 
-    return run_blocking(collect_live_canary_facts(settings))
+    collected = run_blocking(collect_live_canary_facts(settings))
+    set_live_canary_trading_facts(collected)
+    return collected
 
 
 def canary_submit_refusal(
@@ -421,6 +453,8 @@ def canary_submit_refusal(
     if not live_canary_enabled(settings):
         return None
     resolved = facts if facts is not None else resolve_trading_facts(settings)
+    if resolved is not None and not trading_facts_are_current(resolved) and facts is not None:
+        resolved = resolve_trading_facts(settings)
     reasons = trading_permission_reasons(settings, resolved)
     if reasons:
         return reasons[0]
@@ -472,7 +506,7 @@ async def arm_live_runtime(settings: Settings, *, phrase: str) -> dict[str, Any]
             "armed": False,
             "not_ready_reasons": ["canary_operator_unconfirmed"],
         }
-    facts = _FACTS if _FACTS is not None else await collect_live_canary_facts(settings)
+    facts = _FACTS if (_FACTS is not None and _FACTS.injected) else await collect_live_canary_facts(settings)
     set_live_canary_trading_facts(facts)
     _RUNTIME_PREFLIGHT_AT = datetime.now(UTC).isoformat()
     reasons = trading_permission_reasons(settings, facts, for_arm=True)
@@ -484,6 +518,9 @@ async def arm_live_runtime(settings: Settings, *, phrase: str) -> dict[str, Any]
         status["preflight_at"] = _RUNTIME_PREFLIGHT_AT
         return status
     set_live_runtime_arm(True)
+    from sports_hedge.execution.composition import bind_process_execution_runtime
+
+    bind_process_execution_runtime(settings)
     status = public_canary_status(settings)
     status["armed"] = True
     return status
@@ -496,4 +533,7 @@ def disarm_live_runtime(settings: Settings) -> dict[str, Any]:
     with _lock:
         _RUNTIME_ARMED = False
         _NEW_ORDERS_HALTED = True
+    from sports_hedge.execution.composition import bind_process_execution_runtime
+
+    bind_process_execution_runtime(settings)
     return public_canary_status(settings)

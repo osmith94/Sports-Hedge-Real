@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -18,22 +19,84 @@ from sports_hedge.execution.live_canary import (
 
 router = APIRouter(prefix="/live-canary", tags=["live-canary"])
 
-_LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testclient"})
+_REQUEST_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testclient", "testserver"})
+_ORIGIN_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_ORIGIN_SCHEMES = frozenset({"http"})
+_ORIGIN_PORTS = frozenset({None, 80, 3000, 3001, 8000})
 
 
 class ArmRequest(BaseModel):
     phrase: str = Field(min_length=1)
 
 
-def _require_loopback(request: Request) -> None:
+def _hostname(value: str | None) -> str:
+    host = (value or "").strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
+def _port_allowed(port: int | None) -> bool:
+    return port in _ORIGIN_PORTS
+
+
+def _origin_allowed(raw: str) -> bool:
+    parsed = urlparse(raw.strip())
+    if parsed.scheme not in _ORIGIN_SCHEMES:
+        return False
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return False
+    if parsed.path not in {"", "/"}:
+        return False
+    host = _hostname(parsed.hostname)
+    if host not in _ORIGIN_HOSTS:
+        return False
+    return _port_allowed(parsed.port)
+
+
+def _host_header_allowed(raw: str) -> bool:
+    header = raw.strip()
+    if not header:
+        return False
+    parsed = urlparse(f"http://{header}")
+    host = _hostname(parsed.hostname)
+    if host not in _REQUEST_HOSTS:
+        return False
+    if host in {"testclient", "testserver"}:
+        return True
+    return _port_allowed(parsed.port) or parsed.port in {None, 80, 8000}
+
+
+def _require_loopback(request: Request, *, mutating: bool) -> None:
     client = request.client.host if request.client is not None else ""
-    if client not in _LOCAL_HOSTS:
+    if client not in _LOOPBACK_HOSTS:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Live canary arming is loopback-only.",
         )
-    origin = request.headers.get("origin") or request.headers.get("referer") or ""
-    if origin and "127.0.0.1" not in origin and "localhost" not in origin:
+    host = request.headers.get("host") or ""
+    if not _host_header_allowed(host):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Live canary arming rejects non-local Host.",
+        )
+    origin = (request.headers.get("origin") or "").strip()
+    referer = (request.headers.get("referer") or "").strip()
+    if mutating:
+        token = origin or referer
+        if not token or not _origin_allowed(token):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Live canary arming requires a parsed local Origin.",
+            )
+        return
+    if origin and not _origin_allowed(origin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Live canary arming rejects non-local origins.",
+        )
+    if referer and not origin and not _origin_allowed(referer):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Live canary arming rejects non-local origins.",
@@ -51,7 +114,7 @@ def live_canary_status() -> dict[str, Any]:
 async def arm_live_canary(body: ArmRequest, request: Request) -> dict[str, Any]:
     """Runtime ON after confirmation + read-only preflight. Boot remains OFF."""
 
-    _require_loopback(request)
+    _require_loopback(request, mutating=True)
     return await arm_live_runtime(get_settings(), phrase=body.phrase)
 
 
@@ -59,7 +122,7 @@ async def arm_live_canary(body: ArmRequest, request: Request) -> dict[str, Any]:
 def disarm_live_canary(request: Request) -> dict[str, Any]:
     """Toggle OFF: halt new orders. Does not cancel existing venue orders."""
 
-    _require_loopback(request)
+    _require_loopback(request, mutating=True)
     body = disarm_live_runtime(get_settings())
     body["halt_does_not_cancel_existing"] = True
     return body
@@ -67,7 +130,7 @@ def disarm_live_canary(request: Request) -> dict[str, Any]:
 
 @router.post("/heartbeat")
 def heartbeat_live_canary(request: Request) -> dict[str, Any]:
-    _require_loopback(request)
+    _require_loopback(request, mutating=True)
     if not heartbeat_live_runtime():
         return public_canary_status(get_settings())
     return public_canary_status(get_settings())
@@ -84,7 +147,7 @@ def halt_new_live_canary_orders(request: Request) -> dict[str, Any]:
 async def live_canary_preflight(request: Request) -> dict[str, Any]:
     """Operator-local read-only probes. Not a submit path and not GET /health."""
 
-    _require_loopback(request)
+    _require_loopback(request, mutating=False)
     from sports_hedge.execution.live_canary import collect_live_canary_facts, trading_permission_reasons
 
     settings = get_settings()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -38,7 +38,7 @@ from sports_hedge.execution.live_canary import (
     set_live_runtime_arm,
 )
 from sports_hedge.execution.package import execution_capability, execution_armed
-from sports_hedge.execution.runtime import ExecutionRuntime, set_execution_runtime
+from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime, set_execution_runtime
 from sports_hedge.matching.markets import MarketMatchResult
 from sports_hedge.paper.chain import PaperFillPlan
 from sports_hedge.paper.fills import PaperOpportunityLeg
@@ -61,8 +61,10 @@ PERMITTED = LiveCanaryTradingFacts(
     matchbook_authenticated=True,
     matchbook_free_funds_positive=True,
     matchbook_currency_compatible=True,
-    fee_fx_known=True,
+    injected=True,
 )
+
+LOCAL_ORIGIN = {"Origin": "http://127.0.0.1:3000"}
 
 
 @pytest.fixture(autouse=True)
@@ -488,7 +490,7 @@ def test_halt_and_explicit_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("sports_hedge.api.live_canary.get_settings", lambda: settings)
     monkeypatch.setattr("sports_hedge.api.main.get_settings", lambda: settings)
     client = TestClient(app)
-    halted = client.post("/live-canary/halt-new-orders").json()
+    halted = client.post("/live-canary/halt-new-orders", headers=LOCAL_ORIGIN).json()
     assert halted["halt_new_orders"] is True
     assert halted["halt_does_not_cancel_existing"] is True
     health = client.get("/health").json()
@@ -552,6 +554,21 @@ def test_arm_rejects_nonlocal_origin(tmp_path: Path, monkeypatch: pytest.MonkeyP
         headers={"origin": "https://evil.example"},
     )
     assert response.status_code == 403
+    substring = client.post(
+        "/live-canary/arm",
+        json={"phrase": "ARM LIVE CANARY"},
+        headers={"Origin": "https://localhost.evil.example"},
+    )
+    assert substring.status_code == 403
+    missing = client.post("/live-canary/arm", json={"phrase": "ARM LIVE CANARY"})
+    assert missing.status_code == 403
+    allowed = client.post(
+        "/live-canary/arm",
+        json={"phrase": "nope"},
+        headers=LOCAL_ORIGIN,
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["runtime_armed"] is False
 
 
 def test_default_settings_keep_execution_off() -> None:
@@ -562,3 +579,148 @@ def test_default_settings_keep_execution_off() -> None:
     assert live_runtime_armed() is False
     assert "session_cap_gbp" not in public_canary_status(settings)
     assert "opening_tranche_gbp" not in public_canary_status(settings)
+
+
+class _HttpishTransport(DeterministicExecutionTransport):
+    test_only = False
+
+    def __init__(self, settings: Settings, **_kwargs: object) -> None:
+        super().__init__()
+        self._settings = settings
+
+
+class _FakeMatchbookHttp(_HttpishTransport):
+    transport_kind = "matchbook_http"
+    constructed = 0
+
+    def __init__(self, settings: Settings, **kwargs: object) -> None:
+        type(self).constructed += 1
+        super().__init__(settings, **kwargs)
+
+
+class _FakePolymarketHttp(_HttpishTransport):
+    transport_kind = "polymarket_http"
+    constructed = 0
+
+    def __init__(self, settings: Settings, **kwargs: object) -> None:
+        type(self).constructed += 1
+        super().__init__(settings, **kwargs)
+
+
+def test_health_off_then_arm_provisions_transports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eth_account import Account
+
+    _FakeMatchbookHttp.constructed = 0
+    _FakePolymarketHttp.constructed = 0
+    monkeypatch.setattr(
+        "sports_hedge.execution.composition.MatchbookHttpExecutionTransport",
+        _FakeMatchbookHttp,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.composition.PolymarketHttpExecutionTransport",
+        _FakePolymarketHttp,
+    )
+    key = tmp_path / "pm.key"
+    key.write_text(Account.create().key.hex(), encoding="utf-8")
+    settings = _canary_settings(
+        tmp_path,
+        matchbook_username="user",
+        matchbook_password="secret",
+        polymarket_private_key_path=str(key),
+        polymarket_signature_type=0,
+    )
+    monkeypatch.setattr("sports_hedge.api.live_canary.get_settings", lambda: settings)
+    monkeypatch.setattr("sports_hedge.api.main.get_settings", lambda: settings)
+    set_live_canary_trading_facts(PERMITTED)
+    client = TestClient(app)
+    health = client.get("/health").json()
+    assert health["live_canary"]["runtime_armed"] is False
+    runtime = get_execution_runtime()
+    assert runtime.matchbook is None
+    assert runtime.polymarket is None
+    assert _FakeMatchbookHttp.constructed == 0
+    assert _FakePolymarketHttp.constructed == 0
+    armed = client.post(
+        "/live-canary/arm",
+        json={"phrase": "ARM LIVE CANARY"},
+        headers=LOCAL_ORIGIN,
+    ).json()
+    assert armed["runtime_armed"] is True
+    runtime = get_execution_runtime()
+    assert runtime.explicit is False
+    assert isinstance(runtime.matchbook, MatchbookExecutionClient)
+    assert isinstance(runtime.polymarket, PolymarketExecutionClient)
+    assert runtime.matchbook._transport.transport_kind == "matchbook_http"
+    assert runtime.polymarket._transport.transport_kind == "polymarket_http"
+    assert _FakeMatchbookHttp.constructed == 1
+    assert _FakePolymarketHttp.constructed == 1
+    first = _plan("watch:first", stake="1.50")
+    ops = PaperOperationsService(
+        watchlist=WatchlistService(SqliteWatchlistRepository()),
+        settings=settings,
+        ledger=SqlitePaperLedger(tmp_path / "prov.sqlite"),
+    )
+    _register(ops, first)
+    ops.capture_opening_fill(first.opportunity_id, now=NOW)
+    assert len(runtime.matchbook._transport.calls) == 1
+    second = _plan(
+        "watch:second",
+        stake="1.50",
+        snapshot=_snapshot(stake="1.50", snapshot_id="exec:second"),
+        canonical_event_id="evt-2",
+    )
+    _register(ops, second)
+    ops.capture_opening_fill(second.opportunity_id, now=NOW)
+    assert len(runtime.matchbook._transport.calls) == 2
+    client.post("/live-canary/disarm", headers=LOCAL_ORIGIN)
+    assert live_runtime_armed() is False
+    assert get_execution_runtime().matchbook is None
+    assert get_execution_runtime().polymarket is None
+    before = _FakeMatchbookHttp.constructed
+    try:
+        ops.capture_opening_fill(first.opportunity_id, now=NOW)
+    except PaperOperationsError:
+        pass
+    assert _FakeMatchbookHttp.constructed == before
+    reset_live_canary_runtime()
+    assert live_runtime_armed() is False
+    assert get_execution_runtime().matchbook is None
+
+
+def test_stale_collected_facts_are_not_evergreen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stale = LiveCanaryTradingFacts(
+        polymarket_geoblock_permitted=True,
+        polymarket_geoblock_reason="geoblock_permitted",
+        polymarket_credentials_present=True,
+        polymarket_wallet_valid=True,
+        polymarket_balance_readable=True,
+        polymarket_trading_ready=True,
+        matchbook_credentials_present=True,
+        matchbook_authenticated=True,
+        matchbook_free_funds_positive=True,
+        collected_at=NOW - timedelta(minutes=10),
+        injected=False,
+    )
+    refreshed = LiveCanaryTradingFacts(
+        polymarket_geoblock_permitted=False,
+        polymarket_geoblock_reason="geoblock_blocked",
+        collected_at=NOW,
+        injected=False,
+    )
+
+    async def _collect(_settings: Settings) -> LiveCanaryTradingFacts:
+        return refreshed
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.live_canary.collect_live_canary_facts",
+        _collect,
+    )
+    settings = _canary_settings(tmp_path)
+    set_live_canary_trading_facts(stale)
+    set_live_runtime_arm(True)
+    runtime, mb, _pm = _runtime()
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "stale.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []

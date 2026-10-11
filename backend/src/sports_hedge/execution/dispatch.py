@@ -204,12 +204,12 @@ def refusal_reason(
         return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
     from sports_hedge.execution.live_canary import (
         live_canary_enabled,
-        live_canary_trading_facts,
+        resolve_trading_facts,
         trading_permission_reasons,
     )
 
     if live_canary_enabled(settings):
-        permission = trading_permission_reasons(settings, live_canary_trading_facts())
+        permission = trading_permission_reasons(settings, resolve_trading_facts(settings))
         if permission:
             return permission[0]
     return None
