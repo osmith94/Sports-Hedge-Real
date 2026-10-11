@@ -44,7 +44,6 @@ from test_wave39_matchbook_tail_refresh import (
 )
 from test_wave40_live_canary import (
     LOCAL_ORIGIN,
-    PERMITTED,
     _arm,
     _canary_settings,
     _ops,
