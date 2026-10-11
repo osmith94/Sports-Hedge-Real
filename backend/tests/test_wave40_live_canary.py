@@ -36,6 +36,7 @@ from sports_hedge.execution.live_canary import (
     inspect_durable_unresolved_live_orders,
     live_runtime_armed,
     public_canary_status,
+    prime_live_submit_facts,
     reset_live_canary_runtime,
     set_live_canary_trading_facts,
     set_live_runtime_arm,
@@ -397,6 +398,97 @@ def test_unknown_ack_blocks_retry_after_restart(tmp_path: Path) -> None:
     restarted = _ops(settings, runtime, SqlitePaperLedger(ledger_path), _plan())
     restarted.capture_opening_fill("watch:mkt-canary", now=NOW)
     assert len(mb.calls) == first
+
+
+def test_live_pre_submit_refusal_is_durable_and_names_the_exact_gate(tmp_path: Path) -> None:
+    """The 17:17 accepted-Price-2/no-attempt gap must not recur silently."""
+    settings = _canary_settings(tmp_path)
+    runtime, mb, pm = _runtime()
+    _arm(settings)
+    set_live_canary_trading_facts(
+        replace(PERMITTED, polymarket_geoblock_permitted=False,
+                polymarket_geoblock_reason="geoblock_blocked")
+    )
+    ledger = SqlitePaperLedger(tmp_path / "pre-submit-denied.sqlite")
+    ops = _ops(settings, runtime, ledger, _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+
+    assert mb.calls == []
+    assert pm.calls == []
+    assert ledger.live_attempts.list_all() == []
+    events = ops.watchlist.activity(limit=20, opportunity_id="watch:mkt-canary")
+    refused = [item for item in events if item.event_type.value == "paper_fill_rejected"]
+    assert refused
+    assert "live_pre_submit:geoblock_blocked" in refused[0].detail
+    assert not ops.list_active_trades()
+
+
+def test_live_price2_expiry_records_reason_not_silent_return(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    _arm(settings)
+    runtime, mb, pm = _runtime()
+    frozen = _snapshot(stake="1.50", evaluated_at="2026-10-10T12:00:00+00:00")
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "stale-submit.sqlite"),
+               _plan(snapshot=frozen))
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+
+    assert mb.calls == [] and pm.calls == []
+    events = ops.watchlist.activity(limit=20, opportunity_id="watch:mkt-canary")
+    assert any(
+        item.event_type.value == "paper_fill_rejected"
+        and "live_pre_submit:live_submit_quote_age_elapsed" in item.detail
+        for item in events
+    )
+
+
+def test_live_dispatch_never_repeats_remote_preflight_after_price2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _canary_settings(tmp_path)
+    _arm(settings)
+    runtime, mb, pm = _runtime()
+    def unexpected_preflight(*_args: object, **_kwargs: object):
+        raise AssertionError("remote account read after fresh Price-2")
+    monkeypatch.setattr(
+        "sports_hedge.execution.live_canary.resolve_trading_facts",
+        unexpected_preflight,
+    )
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "one-read.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert len(mb.calls) == 1
+    assert len(pm.calls) == 1
+
+
+def test_readiness_collected_once_before_price2_and_denial_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _canary_settings(tmp_path)
+    set_live_runtime_arm(True)
+    calls = {"count": 0}
+
+    async def collect(_settings: Settings) -> LiveCanaryTradingFacts:
+        calls["count"] += 1
+        return replace(PERMITTED, injected=False, collected_at=datetime.now(UTC))
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.live_canary.collect_live_canary_facts", collect
+    )
+    assert prime_live_submit_facts(settings) is not None
+    assert prime_live_submit_facts(settings) is not None
+    assert calls["count"] == 1
+
+    reset_live_canary_runtime()
+    set_live_runtime_arm(True)
+
+    async def inaccessible(_settings: Settings) -> LiveCanaryTradingFacts:
+        raise ConnectionError("account response timed out")
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.live_canary.collect_live_canary_facts", inaccessible
+    )
+    failed = prime_live_submit_facts(settings)
+    assert failed is not None and not failed.polymarket_geoblock_permitted
+    assert "canary_preflight_unavailable" in trading_permission_reasons(settings, failed)
 
 
 def test_geoblock_and_missing_allowance_and_min_order(tmp_path: Path) -> None:
