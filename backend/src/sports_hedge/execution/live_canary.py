@@ -12,6 +12,7 @@ import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_UP, Decimal, InvalidOperation
+from logging import getLogger
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,8 @@ _OPERATOR_REASON_EXPLANATIONS: dict[str, str] = {
 }
 
 _lock = threading.Lock()
+_readiness_refresh_lock = threading.Lock()
+LOGGER = getLogger("sports_hedge.execution.live_canary")
 _FACTS: LiveCanaryTradingFacts | None = None
 _RUNTIME_ARMED = False
 _NEW_ORDERS_HALTED = False
@@ -511,6 +514,41 @@ def resolve_trading_facts(settings: Settings) -> LiveCanaryTradingFacts | None:
     return collected
 
 
+def current_trading_facts() -> LiveCanaryTradingFacts | None:
+    """Read current, already-collected venue facts without network I/O.
+
+    A stale/absent snapshot never silently becomes permission to trade.
+    """
+    return _FACTS if trading_facts_are_current(_FACTS) else None
+
+
+def prime_live_submit_facts(settings: Settings) -> LiveCanaryTradingFacts | None:
+    """Collect current-IP/account evidence BEFORE the fresh Price-2 quote.
+
+    Multiple candidate captures share the same 30-second evidence and only one
+    thread performs remote reads at once. Dispatch itself uses *only* current
+    evidence: it never consumes the quote's two-second life with a venue probe.
+    """
+    from sports_hedge.execution.package import execution_armed
+
+    if not execution_armed(settings) or not live_canary_enabled(settings):
+        return None
+    with _readiness_refresh_lock:
+        current = current_trading_facts()
+        if current is not None:
+            return current
+        try:
+            collected = resolve_trading_facts(settings)
+        except Exception:  # noqa: BLE001 — remote reads must fail closed
+            LOGGER.exception("live venue readiness refresh failed before Price-2")
+            collected = LiveCanaryTradingFacts(
+                polymarket_geoblock_reason="canary_preflight_unavailable",
+                collected_at=datetime.now(UTC),
+            )
+            set_live_canary_trading_facts(collected)
+        return collected
+
+
 def canary_submit_refusal(
     plan: PaperFillPlan,
     *,
@@ -518,7 +556,7 @@ def canary_submit_refusal(
     tranche_id: str | None = None,
     facts: LiveCanaryTradingFacts | None = None,
 ) -> str | None:
-    """Refuse a live submit that the runtime-arm path must still block.
+    """Refuse a live submit based on current venue evidence and frozen Price-2.
 
     ``live_execution_ready`` is intentionally ignored.
     """
