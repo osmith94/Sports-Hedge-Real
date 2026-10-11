@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import type { StreamStatus } from "./api";
 import {
+  STREAM_LIVE_LABEL,
   STREAM_SHADOW_LABEL,
+  streamExecutionLabel,
   formatStreamDuration,
   isStreamOff,
   streamCandidateSummary,
@@ -81,6 +83,10 @@ describe("stream-status-display", () => {
     expect(streamFixtureName(live)).toBe("Arsenal v Chelsea");
     expect(streamCandidateSummary(live)).toMatch(/Price-2/i);
     expect(STREAM_SHADOW_LABEL).toBe("EXECUTION OFF");
+    expect(STREAM_LIVE_LABEL).toBe("EXECUTION ON");
+    expect(streamExecutionLabel(false)).toBe("EXECUTION OFF");
+    expect(streamExecutionLabel(undefined)).toBe("EXECUTION OFF");
+    expect(streamExecutionLabel(true)).toBe("EXECUTION ON");
   });
 
   it("paused cached rows are not current", () => {

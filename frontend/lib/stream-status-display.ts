@@ -6,6 +6,11 @@ export const STREAM_COPY =
   "One pinned fixture. Populated Polymarket books plus coalesced Matchbook exact-ID depth feed existing Price-2. Execution stays off unless separately armed.";
 export const STREAM_EMPTY = "No fixture selected. STREAM stays off until Send to STREAM.";
 export const STREAM_SHADOW_LABEL = "EXECUTION OFF";
+export const STREAM_LIVE_LABEL = "EXECUTION ON";
+
+export function streamExecutionLabel(enabled: boolean | undefined): string {
+  return enabled === true ? STREAM_LIVE_LABEL : STREAM_SHADOW_LABEL;
+}
 export const SEND_TO_STREAM_LABEL = "Send to STREAM";
 export const STREAM_HELP =
   "Data validity is book completeness and freshness. Economics is net-edge after fees and FX. Price-2 accepted is not a fill. Paper fills are simulated. Venue orders require real mode and SPORTS_HEDGE_EXECUTION_ENABLED.";

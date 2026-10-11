@@ -44,8 +44,9 @@ class LiveCanaryTradingFacts:
     matchbook_credentials_present: bool = False
     matchbook_authenticated: bool = False
     matchbook_free_funds_positive: bool = False
-    matchbook_currency_compatible: bool | None = True
+    matchbook_currency_compatible: bool | None = None
     outstanding_unknown_orders: bool = False
+    orphan_inspection_failed: bool = False
     fee_fx_known: bool = False
     collected_at: datetime | None = None
     injected: bool = False
@@ -322,6 +323,52 @@ def _fx_rate(payload: dict[str, Any], currency: str) -> Decimal | None:
     return None
 
 
+_UNKNOWN_OUTCOMES = frozenset({"", "UNKNOWN", "unknown"})
+
+
+def unresolved_live_orders_from_durable(
+    attempts: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+) -> bool:
+    """True when durable attempt/journal evidence is unresolved, partial, or unknown.
+
+    Reconstructed fully-known Active Trades do not block new independent packages.
+    The in-memory orphan report is only a cache of this inspect.
+    """
+
+    for report in reports:
+        classification = str(report.get("classification") or "")
+        if classification != "reconstructed_active":
+            return True
+        if report.get("live_fill_unknown") is True:
+            return True
+    for attempt in attempts:
+        status = str(attempt.get("status") or "")
+        if status != "completed":
+            return True
+        outcome = attempt.get("outcome")
+        if outcome is None or str(outcome) in _UNKNOWN_OUTCOMES:
+            return True
+    return False
+
+
+def inspect_durable_unresolved_live_orders() -> tuple[bool, bool]:
+    """Read the durable live-attempt store. Fail closed if inspection cannot run.
+
+    Returns ``(outstanding_unresolved, inspection_failed)``.
+    """
+
+    try:
+        from sports_hedge.api.paper import get_paper_journal_holder
+
+        holder = get_paper_journal_holder()
+        reports = holder.inspect_orphaned_live_executions()
+        attempts = holder._live_attempt_store().list_all()
+        return unresolved_live_orders_from_durable(attempts, reports), False
+    except Exception:
+        return True, True
+
+
 def trading_permission_reasons(
     settings: Settings,
     facts: LiveCanaryTradingFacts | None,
@@ -363,8 +410,14 @@ def trading_permission_reasons(
         reasons.append("matchbook_unauthenticated")
     if not facts.matchbook_free_funds_positive:
         reasons.append("matchbook_free_funds")
-    if facts.matchbook_currency_compatible is False:
-        reasons.append("matchbook_currency_mismatch")
+    if facts.matchbook_currency_compatible is not True:
+        reasons.append(
+            "matchbook_currency_mismatch"
+            if facts.matchbook_currency_compatible is False
+            else "matchbook_currency_unknown"
+        )
+    if facts.orphan_inspection_failed:
+        reasons.append("orphan_inspection_failed")
     if facts.outstanding_unknown_orders:
         reasons.append("outstanding_unknown_orders")
     return reasons
@@ -382,13 +435,7 @@ async def collect_live_canary_facts(settings: Settings) -> LiveCanaryTradingFact
     permitted = bool(getattr(eligibility, "permitted", False))
     geo_reason = str(getattr(eligibility, "reason", "geoblock_not_checked") or "geoblock_not_checked")
     allowance_reason = polymarket.get("trading_readiness_reason")
-    outstanding = False
-    try:
-        from sports_hedge.execution.orphans import orphaned_live_executions
-
-        outstanding = bool(orphaned_live_executions())
-    except Exception:
-        outstanding = False
+    outstanding, inspection_failed = inspect_durable_unresolved_live_orders()
     return LiveCanaryTradingFacts(
         polymarket_geoblock_permitted=permitted,
         polymarket_geoblock_reason=geo_reason,
@@ -404,6 +451,7 @@ async def collect_live_canary_facts(settings: Settings) -> LiveCanaryTradingFact
         matchbook_free_funds_positive=bool(matchbook.get("balance_positive")),
         matchbook_currency_compatible=matchbook.get("currency_compatible"),
         outstanding_unknown_orders=outstanding,
+        orphan_inspection_failed=inspection_failed,
         fee_fx_known=False,
         collected_at=datetime.now(UTC),
         injected=False,

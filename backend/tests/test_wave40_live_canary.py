@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -30,12 +31,16 @@ from sports_hedge.execution.clients import (
 from sports_hedge.execution.live_canary import (
     LiveCanaryTradingFacts,
     arm_live_runtime,
+    canary_submit_refusal,
     disarm_live_runtime,
+    inspect_durable_unresolved_live_orders,
     live_runtime_armed,
     public_canary_status,
     reset_live_canary_runtime,
     set_live_canary_trading_facts,
     set_live_runtime_arm,
+    trading_permission_reasons,
+    unresolved_live_orders_from_durable,
 )
 from sports_hedge.execution.package import execution_capability, execution_armed
 from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime, set_execution_runtime
@@ -724,3 +729,82 @@ def test_stale_collected_facts_are_not_evergreen(tmp_path: Path, monkeypatch: py
     ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "stale.sqlite"), _plan())
     ops.capture_opening_fill("watch:mkt-canary", now=NOW)
     assert mb.calls == []
+
+
+def test_unknown_matchbook_currency_denies_before_submit(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    unknown = LiveCanaryTradingFacts(
+        polymarket_geoblock_permitted=True,
+        polymarket_geoblock_reason="geoblock_permitted",
+        polymarket_credentials_present=True,
+        polymarket_wallet_valid=True,
+        polymarket_balance_readable=True,
+        polymarket_trading_ready=True,
+        matchbook_credentials_present=True,
+        matchbook_authenticated=True,
+        matchbook_free_funds_positive=True,
+        matchbook_currency_compatible=None,
+        injected=True,
+    )
+    set_live_canary_trading_facts(unknown)
+    set_live_runtime_arm(True)
+    reasons = trading_permission_reasons(settings, unknown)
+    assert "matchbook_currency_unknown" in reasons
+    assert canary_submit_refusal(_plan(), settings=settings, facts=unknown) == "matchbook_currency_unknown"
+    runtime, mb, _pm = _runtime()
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "cur.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []
+    set_live_canary_trading_facts(PERMITTED)
+    reasons_ok = trading_permission_reasons(settings, PERMITTED)
+    assert "matchbook_currency_unknown" not in reasons_ok
+    assert "matchbook_currency_mismatch" not in reasons_ok
+
+
+def test_orphan_inspection_exception_denies(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    failed = replace(PERMITTED, orphan_inspection_failed=True, outstanding_unknown_orders=True)
+    set_live_canary_trading_facts(failed)
+    set_live_runtime_arm(True)
+    reasons = trading_permission_reasons(settings, failed)
+    assert "orphan_inspection_failed" in reasons
+    assert "outstanding_unknown_orders" in reasons
+    runtime, mb, _pm = _runtime()
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "orph.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []
+
+
+def test_durable_unresolved_attempt_blocks_and_inspect_error_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reserved = {"status": "reserved", "outcome": None, "package_id": "pkg-reserved"}
+    completed_unknown = {"status": "completed", "outcome": "UNKNOWN", "package_id": "pkg-unknown"}
+    reconstructed = {"status": "completed", "outcome": "FULLY_FILLED", "package_id": "pkg-ok"}
+    assert unresolved_live_orders_from_durable([reserved], []) is True
+    assert unresolved_live_orders_from_durable([completed_unknown], []) is True
+    assert (
+        unresolved_live_orders_from_durable(
+            [reconstructed],
+            [{"classification": "reconstructed_active", "live_fill_unknown": False}],
+        )
+        is False
+    )
+    assert (
+        unresolved_live_orders_from_durable(
+            [reconstructed],
+            [{"classification": "orphaned_unresolved", "reason": "fill_quantity_unknown"}],
+        )
+        is True
+    )
+
+    def _raise_holder() -> object:
+        raise RuntimeError("durable reader down")
+
+    monkeypatch.setattr(
+        "sports_hedge.api.paper.get_paper_journal_holder",
+        _raise_holder,
+    )
+    outstanding, failed = inspect_durable_unresolved_live_orders()
+    assert failed is True
+    assert outstanding is True

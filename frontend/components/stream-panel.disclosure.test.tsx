@@ -185,5 +185,12 @@ describe("stream-panel compact card", () => {
     assert.match(html, /accepted/);
     assert.doesNotMatch(html, />paper fill</);
     assert.match(html, /no persisted paper fill/i);
+    assert.match(html, /EXECUTION OFF/);
+  });
+
+  it("uses backend execution_enabled for the LIVE indicator", () => {
+    const html = render({ ...idle, execution_enabled: true, connection_status: "subscribed" });
+    assert.match(html, /EXECUTION ON/);
+    assert.doesNotMatch(html, /EXECUTION OFF/);
   });
 });

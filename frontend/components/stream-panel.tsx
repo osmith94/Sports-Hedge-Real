@@ -6,7 +6,7 @@ import { StreamStatus, getStreamStatus, pauseStream, removeStreamFixture, resume
 import {
   STREAM_HEADING,
   STREAM_HELP,
-  STREAM_SHADOW_LABEL,
+  streamExecutionLabel,
   formatStreamDuration,
   streamCandidateSummary,
   streamDataLabel,
@@ -40,7 +40,7 @@ export function StreamPanelView({
   const tone = streamStatusTone(status);
   const ribbon = streamRibbon(status);
   const candidates = status?.candidates ?? [];
-  const executionOff = status?.execution_enabled !== true;
+  const executionEnabled = status?.execution_enabled === true;
 
   return (
     <section className="panel stream-panel">
@@ -54,9 +54,15 @@ export function StreamPanelView({
           <span className={tone === "ok" ? "status-badge" : `status-badge status-badge-${tone}`}>
             {streamStatusLabel(status)}
           </span>
-          {executionOff ? (
-            <span className="status-badge status-badge-warn stream-execution-off">{STREAM_SHADOW_LABEL}</span>
-          ) : null}
+          <span
+            className={
+              executionEnabled
+                ? "status-badge stream-execution-on"
+                : "status-badge status-badge-warn stream-execution-off"
+            }
+          >
+            {streamExecutionLabel(status?.execution_enabled)}
+          </span>
         </div>
         <div className="stream-actions">
           <button type="button" disabled={busy || !selected || Boolean(status?.paused)} onClick={onPause}>
