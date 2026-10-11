@@ -524,7 +524,7 @@ def polymarket_native_order(
         )
     raise TranslationError(
         "Polymarket execution only maps back to buy and lay to sell",
-        code="native_order_translation_other",
+        code="unsupported_native_side",
     )
 
 
