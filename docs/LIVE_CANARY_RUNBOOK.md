@@ -20,6 +20,8 @@ If native minima make a candidate infeasible under those caps, that opportunity 
 
 Server **restarts always OFF**. Open/unknown/orphan ledger state persists so the same package is not blindly retried.
 
+Unresolved/partial/unknown live orders are read from the **durable** `live_execution_attempts` table in `paper_ledger.sqlite` (`Settings.paper_ledger_db_path`). The in-memory orphan report is empty after restart and is not proof that none exist. If that journal cannot be inspected, new submits are refused. Per-package attempt rows still block duplicate POSTs of the same package; this is not a session trade-count cap. Matchbook live submits require **affirmative** currency compatibility (`True`); missing/unknown is not permission.
+
 ## Toggle ON
 
 1. Integrate Wave 38 (#42) and Wave 39 (#43) before using live Price-2.

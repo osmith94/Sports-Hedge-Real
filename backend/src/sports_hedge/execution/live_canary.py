@@ -44,8 +44,9 @@ class LiveCanaryTradingFacts:
     matchbook_credentials_present: bool = False
     matchbook_authenticated: bool = False
     matchbook_free_funds_positive: bool = False
-    matchbook_currency_compatible: bool | None = True
+    matchbook_currency_compatible: bool | None = None
     outstanding_unknown_orders: bool = False
+    unresolved_attempts_readable: bool = True
     fee_fx_known: bool = False
     collected_at: datetime | None = None
     injected: bool = False
@@ -322,6 +323,91 @@ def _fx_rate(payload: dict[str, Any], currency: str) -> Decimal | None:
     return None
 
 
+def inspect_unresolved_live_attempts(settings: Settings) -> tuple[bool, bool]:
+    """Read durable ``live_execution_attempts`` plus the in-memory orphan report.
+
+    Returns ``(readable, unresolved)``. A missing ledger file is readable with
+    no unresolved rows. Any inspect error is not-ready: ``(False, True)``.
+    Source of truth after restart is the paper ledger SQLite table, not the
+    in-memory orphan report (which starts empty). Per-package attempt
+    idempotency is unchanged.
+    """
+
+    try:
+        durable_readable, durable_unresolved = _inspect_durable_attempt_store(settings)
+    except Exception:
+        return False, True
+    try:
+        from sports_hedge.execution.orphans import orphaned_live_executions
+
+        memory_orphans = bool(orphaned_live_executions())
+    except Exception:
+        return False, True
+    if not durable_readable:
+        return False, True
+    return True, bool(durable_unresolved or memory_orphans)
+
+
+def _inspect_durable_attempt_store(settings: Settings) -> tuple[bool, bool]:
+    import sqlite3
+
+    configured = (settings.paper_ledger_db_path or "").strip()
+    if not configured:
+        return False, True
+    path = Path(configured)
+    if not path.exists():
+        return True, False
+    try:
+        connection = sqlite3.connect(str(path), timeout=5.0)
+    except Exception:
+        return False, True
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT * FROM live_execution_attempts ORDER BY created_at, package_id"
+        ).fetchall()
+        attempts = [dict(zip(row.keys(), tuple(row), strict=True)) for row in rows]
+        unresolved = any(_attempt_is_unresolved(item) for item in attempts)
+    except Exception:
+        return False, True
+    finally:
+        connection.close()
+    return True, unresolved
+
+
+def _attempt_is_unresolved(attempt: dict[str, Any]) -> bool:
+    from sports_hedge.execution.orphans import derived_outcome, fills_are_known, parse_orders
+
+    if str(attempt.get("status") or "") != "completed":
+        return True
+    orders = parse_orders(attempt.get("orders_json"))
+    if orders is None or not fills_are_known(orders):
+        return True
+    stored = str(attempt.get("outcome") or "").strip().upper()
+    outcome = stored or (derived_outcome(orders) or "")
+    if outcome in {"", "UNKNOWN", "PARTIAL"}:
+        return True
+    return False
+
+
+def _with_current_unresolved_attempts(
+    facts: LiveCanaryTradingFacts | None,
+    settings: Settings,
+) -> LiveCanaryTradingFacts | None:
+    """Re-read the durable attempt journal before a live submit. Local SQLite only."""
+
+    if facts is None:
+        return None
+    readable, unresolved = inspect_unresolved_live_attempts(settings)
+    return replace(
+        facts,
+        unresolved_attempts_readable=readable,
+        outstanding_unknown_orders=bool(
+            facts.outstanding_unknown_orders or unresolved or not readable
+        ),
+    )
+
+
 def trading_permission_reasons(
     settings: Settings,
     facts: LiveCanaryTradingFacts | None,
@@ -363,8 +449,14 @@ def trading_permission_reasons(
         reasons.append("matchbook_unauthenticated")
     if not facts.matchbook_free_funds_positive:
         reasons.append("matchbook_free_funds")
-    if facts.matchbook_currency_compatible is False:
-        reasons.append("matchbook_currency_mismatch")
+    if facts.matchbook_currency_compatible is not True:
+        reasons.append(
+            "matchbook_currency_unknown"
+            if facts.matchbook_currency_compatible is None
+            else "matchbook_currency_mismatch"
+        )
+    if facts.unresolved_attempts_readable is False:
+        reasons.append("unresolved_attempts_unreadable")
     if facts.outstanding_unknown_orders:
         reasons.append("outstanding_unknown_orders")
     return reasons
@@ -382,13 +474,10 @@ async def collect_live_canary_facts(settings: Settings) -> LiveCanaryTradingFact
     permitted = bool(getattr(eligibility, "permitted", False))
     geo_reason = str(getattr(eligibility, "reason", "geoblock_not_checked") or "geoblock_not_checked")
     allowance_reason = polymarket.get("trading_readiness_reason")
-    outstanding = False
-    try:
-        from sports_hedge.execution.orphans import orphaned_live_executions
-
-        outstanding = bool(orphaned_live_executions())
-    except Exception:
-        outstanding = False
+    readable, unresolved = inspect_unresolved_live_attempts(settings)
+    currency_compatible = matchbook.get("currency_compatible")
+    if currency_compatible is not True and currency_compatible is not False:
+        currency_compatible = None
     return LiveCanaryTradingFacts(
         polymarket_geoblock_permitted=permitted,
         polymarket_geoblock_reason=geo_reason,
@@ -402,8 +491,9 @@ async def collect_live_canary_facts(settings: Settings) -> LiveCanaryTradingFact
         ),
         matchbook_authenticated=bool(matchbook.get("authenticated_read")),
         matchbook_free_funds_positive=bool(matchbook.get("balance_positive")),
-        matchbook_currency_compatible=matchbook.get("currency_compatible"),
-        outstanding_unknown_orders=outstanding,
+        matchbook_currency_compatible=currency_compatible,
+        outstanding_unknown_orders=unresolved or not readable,
+        unresolved_attempts_readable=readable,
         fee_fx_known=False,
         collected_at=datetime.now(UTC),
         injected=False,
@@ -455,6 +545,7 @@ def canary_submit_refusal(
     resolved = facts if facts is not None else resolve_trading_facts(settings)
     if resolved is not None and not trading_facts_are_current(resolved) and facts is not None:
         resolved = resolve_trading_facts(settings)
+    resolved = _with_current_unresolved_attempts(resolved, settings)
     reasons = trading_permission_reasons(settings, resolved)
     if reasons:
         return reasons[0]

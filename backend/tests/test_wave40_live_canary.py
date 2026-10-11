@@ -30,12 +30,16 @@ from sports_hedge.execution.clients import (
 from sports_hedge.execution.live_canary import (
     LiveCanaryTradingFacts,
     arm_live_runtime,
+    collect_live_canary_facts,
     disarm_live_runtime,
+    inspect_unresolved_live_attempts,
+    live_canary_trading_facts,
     live_runtime_armed,
     public_canary_status,
     reset_live_canary_runtime,
     set_live_canary_trading_facts,
     set_live_runtime_arm,
+    trading_permission_reasons,
 )
 from sports_hedge.execution.package import execution_capability, execution_armed
 from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runtime, set_execution_runtime
@@ -61,6 +65,8 @@ PERMITTED = LiveCanaryTradingFacts(
     matchbook_authenticated=True,
     matchbook_free_funds_positive=True,
     matchbook_currency_compatible=True,
+    outstanding_unknown_orders=False,
+    unresolved_attempts_readable=True,
     injected=True,
 )
 
@@ -90,6 +96,7 @@ def _canary_settings(tmp_path: Path, **overrides: object) -> Settings:
         "max_opportunity_gbp": 7,
         "max_one_time_gbp": 5,
         "paper_settings_db_path": str(tmp_path / "operator.sqlite"),
+        "paper_ledger_db_path": str(tmp_path / "paper_ledger.sqlite"),
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
@@ -521,6 +528,7 @@ async def test_runtime_arm_without_startup_execution_flag(tmp_path: Path) -> Non
         max_event_gbp=7,
         max_opportunity_gbp=7,
         max_one_time_gbp=5,
+        paper_ledger_db_path=str(tmp_path / "paper_ledger.sqlite"),
     )
     assert execution_armed(settings) is False
     assert live_runtime_armed() is False
@@ -724,3 +732,175 @@ def test_stale_collected_facts_are_not_evergreen(tmp_path: Path, monkeypatch: py
     ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "stale.sqlite"), _plan())
     ops.capture_opening_fill("watch:mkt-canary", now=NOW)
     assert mb.calls == []
+
+
+def test_unknown_matchbook_currency_refuses_before_native_order(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    set_live_canary_trading_facts(
+        LiveCanaryTradingFacts(
+            **{**PERMITTED.__dict__, "matchbook_currency_compatible": None}
+        )
+    )
+    set_live_runtime_arm(True)
+    runtime, mb, pm = _runtime()
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "cur.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []
+    assert pm.calls == []
+    assert "matchbook_currency_unknown" in trading_permission_reasons(
+        settings, live_canary_trading_facts()
+    )
+    set_live_canary_trading_facts(PERMITTED)
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls and pm.calls
+
+
+def test_mismatch_matchbook_currency_refuses_before_native_order(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    set_live_canary_trading_facts(
+        LiveCanaryTradingFacts(
+            **{**PERMITTED.__dict__, "matchbook_currency_compatible": False}
+        )
+    )
+    set_live_runtime_arm(True)
+    runtime, mb, pm = _runtime()
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "mis.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []
+    assert pm.calls == []
+    assert "matchbook_currency_mismatch" in trading_permission_reasons(
+        settings, live_canary_trading_facts()
+    )
+
+
+def test_durable_reserved_attempt_blocks_after_simulated_restart(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    ledger_path = Path(settings.paper_ledger_db_path)
+    first = SqlitePaperLedger(ledger_path)
+    assert first.live_attempts.reserve(
+        {
+            "package_id": "watch:prior:opening",
+            "trade_id": "paper:watch:prior",
+            "tranche_id": "opening",
+            "opportunity_id": "watch:prior",
+            "created_at": NOW,
+        }
+    )
+    reset_live_canary_runtime()
+    _arm(settings)
+    runtime, mb, pm = _runtime()
+    restarted = _ops(settings, runtime, SqlitePaperLedger(ledger_path), _plan())
+    restarted.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []
+    assert pm.calls == []
+    readable, unresolved = inspect_unresolved_live_attempts(settings)
+    assert readable is True
+    assert unresolved is True
+    first.live_attempts.complete(
+        "watch:prior:opening",
+        outcome="FULLY_FILLED",
+        detail="reconciled",
+        orders=[
+            {
+                "venue": "matchbook",
+                "filled_size": "1.50",
+                "requested_size": "1.50",
+                "venue_status": "filled",
+            },
+            {
+                "venue": "polymarket",
+                "filled_size": "1.50",
+                "requested_size": "1.50",
+                "venue_status": "filled",
+            },
+        ],
+        updated_at=NOW,
+    )
+    readable, unresolved = inspect_unresolved_live_attempts(settings)
+    assert readable is True
+    assert unresolved is False
+    restarted.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls and pm.calls
+
+
+def test_unreadable_attempt_journal_refuses_new_orders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _canary_settings(tmp_path)
+    _arm(settings)
+
+    def _boom(_settings: Settings) -> tuple[bool, bool]:
+        raise RuntimeError("attempt journal unreadable")
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.live_canary._inspect_durable_attempt_store",
+        _boom,
+    )
+    runtime, mb, pm = _runtime()
+    ops = _ops(
+        settings, runtime, SqlitePaperLedger(tmp_path / "unreadable.sqlite"), _plan()
+    )
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []
+    assert pm.calls == []
+    readable, unresolved = inspect_unresolved_live_attempts(settings)
+    assert readable is False
+    assert unresolved is True
+
+
+@pytest.mark.asyncio
+async def test_collect_unknown_currency_and_orphan_inspect_error_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _canary_settings(tmp_path)
+
+    async def _matchbook(_settings: Settings) -> dict[str, object]:
+        return {
+            "username_configured": True,
+            "password_configured": True,
+            "authenticated_read": True,
+            "balance_positive": True,
+            "currency_compatible": None,
+        }
+
+    async def _polymarket(_settings: Settings) -> dict[str, object]:
+        class _Eligibility:
+            permitted = True
+            reason = "geoblock_permitted"
+
+        return {
+            "eligibility": _Eligibility(),
+            "private_key_configured": True,
+            "wallet_valid": True,
+            "balance_readable": True,
+            "trading_ready": True,
+        }
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.matchbook_preflight.collect_matchbook_preflight",
+        _matchbook,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.polymarket_preflight.collect_polymarket_preflight",
+        _polymarket,
+    )
+    facts = await collect_live_canary_facts(settings)
+    assert facts.matchbook_currency_compatible is None
+    assert facts.injected is False
+    assert "matchbook_currency_unknown" in trading_permission_reasons(
+        settings, facts, for_arm=True
+    )
+
+    def _raise_orphans() -> list[dict[str, object]]:
+        raise RuntimeError("orphan report failed")
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.orphans.orphaned_live_executions",
+        _raise_orphans,
+    )
+    broken = await collect_live_canary_facts(settings)
+    assert broken.unresolved_attempts_readable is False
+    assert broken.outstanding_unknown_orders is True
+    assert "unresolved_attempts_unreadable" in trading_permission_reasons(
+        settings, broken, for_arm=True
+    )
