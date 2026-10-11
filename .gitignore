@@ -38,3 +38,7 @@ logs/
 data/raw/
 data/snapshots/
 *.tsbuildinfo
+
+# Operator-provided game sound clips remain local (not licensed for source distribution)
+sounds/*.mp3
+sounds/*.MP3
