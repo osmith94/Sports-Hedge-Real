@@ -564,9 +564,10 @@ def canary_submit_refusal(
     del tranche_id
     if not live_canary_enabled(settings):
         return None
-    resolved = facts if facts is not None else resolve_trading_facts(settings)
-    if resolved is not None and not trading_facts_are_current(resolved) and facts is not None:
-        resolved = resolve_trading_facts(settings)
+    # Submission never re-probes venues. An absent or expired pre-Price-2
+    # snapshot refuses the trade; prime it before pricing the next candidate.
+    supplied = facts if facts is not None else current_trading_facts()
+    resolved = supplied if trading_facts_are_current(supplied) else None
     reasons = trading_permission_reasons(settings, resolved)
     if reasons:
         return reasons[0]
