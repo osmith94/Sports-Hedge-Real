@@ -585,8 +585,10 @@ def test_arm_rejects_nonlocal_origin(tmp_path: Path, monkeypatch: pytest.MonkeyP
     )
     allowed = client.post("/live-canary/arm", json={}, headers=LOCAL_ORIGIN)
     assert allowed.status_code == 200
-    assert allowed.json()["runtime_armed"] is False
-    assert live_runtime_armed() is False
+    assert allowed.json()["runtime_armed"] is True
+    assert allowed.json()["trading_permission"] is False
+    assert "geoblock_blocked" in allowed.json()["not_ready_reasons"]
+    assert live_runtime_armed() is True
 
 
 def test_default_settings_keep_execution_off() -> None:
@@ -625,7 +627,7 @@ class _FakePolymarketHttp(_HttpishTransport):
         super().__init__(settings, **kwargs)
 
 
-def test_health_off_then_arm_provisions_transports(
+def test_health_off_then_arm_binds_transports_only_when_needed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from eth_account import Account
@@ -662,13 +664,22 @@ def test_health_off_then_arm_provisions_transports(
     assert _FakePolymarketHttp.constructed == 0
     leftover = client.post(
         "/live-canary/arm",
-        json={"phrase": "ARM LIVE CANARY"},
+        json={},
         headers=LOCAL_ORIGIN,
     )
     assert leftover.status_code == 200
     armed = leftover.json()
     assert armed["runtime_armed"] is True
     runtime = get_execution_runtime()
+    # The ON switch itself must not construct venue transports.
+    assert runtime.matchbook is None
+    assert runtime.polymarket is None
+    assert _FakeMatchbookHttp.constructed == 0
+    assert _FakePolymarketHttp.constructed == 0
+    # The real order path binds transports lazily, after the operator turns ON.
+    from sports_hedge.execution.composition import bind_process_execution_runtime
+
+    bind_process_execution_runtime(settings)
     assert runtime.explicit is False
     assert isinstance(runtime.matchbook, MatchbookExecutionClient)
     assert isinstance(runtime.polymarket, PolymarketExecutionClient)
