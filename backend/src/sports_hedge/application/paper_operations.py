@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -3189,7 +3190,7 @@ class PaperOperationsService:
         try:
             bind_process_execution_runtime(self.settings)
         except Exception:  # noqa: BLE001 — cannot assume clients exist after failed binding
-            LOGGER.exception("real execution transport setup refused before submission")
+            logging.getLogger(__name__).exception("real execution transport setup refused before submission")
             self._record_live_pre_submit_refusal(
                 plan.opportunity_id, "execution_transport_setup_failed"
             )
