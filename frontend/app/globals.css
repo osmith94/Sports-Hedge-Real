@@ -103,6 +103,24 @@ button, input, select { font: inherit; }
 }
 .status-why:hover { border-color: var(--amber); color: var(--text); }
 .clock { font-variant-numeric: tabular-nums; color: var(--muted-2); }
+.execution-toggle-cluster { display: grid; justify-items: end; gap: 4px; min-width: 12rem; }
+.execution-toggle {
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  cursor: pointer;
+}
+.execution-toggle-on {
+  border-color: var(--amber);
+  color: var(--amber);
+  background: rgba(241, 191, 105, 0.12);
+}
+.execution-toggle-error { color: var(--red); font-size: 10px; max-width: 16rem; text-align: right; }
 
 .main { padding: 26px; max-width: 1600px; margin: 0 auto; }
 .page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 22px; }

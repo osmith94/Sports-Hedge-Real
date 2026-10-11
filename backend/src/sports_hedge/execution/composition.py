@@ -27,7 +27,12 @@ from sports_hedge.execution.runtime import ExecutionRuntime, get_execution_runti
 
 
 def bind_process_execution_runtime(settings: Settings) -> ExecutionRuntime:
-    """Configure the process runtime from settings when it is not explicit."""
+    """Configure the process runtime from settings when it is not explicit.
+
+    Runtime arming is part of the cache key. GET /health while OFF must not
+    pin NULL clients across a later operator ON. Unarmed binding never
+    constructs HTTP transports.
+    """
 
     runtime = get_execution_runtime()
     if runtime.explicit:
@@ -54,10 +59,14 @@ def bind_process_execution_runtime(settings: Settings) -> ExecutionRuntime:
 
 
 def _signature(settings: Settings) -> str:
+    from sports_hedge.execution.live_canary import live_runtime_armed, new_orders_halted
+
     material = "\n".join(
         (
             settings.sports_hedge_mode,
             str(settings.sports_hedge_execution_enabled is True),
+            str(live_runtime_armed()),
+            str(new_orders_halted()),
             (settings.matchbook_username or "").strip(),
             settings.matchbook_password or "",
             settings.matchbook_base_url,

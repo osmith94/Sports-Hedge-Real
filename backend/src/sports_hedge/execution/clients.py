@@ -41,12 +41,14 @@ class DeterministicExecutionTransport:
         filled_fraction: Decimal = Decimal(1),
         fail: bool = False,
         delay_seconds: float = 0,
+        unknown_ack: bool = False,
     ) -> None:
         if filled_fraction < 0:
             raise ValueError("filled_fraction must be non-negative")
         self.filled_fraction = filled_fraction
         self.fail = fail
         self.delay_seconds = delay_seconds
+        self.unknown_ack = unknown_ack
         self.calls: list[VenueOrderRequest] = []
 
     async def dispatch(self, request: VenueOrderRequest) -> VenueOrderResult:
@@ -54,6 +56,20 @@ class DeterministicExecutionTransport:
         if self.delay_seconds > 0:
             await asyncio.sleep(self.delay_seconds)
         now = datetime.now(UTC)
+        if self.unknown_ack:
+            return VenueOrderResult(
+                venue=request.venue,
+                client_order_id=request.client_order_id,
+                venue_order_id=None,
+                status=VenueOrderStatus.OPEN,
+                requested_size=request.requested_size,
+                filled_size=None,
+                requested_price=request.requested_price,
+                average_fill_price=None,
+                submitted_at=now,
+                updated_at=now,
+                note="unknown_ack",
+            )
         if self.fail or self.filled_fraction <= 0:
             return VenueOrderResult(
                 venue=request.venue,
