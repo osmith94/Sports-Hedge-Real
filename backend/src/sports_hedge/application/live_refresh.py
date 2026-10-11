@@ -414,6 +414,14 @@ class VenueDegradationIncidentRef(BaseModel):
     incident_id: str
 
 
+def _live_canary_capture_enabled(settings: Any | None = None) -> bool:
+    """Cheap flag. Does not probe venues or treat transport readiness as permission."""
+
+    from sports_hedge.execution.live_canary import live_canary_capture_active
+
+    return live_canary_capture_active(settings or get_settings())
+
+
 class LiveRefreshStatus(BaseModel):
     discovery_source: VenueName = VenueName.MATCHBOOK
     discovery_mode: str = "venue_union"
@@ -423,6 +431,7 @@ class LiveRefreshStatus(BaseModel):
     )
     server_loop_enabled: bool
     paper_autofill_enabled: bool = False
+    live_canary_capture_enabled: bool = False
     paper_auto_unwind_enabled: bool = False
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
@@ -507,6 +516,7 @@ class OperationsHeartbeat(BaseModel):
     )
     server_loop_enabled: bool
     paper_autofill_enabled: bool = False
+    live_canary_capture_enabled: bool = False
     paper_auto_unwind_enabled: bool = False
     scanner_stopped: bool = False
     universe_scans_paused: bool = False
@@ -1112,6 +1122,7 @@ class LiveRefreshCoordinator:
                 update={
                     "server_loop_enabled": resolved.paper_live_refresh_enabled,
                     "paper_autofill_enabled": resolved.paper_autofill_enabled,
+                    "live_canary_capture_enabled": _live_canary_capture_enabled(resolved),
                     "paper_auto_unwind_enabled": resolved.paper_auto_unwind_enabled,
                     "scanner_stopped": operator.scanner_stopped,
                     "universe_scans_paused": operator.universe_scans_paused,
@@ -5012,6 +5023,7 @@ class LiveRefreshCoordinator:
             "matching_venues": ["polymarket", "kalshi"],
             "server_loop_enabled": status.server_loop_enabled,
             "paper_autofill_enabled": status.paper_autofill_enabled,
+            "live_canary_capture_enabled": status.live_canary_capture_enabled,
             "scanner_stopped": status.scanner_stopped,
             "universe_scans_paused": status.universe_scans_paused,
             "hot_pricing_paused": status.hot_pricing_paused,

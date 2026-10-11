@@ -35,6 +35,7 @@ import {
 import { dualScanStatusLines } from "../lib/scan-status-display";
 import { CONFIG_WARNING_BANNER_CLASS } from "../lib/config-warning-display";
 import { useLiveStatus } from "./live-status-provider";
+import { useRuntimeMode } from "./runtime-mode-provider";
 import { venueHealthIsDegraded } from "../lib/venue-health-display";
 import { ActiveTradeLog } from "./active-trade-log";
 import { FootballCompetitionsModal } from "./football-competitions-modal";
@@ -230,6 +231,7 @@ function economicsChips(status: EconomicsStatus | null): StripChip[] {
 
 export function RunPaperScan() {
   const router = useRouter();
+  const runtime = useRuntimeMode();
   const [capitalLimit, setCapitalLimit] = useState("");
   const [minNetArbPercent, setMinNetArbPercent] = useState(DEFAULT_MIN_NET_ARB_PERCENT);
   const [outrightMinNetArbPercent, setOutrightMinNetArbPercent] = useState("");
@@ -771,8 +773,16 @@ export function RunPaperScan() {
           </div>
         </div>
         <div className="heading-actions">
-          <span className="status-badge">PAPER MODE · NO EXECUTION</span>
-          {liveRefresh?.paper_autofill_enabled ? (
+          <span className="status-badge">
+            {runtime.mode === "paper"
+              ? "PAPER MODE · NO EXECUTION"
+              : runtime.clock.includes("EXECUTION ON")
+                ? "REAL MODE · EXECUTION ON"
+                : "REAL MODE · EXECUTION OFF"}
+          </span>
+          {liveRefresh?.live_canary_capture_enabled ? (
+            <span className="status-badge">LIVE EXECUTION ARMED</span>
+          ) : liveRefresh?.paper_autofill_enabled ? (
             <span className="status-badge">AUTO PAPER CAPTURE ON</span>
           ) : null}
         </div>
@@ -1237,7 +1247,12 @@ export function RunPaperScan() {
             {economics?.data_kind ? ` (${economics.data_kind.replaceAll("_", " ")})` : ""}.
             Missing or stale required inputs fail closed. Standing capital is Matchbook GBP /
             Polymarket USD / Kalshi USD. Optional extra capital limit is a scan-only cap, not live funds.
-            Polymarket fees are per-market CLOB metadata, not a global zero. PAPER MODE · no execution.
+            Polymarket fees are per-market CLOB metadata, not a global zero.{" "}
+            {runtime.mode === "paper"
+              ? "PAPER MODE · no execution."
+              : runtime.clock.includes("EXECUTION ON")
+                ? "REAL MODE · EXECUTION ON."
+                : "REAL MODE · EXECUTION OFF."}
           </p>
           <div className="matchbook-fee-editor">
             <label className="scan-field">

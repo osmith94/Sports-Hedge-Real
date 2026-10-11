@@ -469,7 +469,7 @@ def test_status_api_does_not_start_stream_or_place_orders() -> None:
     assert payload["paper_opened"] is False
     assert payload["orders_placed"] is False
     assert payload["diagnostic_reads_fetch_providers"] is False
-    assert payload["phase"] == "wave37_stream_price2"
+    assert payload["phase"] == "wave38_stream_price2"
 
 
 async def _never_fetch(event_id: str, market_id: str) -> dict[str, Any]:

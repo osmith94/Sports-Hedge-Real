@@ -208,7 +208,7 @@ async def test_populated_books_and_coalesced_mb_schedule_existing_price2(monkeyp
     assert calls == ["amc-stream-1"]
     assert status.paper_opened is True
     assert status.orders_placed is False
-    assert status.phase == "wave37_stream_price2"
+    assert status.phase == "wave38_stream_price2"
     await runtime.shutdown()
 
 

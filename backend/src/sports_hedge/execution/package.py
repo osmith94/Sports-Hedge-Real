@@ -35,7 +35,128 @@ from sports_hedge.paper.fills import PaperOpportunityLeg
 
 _SUPPORTED = frozenset({VenueName.MATCHBOOK, VenueName.KALSHI, VenueName.POLYMARKET})
 LIVE_EXECUTION_TRANSPORT_UNAVAILABLE = "LIVE_EXECUTION_TRANSPORT_UNAVAILABLE"
+LIVE_SUBMIT_QUOTE_AGE_ELAPSED = "live_submit_quote_age_elapsed"
+LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN = "live_submit_evaluation_time_unknown"
+LIVE_SUBMIT_EVALUATION_TIME_INVALID = "live_submit_evaluation_time_invalid"
+LIVE_SUBMIT_CLOCK_INVALID = "live_submit_clock_invalid"
+LIVE_SUBMIT_QUOTE_AGE_UNKNOWN = "live_submit_quote_age_unknown"
+LIVE_SUBMIT_SKEW_UNKNOWN = "live_submit_skew_unknown"
+LIVE_SUBMIT_SKEW = "live_submit_skew"
 LOGGER = getLogger("sports_hedge.execution.dispatch")
+
+
+def wall_clock_utc() -> datetime:
+    """Production submit freshness uses this clock, not a frozen dispatch `now`."""
+
+    return datetime.now(UTC)
+
+
+def _aware_utc(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _live_submit_requires_price2_times(settings: Settings) -> bool:
+    """True when this process can actually send Real venue orders."""
+
+    from sports_hedge.execution.live_canary import live_canary_enabled, live_runtime_armed
+
+    return live_runtime_armed() or live_canary_enabled(settings)
+
+
+def live_submit_freshness_refusal(
+    plan: PaperFillPlan,
+    *,
+    settings: Settings,
+    now: datetime | None = None,
+) -> str | None:
+    """Refuse a live submit whose Price-2 quotes have aged past the configured gate.
+
+    Runtime-armed Real requires aware-UTC ``evaluated_at``; native retrieval
+    timestamps are an additional stricter constraint, not a substitute.
+    Missing, naive, or future times fail closed. Production uses wall clock.
+    """
+
+    if not _accepted_plan(plan):
+        return None
+    try:
+        payload = json.loads(plan.execution_snapshot_json or "")
+    except json.JSONDecodeError:
+        return LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
+    if not isinstance(payload, dict):
+        return LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
+    current = wall_clock_utc() if now is None else now
+    if not isinstance(current, datetime) or current.tzinfo is None:
+        return LIVE_SUBMIT_CLOCK_INVALID
+    current = current.astimezone(UTC)
+    armed = _live_submit_requires_price2_times(settings)
+    max_age = int(settings.paper_entry_max_quote_age_ms)
+    snapshot_max_age = payload.get("max_quote_age_ms", max_age)
+    try:
+        allowed_age = int(snapshot_max_age if snapshot_max_age is not None else max_age)
+        allowed_age = min(allowed_age, max_age)
+    except (TypeError, ValueError):
+        return LIVE_SUBMIT_QUOTE_AGE_UNKNOWN
+    max_skew = int(settings.paper_execution_max_snapshot_skew_ms)
+    snapshot_max_skew = payload.get("max_skew_ms", max_skew)
+    skew = payload.get("skew_ms")
+    if skew is None:
+        if armed:
+            return LIVE_SUBMIT_SKEW_UNKNOWN
+    else:
+        try:
+            allowed_skew = int(snapshot_max_skew if snapshot_max_skew is not None else max_skew)
+            allowed_skew = min(allowed_skew, max_skew)
+            if int(skew) > allowed_skew:
+                return LIVE_SUBMIT_SKEW
+        except (TypeError, ValueError):
+            return LIVE_SUBMIT_SKEW_UNKNOWN
+    evaluated = _aware_utc(payload.get("evaluated_at"))
+    if evaluated is None:
+        if armed:
+            return (
+                LIVE_SUBMIT_EVALUATION_TIME_INVALID
+                if payload.get("evaluated_at") not in (None, "")
+                else LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
+            )
+    else:
+        if evaluated > current:
+            return LIVE_SUBMIT_EVALUATION_TIME_INVALID
+        recorded = payload.get("oldest_quote_age_ms")
+        if recorded is None:
+            return LIVE_SUBMIT_QUOTE_AGE_UNKNOWN
+        try:
+            elapsed_ms = int((current - evaluated).total_seconds() * 1000)
+            ages = [int(recorded) + elapsed_ms]
+        except (TypeError, ValueError):
+            return LIVE_SUBMIT_QUOTE_AGE_UNKNOWN
+        retrievals = payload.get("retrievals")
+        if isinstance(retrievals, list) and retrievals:
+            retrieved_at: list[datetime] = []
+            for item in retrievals:
+                if not isinstance(item, dict):
+                    return LIVE_SUBMIT_EVALUATION_TIME_INVALID
+                instant = _aware_utc(item.get("retrieved_at"))
+                if instant is None or instant > current:
+                    return LIVE_SUBMIT_EVALUATION_TIME_INVALID
+                retrieved_at.append(instant)
+            ages.append(int((current - min(retrieved_at)).total_seconds() * 1000))
+        if max(ages) > allowed_age:
+            return LIVE_SUBMIT_QUOTE_AGE_ELAPSED
+        return None
+    if armed:
+        return LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
+    return None
 
 
 def log_execution_dispatch(phase: str, **fields: object) -> None:
@@ -77,9 +198,24 @@ def execution_capability(settings: Settings) -> dict[str, bool | str]:
 
 
 def execution_armed(settings: Settings) -> bool:
-    """True only when this repository is explicitly in real mode with execution on."""
+    """True only in real mode when runtime-armed or an explicit test/startup flag is on.
 
-    return settings.sports_hedge_mode == "real" and settings.sports_hedge_execution_enabled is True
+    The Real launcher boots with execution disabled. Wave 40 arms live
+    execution through process runtime state, which resets OFF on every restart.
+    ``SPORTS_HEDGE_EXECUTION_ENABLED`` remains the Wave-3 test seam and must
+    stay false in the Windows Real launcher. An explicit operator OFF/halt
+    closes new-order permission even if the startup flag is true in tests.
+    """
+
+    if settings.sports_hedge_mode != "real":
+        return False
+    from sports_hedge.execution.live_canary import live_runtime_armed, new_orders_halted
+
+    if new_orders_halted():
+        return False
+    if live_runtime_armed():
+        return True
+    return settings.sports_hedge_execution_enabled is True
 
 
 def _matchbook_execution_configured(settings: Settings) -> bool:
@@ -109,10 +245,11 @@ async def execute_live_package(
     kalshi: KalshiExecutionClient | None = None,
     polymarket: PolymarketExecutionClient | None = None,
     clock: Callable[[], datetime] | None = None,
+    freshness_clock: Callable[[], datetime] | None = None,
 ) -> LiveExecutionPackage:
     """Prepare hedge legs from the accepted plan and dispatch them concurrently."""
 
-    now = clock or (lambda: datetime.now(UTC))
+    now = clock or wall_clock_utc
     if not execution_armed(settings):
         return LiveExecutionPackage(outcome=LivePackageOutcome.FAILED, detail="execution_disabled")
     if not _accepted_plan(plan):
@@ -141,6 +278,12 @@ async def execute_live_package(
             outcome=LivePackageOutcome.FAILED,
             detail=LIVE_EXECUTION_TRANSPORT_UNAVAILABLE,
         )
+    if not execution_armed(settings):
+        return LiveExecutionPackage(outcome=LivePackageOutcome.FAILED, detail="execution_disabled")
+    freshness_now = (freshness_clock or wall_clock_utc)()
+    stale = live_submit_freshness_refusal(plan, settings=settings, now=freshness_now)
+    if stale is not None:
+        return LiveExecutionPackage(outcome=LivePackageOutcome.FAILED, detail=stale)
 
     async def _one(request: VenueOrderRequest | None, leg: PaperOpportunityLeg) -> VenueOrderResult:
         submitted = now()

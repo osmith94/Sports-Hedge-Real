@@ -136,6 +136,33 @@ class ExecutionTiming:
     quote_age_ms: tuple[tuple[str, int | None], ...] = ()
 
 
+MATCHBOOK_TAIL_REFRESH_SUCCESS = "success"
+MATCHBOOK_TAIL_REFRESH_FAILED = "failed"
+MATCHBOOK_TAIL_REFRESH_SKIPPED_NOT_MB_PM = "skipped_not_mb_pm"
+MATCHBOOK_TAIL_REFRESH_SKIPPED_INCOMPLETE = "skipped_incomplete"
+MATCHBOOK_TAIL_REFRESH_SKIPPED_COHERENT = "skipped_coherent"
+MATCHBOOK_TAIL_REFRESH_SKIPPED_PM_INTERNAL_SKEW = "skipped_pm_internal_skew"
+MATCHBOOK_TAIL_REFRESH_SKIPPED_MB_NOT_OLDEST = "skipped_mb_not_oldest"
+MATCHBOOK_TAIL_REFRESH_SKIPPED_PM_STALE = "skipped_pm_stale"
+
+
+@dataclass(frozen=True)
+class MatchbookTailRefreshAudit:
+    """One bounded Matchbook exact-ID retry after a slow Polymarket tail.
+
+    Records the attempt, never a second economic authority. Success still has
+    to pass the existing skew and quote-age gates on the final book set.
+    """
+
+    attempted: bool
+    outcome: str
+    original_skew_ms: int | None = None
+    final_skew_ms: int | None = None
+    original_matchbook_retrieved_at: datetime | None = None
+    final_matchbook_retrieved_at: datetime | None = None
+    polymarket_retrieved_at: tuple[tuple[str, datetime], ...] = ()
+
+
 NATIVE_ORDER_FREEZE_REASONS = frozenset(
     {
         "frozen",
@@ -249,6 +276,7 @@ class ExecutionSnapshot:
     frozen_orders: tuple[FrozenNativeOrder, ...] = ()
     native_order_freeze_diagnostics: tuple[NativeOrderFreezeDiagnostic, ...] = ()
     venue_readiness: tuple[VenueReadinessEvidence, ...] = ()
+    matchbook_tail_refresh: MatchbookTailRefreshAudit | None = None
 
     def __post_init__(self) -> None:
         if not self.snapshot_id:
@@ -285,6 +313,7 @@ class ExecutionSnapshot:
     def audit_line(self) -> str:
         earliest = self.earliest_retrieval_at
         latest = self.latest_retrieval_at
+        tail = self.matchbook_tail_refresh
         return " ".join(
             (
                 f"snapshot_id={self.snapshot_id}",
@@ -295,6 +324,12 @@ class ExecutionSnapshot:
                 f"latest_retrieval_at={latest.isoformat() if latest else 'unknown'}",
                 f"retrievals={len(self.retrievals)}",
                 f"accepted={str(self.accepted).lower()}",
+                *(() if tail is None else (
+                    f"matchbook_tail_refresh_attempted={str(tail.attempted).lower()}",
+                    f"matchbook_tail_refresh={tail.outcome}",
+                    f"original_skew_ms={tail.original_skew_ms if tail.original_skew_ms is not None else 'unknown'}",
+                    f"final_skew_ms={tail.final_skew_ms if tail.final_skew_ms is not None else 'unknown'}",
+                )),
             )
         )
 
@@ -335,6 +370,7 @@ class ExecutionSnapshot:
                 _freeze_diagnostic_json(item) for item in self.native_order_freeze_diagnostics
             ],
             "venue_readiness": [_readiness_json(item) for item in self.venue_readiness],
+            "matchbook_tail_refresh": _tail_refresh_json(self.matchbook_tail_refresh),
             "retrievals": [
                 {
                     "venue": item.venue,
@@ -720,6 +756,23 @@ def _readiness_json(item: VenueReadinessEvidence) -> dict[str, Any]:
         "required_stake": item.required_stake,
         "source": item.source,
         "reason": item.reason,
+    }
+
+
+def _tail_refresh_json(item: MatchbookTailRefreshAudit | None) -> dict[str, Any] | None:
+    if item is None:
+        return None
+    return {
+        "attempted": item.attempted,
+        "outcome": item.outcome,
+        "original_skew_ms": item.original_skew_ms,
+        "final_skew_ms": item.final_skew_ms,
+        "original_matchbook_retrieved_at": _iso(item.original_matchbook_retrieved_at),
+        "final_matchbook_retrieved_at": _iso(item.final_matchbook_retrieved_at),
+        "polymarket_retrieved_at": [
+            {"native_id": native_id, "retrieved_at": instant.isoformat()}
+            for native_id, instant in item.polymarket_retrieved_at
+        ],
     }
 
 

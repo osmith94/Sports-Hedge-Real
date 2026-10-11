@@ -1,6 +1,18 @@
 export type RuntimeHealth = {
   mode?: string | null;
   execution_enabled?: boolean | null;
+  live_canary?: {
+    enabled?: boolean | null;
+    runtime_armed?: boolean | null;
+    capture_active?: boolean | null;
+    halt_new_orders?: boolean | null;
+    trading_permission?: boolean | null;
+    label?: string | null;
+    not_ready_reasons?: string[] | null;
+    max_event_gbp?: string | null;
+    max_opportunity_gbp?: string | null;
+    max_one_time_gbp?: string | null;
+  } | null;
 };
 
 export type RuntimeModeName = "paper" | "real" | "unknown";
@@ -63,18 +75,21 @@ export function runtimeModeFromHealth(
       simulationSection: false,
     };
   }
-  const execution = enabled ? "EXECUTION ENABLED" : "EXECUTION DISABLED";
+  const runtimeArmed = health?.live_canary?.runtime_armed === true;
+  const execution = runtimeArmed ? "EXECUTION ON" : "EXECUTION OFF";
   return {
     known: true,
     mode: "real",
-    executionEnabled: enabled,
+    executionEnabled: runtimeArmed || enabled,
     clock: `GBP · REAL MODE · ${execution}`,
     subtitle: "real operations terminal",
     footerMode: "REAL MODE",
-    footerNote: enabled ? "LIVE ORDER EXECUTION ENABLED" : "LIVE ORDER EXECUTION DISABLED",
+    footerNote: runtimeArmed
+      ? "LIVE REAL-MONEY EXECUTION ON. Toggle OFF stops new submits and does not cancel existing venue orders."
+      : "EXECUTION OFF. Scanner continues. No new live orders. Not paper mode.",
     operationsEyebrow: "Operations console",
-    operationsSubtitle: enabled
-      ? "Live venue feeds, cross-venue discovery, pricing and execution monitoring. Live order execution is enabled."
+    operationsSubtitle: runtimeArmed
+      ? "Real execution is ON using existing operator Max Event / Max Opportunity / Max One-Time limits. Paper autofill stays off. Do not treat paper P&L as a venue fill."
       : "Live venue feeds, cross-venue discovery, pricing and execution monitoring. Live order execution currently disabled.",
     readModelLabel: "LIVE VENUE READ MODEL",
     offlineReadModelLabel: "VENUE READ MODEL OFFLINE",

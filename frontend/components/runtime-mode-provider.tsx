@@ -2,7 +2,14 @@
 
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { getRuntimeHealth, type RuntimeHealth } from "../lib/api";
+import {
+  armLiveCanary,
+  disarmLiveCanary,
+  getOperatorScannerSettings,
+  getRuntimeHealth,
+  heartbeatLiveCanary,
+  type RuntimeHealth,
+} from "../lib/api";
 import {
   readModelBadge,
   runtimeModeFromHealth,
@@ -55,7 +62,162 @@ export function RuntimeModeProvider({ children }: { children: ReactNode }) {
 
 export function RuntimeModeClock() {
   const view = useRuntimeMode();
-  return <div className="clock">{view.clock}</div>;
+  const [health, setHealth] = useState<RuntimeHealth | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmLimits, setConfirmLimits] = useState<{
+    max_event_gbp?: string;
+    max_opportunity_gbp?: string;
+    max_one_time_gbp?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let stopped = false;
+    async function load() {
+      try {
+        const next = await getRuntimeHealth();
+        if (!stopped) setHealth(next);
+      } catch {
+        if (!stopped) setHealth(null);
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => {
+      void load();
+      if (health?.live_canary?.runtime_armed) {
+        void heartbeatLiveCanary().catch(() => undefined);
+      }
+    }, 15000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [health?.live_canary?.runtime_armed]);
+
+  const armed = health?.live_canary?.runtime_armed === true;
+  const real = view.mode === "real";
+  const toggleLabel = !real
+    ? null
+    : checking
+      ? "CHECKING"
+      : armed
+        ? "EXECUTION ON"
+        : "EXECUTION OFF";
+
+  return (
+    <div className="execution-toggle-cluster">
+      <div className="clock">{view.known ? view.clock : "GBP · UNAVAILABLE"}</div>
+      {toggleLabel ? (
+        <button
+          type="button"
+          className={armed ? "execution-toggle execution-toggle-on" : "execution-toggle"}
+          aria-label={toggleLabel}
+          disabled={checking}
+          onClick={() => {
+            if (armed) {
+              setChecking(true);
+              void disarmLiveCanary()
+                .then((next) => {
+                  setHealth((current) => ({ ...(current ?? {}), live_canary: next, mode: "real", execution_enabled: false }));
+                  setError(null);
+                })
+                .catch((exc: unknown) => setError(exc instanceof Error ? exc.message : "disarm failed"))
+                .finally(() => setChecking(false));
+              return;
+            }
+            setConfirmOpen(true);
+            void getOperatorScannerSettings()
+              .then((saved) =>
+                setConfirmLimits({
+                  max_event_gbp: saved.max_event_gbp,
+                  max_opportunity_gbp: saved.max_opportunity_gbp,
+                  max_one_time_gbp: saved.max_one_time_gbp,
+                }),
+              )
+              .catch(() => setConfirmLimits(null));
+          }}
+        >
+          {toggleLabel}
+        </button>
+      ) : null}
+      {error ? <div className="execution-toggle-error">{error}</div> : null}
+      {confirmOpen ? (
+        <div className="desktop-exit-backdrop" role="dialog" aria-label="REAL-MONEY EXECUTION confirmation">
+          <div className="desktop-exit-dialog">
+            <h2>REAL-MONEY EXECUTION</h2>
+            <p>
+              Turning ON may wager real money using the current operator Max Event / Max
+              Opportunity / Max One-Time limits of £
+              {confirmLimits?.max_event_gbp ?? health?.live_canary?.max_event_gbp ?? "—"} / £
+              {confirmLimits?.max_opportunity_gbp ?? health?.live_canary?.max_opportunity_gbp ?? "—"}{" "}
+              / £{confirmLimits?.max_one_time_gbp ?? health?.live_canary?.max_one_time_gbp ?? "—"}.
+              Toggle OFF stops new submits and does not cancel orders already sent.
+            </p>
+            <p>Type ARM LIVE CANARY to confirm.</p>
+            <ExecutionConfirm
+              onCancel={() => setConfirmOpen(false)}
+              onConfirm={async (phrase) => {
+                setChecking(true);
+                setConfirmOpen(false);
+                try {
+                  const next = await armLiveCanary(phrase);
+                  setHealth((current) => ({
+                    ...(current ?? {}),
+                    mode: "real",
+                    execution_enabled: false,
+                    live_canary: next,
+                  }));
+                  const reasons = next?.not_ready_reasons ?? [];
+                  if (!next?.runtime_armed) {
+                    setError(reasons.join(", ") || "NOT READY");
+                  } else {
+                    setError(null);
+                  }
+                } catch (exc: unknown) {
+                  setError(exc instanceof Error ? exc.message : "arm failed");
+                } finally {
+                  setChecking(false);
+                }
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ExecutionConfirm({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: (phrase: string) => Promise<void>;
+}) {
+  const [phrase, setPhrase] = useState("");
+  return (
+    <>
+      <input
+        aria-label="Confirmation phrase"
+        value={phrase}
+        onChange={(event) => setPhrase(event.target.value)}
+      />
+      <div className="desktop-exit-actions">
+        <button type="button" onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="desktop-exit-confirm"
+          disabled={phrase !== "ARM LIVE CANARY"}
+          onClick={() => void onConfirm(phrase)}
+        >
+          Confirm EXECUTION ON
+        </button>
+      </div>
+    </>
+  );
 }
 
 export function RuntimeModeFooter() {

@@ -27,6 +27,8 @@ from sports_hedge.api.stream import router as stream_router
 from sports_hedge.application.live_refresh import get_live_refresh_coordinator
 from sports_hedge.application.serving_build import get_serving_build_info
 from sports_hedge.config import emit_dotenv_operator_diagnostics, get_settings, inspect_dotenv_sources
+from sports_hedge.api.live_canary import router as live_canary_router
+from sports_hedge.execution.live_canary import public_canary_status
 from sports_hedge.execution.package import execution_capability
 from sports_hedge.persistence.universe_checkpoint import get_universe_checkpoint_store
 from sports_hedge.domain.models import VenueCapabilities, VenueName
@@ -108,6 +110,7 @@ app.include_router(mapping_reviews_router)
 app.include_router(watchlist_router)
 app.include_router(priority_alerts_router)
 app.include_router(stream_router)
+app.include_router(live_canary_router)
 
 
 @app.get("/build-info")
@@ -139,6 +142,7 @@ async def health() -> dict[str, object]:
         "mode": settings.sports_hedge_mode,
         "execution_enabled": settings.sports_hedge_execution_enabled,
         "execution": execution_capability(settings),
+        "live_canary": public_canary_status(settings),
         "orphaned_live_executions": _orphaned_live_executions(),
         "paper_autofill_enabled": settings.paper_autofill_enabled,
         "paper_auto_unwind_enabled": settings.paper_auto_unwind_enabled,
