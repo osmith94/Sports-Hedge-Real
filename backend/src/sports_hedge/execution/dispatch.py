@@ -203,15 +203,15 @@ def refusal_reason(
     if VenueName.POLYMARKET in venues and polymarket is None:
         return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
     from sports_hedge.execution.live_canary import (
+        canary_submit_refusal,
         live_canary_enabled,
-        resolve_trading_facts,
-        trading_permission_reasons,
     )
 
+    # One authoritative decision for cached current-IP/account readiness and
+    # accepted Price-2/operator limits. Repeating the local guard after a
+    # reservation is safe; neither call issues provider requests.
     if live_canary_enabled(settings):
-        permission = trading_permission_reasons(settings, resolve_trading_facts(settings))
-        if permission:
-            return permission[0]
+        return canary_submit_refusal(plan, settings=settings)
     return None
 
 
