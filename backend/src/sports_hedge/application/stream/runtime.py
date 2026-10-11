@@ -25,7 +25,7 @@ from sports_hedge.application.stream.protocol import (
     PERIODIC_RECONCILE_SECONDS,
     PRICE_MOVE_PROBABILITY_POINTS,
 )
-from sports_hedge.application.stream.shadow import StreamShadowComparer
+from sports_hedge.application.stream.shadow import StreamShadowComparer, mark_candidates_current
 from sports_hedge.application.stream.status import StreamCandidateStatus, StreamStatus
 from sports_hedge.application.stream.transport import TransportFactory
 from sports_hedge.application.stream.trigger import (
@@ -33,6 +33,8 @@ from sports_hedge.application.stream.trigger import (
     StreamBookSignal,
     StreamTriggerPolicy,
 )
+from sports_hedge.config import Settings
+from sports_hedge.execution.package import execution_armed
 
 CatalogueLoader = Callable[[str], list[Any]]
 MatchbookFetcher = Callable[[str, str], Awaitable[dict[str, Any]]]
@@ -46,6 +48,8 @@ PHASE1_LIMITATIONS = [
     "Periodic Matchbook reconciliation is lower priority than event-driven work and still uses the STREAM lane.",
     "Diagnostic GET /stream/status does not call providers.",
     "Candidate edges stay telemetry until the existing Price-2 snapshot accepts. Venue orders still require mode=real and SPORTS_HEDGE_EXECUTION_ENABLED.",
+    "STREAM reuses the shared venue-cost resolver, persisted Polymarket fee snapshot, FX service and operator min-net. Missing fee/FX still fail closed.",
+    "Capital sizing stays on existing PaperScanService / policy_from_settings (persisted Max Event / Max Opportunity / Max One-Time). STREAM does not invent session, first-trade, or canary caps.",
     "An empty WS [] is not a STREAM→Price-2 pass. The handoff requires a populated token book and a coalesced Matchbook quote.",
 ]
 
@@ -99,6 +103,9 @@ class StreamRuntime:
             connection = observer.connection_status(paused=self.paused, selected=True)
         stats = self.coalescer.stats
         books = None if observer is None else observer.books
+        populated = 0 if observer is None else observer.books.healthy_token_count()
+        candidates_current = connection in {"subscribed", "degraded"} and not self.paused
+        books_current = connection == "subscribed" and populated > 0 and not self.paused
         candidates = [
             StreamCandidateStatus(
                 catalogue_row_id=item.catalogue_row_id,
@@ -114,12 +121,18 @@ class StreamRuntime:
                 executable=item.catalogue_row_id in self.handoff.paper_opened_rows,
                 price2=item.catalogue_row_id in self.handoff.accepted_rows,
                 paper_entry=item.catalogue_row_id in self.handoff.paper_opened_rows,
+                data_valid=item.data_valid,
+                economics_state=item.economics_state,
+                top_reason=item.top_reason,
+                current=bool(item.current and candidates_current),
             )
-            for item in self.shadow.candidates
+            for item in mark_candidates_current(
+                list(self.shadow.candidates), current=candidates_current
+            )
         ]
-        populated = 0 if observer is None else observer.books.healthy_token_count()
+        current_rows = [item for item in candidates if item.current]
         return StreamStatus(
-            phase="wave37_stream_price2",
+            phase="wave38_stream_price2",
             enabled=selected and not self.paused,
             paused=self.paused,
             connection_status=connection,
@@ -162,6 +175,15 @@ class StreamRuntime:
             coalesced_matchbook_quote_count=len(self.coalescer.quotes),
             price2_attempt_count=self.handoff.attempt_count,
             price2_accepted_count=self.handoff.accepted_count,
+            valid_pair_count=sum(1 for item in current_rows if item.data_valid),
+            potential_arb_count=sum(
+                1 for item in current_rows if item.economics_state == "qualified"
+            ),
+            paper_fill_count=len(self.handoff.paper_opened_rows),
+            books_current=books_current,
+            candidates_current=candidates_current,
+            metrics_scope="session",
+            execution_enabled=execution_armed(Settings()),
             candidates=candidates,
             limitations=list(PHASE1_LIMITATIONS),
         )
@@ -380,14 +402,16 @@ def get_stream_runtime() -> StreamRuntime:
     global _SHARED
     with _LOCK:
         if _SHARED is None:
-            _SHARED = StreamRuntime()
+            _SHARED = StreamRuntime(shadow=StreamShadowComparer.shared())
         return _SHARED
 
 
 def reset_stream_runtime(runtime: StreamRuntime | None = None) -> StreamRuntime:
     global _SHARED
     with _LOCK:
-        _SHARED = runtime if runtime is not None else StreamRuntime()
+        _SHARED = (
+            runtime if runtime is not None else StreamRuntime(shadow=StreamShadowComparer.shared())
+        )
         return _SHARED
 
 

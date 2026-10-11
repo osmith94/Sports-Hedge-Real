@@ -19,11 +19,15 @@ class StreamCandidateStatus(BaseModel):
     executable: bool = False
     price2: bool = False
     paper_entry: bool = False
+    data_valid: bool = False
+    economics_state: str = "blocked"
+    top_reason: str | None = None
+    current: bool = True
 
 
 class StreamStatus(BaseModel):
     module: str = "STREAM"
-    phase: str = "wave37_stream_price2"
+    phase: str = "wave38_stream_price2"
     enabled: bool
     paused: bool
     connection_status: str
@@ -62,6 +66,13 @@ class StreamStatus(BaseModel):
     coalesced_matchbook_quote_count: int = 0
     price2_attempt_count: int = 0
     price2_accepted_count: int = 0
+    valid_pair_count: int = 0
+    potential_arb_count: int = 0
+    paper_fill_count: int = 0
+    books_current: bool = False
+    candidates_current: bool = False
+    metrics_scope: str = "session"
+    execution_enabled: bool = False
     candidates: list[StreamCandidateStatus] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
 
