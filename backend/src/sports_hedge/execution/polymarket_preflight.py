@@ -110,6 +110,8 @@ def format_polymarket_preflight(report: dict[str, Any]) -> str:
         "Location eligibility:",
         f"  check reachable: {_yes_no(eligibility.reachable)}",
         f"  blocked: {_blocked(eligibility.blocked)}",
+        f"  reason: {eligibility.reason}",
+        *([f"  transport: {eligibility.transport}"] if eligibility.transport else []),
         f"  country code: {country}",
         "",
         "Credentials:",

@@ -19,9 +19,33 @@ from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.paper.chain import PaperFillPlan
 
-OPERATOR_CONFIRMATION_PHRASE = "ARM LIVE CANARY"
 _QUANTUM = Decimal("0.01")
 TRADING_FACTS_MAX_AGE = timedelta(seconds=30)
+_OPERATOR_REASON_EXPLANATIONS: dict[str, str] = {
+    "geoblock_blocked": "Polymarket reports this current IP is blocked (territory rejection).",
+    "geoblock_unreachable": (
+        "Polymarket territory check could not be reached (not a location rejection)."
+    ),
+    "geoblock_unreachable_timeout": (
+        "Polymarket territory check timed out (not a location rejection)."
+    ),
+    "geoblock_unreachable_network": (
+        "Polymarket territory check could not be reached (not a location rejection)."
+    ),
+    "geoblock_unreachable_http": (
+        "Polymarket territory check returned a non-200 HTTP status (not a location rejection)."
+    ),
+    "geoblock_malformed": "Polymarket territory check returned an unreadable payload (not permitted).",
+    "geoblock_ambiguous": "Polymarket territory check was ambiguous (not permitted).",
+    "geoblock_not_checked": "Polymarket territory has not been checked (not permitted).",
+    "matchbook_currency_mismatch": (
+        "Matchbook account currency conflicts with the configured native execution currency."
+    ),
+    "matchbook_currency_unknown": (
+        "Matchbook account currency not included in official balance; "
+        "supported configured-native currency evidence governs."
+    ),
+}
 
 _lock = threading.Lock()
 _FACTS: LiveCanaryTradingFacts | None = None
@@ -36,6 +60,7 @@ class LiveCanaryTradingFacts:
 
     polymarket_geoblock_permitted: bool = False
     polymarket_geoblock_reason: str = "geoblock_not_checked"
+    polymarket_geoblock_transport: str | None = None
     polymarket_credentials_present: bool = False
     polymarket_wallet_valid: bool = False
     polymarket_balance_readable: bool = False
@@ -126,8 +151,7 @@ def load_authorization(settings: Settings) -> dict[str, Any] | None:
         return None
     if not isinstance(payload, dict):
         return None
-    phrase = str(payload.get("phrase") or "")
-    if phrase != OPERATOR_CONFIRMATION_PHRASE:
+    if payload.get("confirmed") is not True:
         return None
     return payload
 
@@ -410,12 +434,11 @@ def trading_permission_reasons(
         reasons.append("matchbook_unauthenticated")
     if not facts.matchbook_free_funds_positive:
         reasons.append("matchbook_free_funds")
-    if facts.matchbook_currency_compatible is not True:
-        reasons.append(
-            "matchbook_currency_mismatch"
-            if facts.matchbook_currency_compatible is False
-            else "matchbook_currency_unknown"
-        )
+    # Official Matchbook balance has no currency field. None is unknown, not a
+    # mismatch. Only an explicit False (or unreadable account via other gates)
+    # blocks. Dispatch still validates native order currency vs settings.
+    if facts.matchbook_currency_compatible is False:
+        reasons.append("matchbook_currency_mismatch")
     if facts.orphan_inspection_failed:
         reasons.append("orphan_inspection_failed")
     if facts.outstanding_unknown_orders:
@@ -434,11 +457,14 @@ async def collect_live_canary_facts(settings: Settings) -> LiveCanaryTradingFact
     eligibility = polymarket.get("eligibility")
     permitted = bool(getattr(eligibility, "permitted", False))
     geo_reason = str(getattr(eligibility, "reason", "geoblock_not_checked") or "geoblock_not_checked")
+    geo_transport = getattr(eligibility, "transport", None)
+    geo_transport_text = geo_transport if isinstance(geo_transport, str) and geo_transport else None
     allowance_reason = polymarket.get("trading_readiness_reason")
     outstanding, inspection_failed = inspect_durable_unresolved_live_orders()
     return LiveCanaryTradingFacts(
         polymarket_geoblock_permitted=permitted,
         polymarket_geoblock_reason=geo_reason,
+        polymarket_geoblock_transport=geo_transport_text,
         polymarket_credentials_present=bool(polymarket.get("private_key_configured")),
         polymarket_wallet_valid=bool(polymarket.get("wallet_valid")),
         polymarket_balance_readable=bool(polymarket.get("balance_readable")),
@@ -510,11 +536,14 @@ def canary_submit_refusal(
 
 
 def public_canary_status(settings: Settings) -> dict[str, Any]:
-    facts = _FACTS
-    permission_reasons = trading_permission_reasons(
-        settings, facts, require_facts=facts is not None
-    )
     runtime_on = live_runtime_armed()
+    # A switch being ON is operator intent, not venue permission. Status may
+    # not advertise permission without current venue facts; never fetch them
+    # from the status/health endpoint.
+    facts = _FACTS if trading_facts_are_current(_FACTS) else None
+    permission_reasons = trading_permission_reasons(
+        settings, facts, require_facts=runtime_on or _FACTS is not None
+    )
     if new_orders_halted() and "canary_halt_new_orders" not in permission_reasons:
         permission_reasons.append("canary_halt_new_orders")
     ready = not permission_reasons and live_canary_enabled(settings)
@@ -536,6 +565,7 @@ def public_canary_status(settings: Settings) -> dict[str, Any]:
         "min_net_edge": limits["min_net_edge"],
         "trading_permission": ready,
         "not_ready_reasons": permission_reasons,
+        "not_ready_explanations": explain_permission_reasons(permission_reasons),
         "live_execution_ready_is_not_permission": True,
         "paper_autofill_enabled": settings.paper_autofill_enabled,
         "disarm_does_not_cancel_existing": True,
@@ -546,29 +576,39 @@ def public_canary_status(settings: Settings) -> dict[str, Any]:
     }
 
 
-async def arm_live_runtime(settings: Settings, *, phrase: str) -> dict[str, Any]:
+def explain_permission_reasons(reasons: list[str]) -> list[str]:
+    """Operator-readable lines for structured codes. No secrets, IPs, or tokens."""
+
+    explanations: list[str] = []
+    for reason in reasons:
+        mapped = _OPERATOR_REASON_EXPLANATIONS.get(reason)
+        if mapped is None and reason.startswith("geoblock_unreachable"):
+            mapped = _OPERATOR_REASON_EXPLANATIONS["geoblock_unreachable"]
+        explanations.append(mapped or reason)
+    return explanations
+
+
+async def arm_live_runtime(settings: Settings) -> dict[str, Any]:
+    """Record local operator intent, independent of venue/account readiness.
+
+    This switch does not check geoblocking, funds, fees/FX, venue availability,
+    orphan orders, or construct transports. Every live opening still passes
+    canary_submit_refusal() with current facts and all existing Price-2/risk
+    gates before it can reach native venue dispatch.
+    """
+
     global _RUNTIME_PREFLIGHT_AT
-    if phrase != OPERATOR_CONFIRMATION_PHRASE:
-        return {
-            **public_canary_status(settings),
-            "armed": False,
-            "not_ready_reasons": ["canary_operator_unconfirmed"],
-        }
-    facts = _FACTS if (_FACTS is not None and _FACTS.injected) else await collect_live_canary_facts(settings)
-    set_live_canary_trading_facts(facts)
-    _RUNTIME_PREFLIGHT_AT = datetime.now(UTC).isoformat()
-    reasons = trading_permission_reasons(settings, facts, for_arm=True)
-    if reasons:
-        set_live_runtime_arm(False)
+    if settings.sports_hedge_mode != "real":
         status = public_canary_status(settings)
         status["armed"] = False
-        status["not_ready_reasons"] = reasons
-        status["preflight_at"] = _RUNTIME_PREFLIGHT_AT
+        status["not_ready_reasons"] = ["not_real_mode"]
+        status["not_ready_explanations"] = explain_permission_reasons(["not_real_mode"])
         return status
-    set_live_runtime_arm(True)
-    from sports_hedge.execution.composition import bind_process_execution_runtime
 
-    bind_process_execution_runtime(settings)
+    # The API route already required a local POST and explicit UI confirmation.
+    # No remote I/O or execution-client construction is permitted here.
+    _RUNTIME_PREFLIGHT_AT = None
+    set_live_runtime_arm(True)
     status = public_canary_status(settings)
     status["armed"] = True
     return status

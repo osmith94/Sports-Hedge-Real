@@ -170,7 +170,7 @@ def test_combined_denies_unknown_currency_geoblock_and_orphan(tmp_path: Path) ->
     runtime, mb, _pm = _runtime()
     set_live_runtime_arm(True)
 
-    unknown_fx = LiveCanaryTradingFacts(
+    official_no_currency = LiveCanaryTradingFacts(
         polymarket_geoblock_permitted=True,
         polymarket_geoblock_reason="geoblock_permitted",
         polymarket_credentials_present=True,
@@ -183,9 +183,30 @@ def test_combined_denies_unknown_currency_geoblock_and_orphan(tmp_path: Path) ->
         matchbook_currency_compatible=None,
         injected=True,
     )
-    set_live_canary_trading_facts(unknown_fx)
-    assert "matchbook_currency_unknown" in trading_permission_reasons(settings, unknown_fx)
+    set_live_canary_trading_facts(official_no_currency)
+    assert "matchbook_currency_unknown" not in trading_permission_reasons(
+        settings, official_no_currency
+    )
+    assert "matchbook_currency_mismatch" not in trading_permission_reasons(
+        settings, official_no_currency
+    )
     ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "deny.sqlite"), _plan())
+
+    mismatch = LiveCanaryTradingFacts(
+        polymarket_geoblock_permitted=True,
+        polymarket_geoblock_reason="geoblock_permitted",
+        polymarket_credentials_present=True,
+        polymarket_wallet_valid=True,
+        polymarket_balance_readable=True,
+        polymarket_trading_ready=True,
+        matchbook_credentials_present=True,
+        matchbook_authenticated=True,
+        matchbook_free_funds_positive=True,
+        matchbook_currency_compatible=False,
+        injected=True,
+    )
+    set_live_canary_trading_facts(mismatch)
+    assert "matchbook_currency_mismatch" in trading_permission_reasons(settings, mismatch)
     ops.capture_opening_fill("watch:mkt-canary", now=NOW)
     assert mb.calls == []
 
@@ -234,17 +255,26 @@ def test_nonlocal_arm_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     client = TestClient(app)
     denied = client.post(
         "/live-canary/arm",
-        json={"phrase": "ARM LIVE CANARY"},
+        json={},
         headers={"Origin": "https://evil.example"},
     )
     assert denied.status_code == 403
-    missing = client.post("/live-canary/arm", json={"phrase": "ARM LIVE CANARY"})
+    missing = client.post("/live-canary/arm", json={})
     assert missing.status_code == 403
+    set_live_canary_trading_facts(
+        LiveCanaryTradingFacts(
+            polymarket_geoblock_permitted=False,
+            polymarket_geoblock_reason="geoblock_blocked",
+            injected=True,
+        )
+    )
     local = client.post(
         "/live-canary/arm",
-        json={"phrase": "nope"},
+        json={},
         headers=LOCAL_ORIGIN,
     )
     assert local.status_code == 200
-    assert local.json()["runtime_armed"] is False
-    assert live_runtime_armed() is False
+    assert local.json()["runtime_armed"] is True
+    assert local.json()["trading_permission"] is False
+    assert "geoblock_blocked" in local.json()["not_ready_reasons"]
+    assert live_runtime_armed() is True

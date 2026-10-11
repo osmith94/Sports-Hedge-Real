@@ -34,7 +34,9 @@ def test_top_right_execution_toggle_exists() -> None:
     assert "EXECUTION ON" in provider
     assert "EXECUTION OFF" in provider
     assert "CHECKING" in provider
-    assert "ARM LIVE CANARY" in provider
+    assert "ARM LIVE CANARY" not in provider
+    assert "Confirmation phrase" not in provider
+    assert "Confirm EXECUTION ON" in provider
     assert "armLiveCanary" in provider
     assert "disarmLiveCanary" in provider
     assert "getOperatorScannerSettings" in provider

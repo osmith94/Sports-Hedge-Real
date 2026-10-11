@@ -6,12 +6,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, Field
 
 from sports_hedge.config import get_settings
 from sports_hedge.execution.live_canary import (
     arm_live_runtime,
     disarm_live_runtime,
+    explain_permission_reasons,
     heartbeat_live_runtime,
     live_runtime_armed,
     public_canary_status,
@@ -24,10 +24,6 @@ _REQUEST_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testclient", "test
 _ORIGIN_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _ORIGIN_SCHEMES = frozenset({"http"})
 _ORIGIN_PORTS = frozenset({None, 80, 3000, 3001, 8000})
-
-
-class ArmRequest(BaseModel):
-    phrase: str = Field(min_length=1)
 
 
 def _hostname(value: str | None) -> str:
@@ -111,11 +107,15 @@ def live_canary_status() -> dict[str, Any]:
 
 
 @router.post("/arm")
-async def arm_live_canary(body: ArmRequest, request: Request) -> dict[str, Any]:
-    """Runtime ON after confirmation + read-only preflight. Boot remains OFF."""
+async def arm_live_canary(request: Request) -> dict[str, Any]:
+    """Record a local operator's ON confirmation; venue checks run per trade.
+
+    Local Origin/Host and POST-only protection remain mandatory. This endpoint
+    makes no external provider calls or account-readiness checks. GET cannot arm.
+    """
 
     _require_loopback(request, mutating=True)
-    return await arm_live_runtime(get_settings(), phrase=body.phrase)
+    return await arm_live_runtime(get_settings())
 
 
 @router.post("/disarm")
@@ -156,10 +156,12 @@ async def live_canary_preflight(request: Request) -> dict[str, Any]:
     return {
         "trading_permission": not reasons,
         "not_ready_reasons": reasons,
+        "not_ready_explanations": explain_permission_reasons(reasons),
         "runtime_armed": live_runtime_armed(),
         "live_execution_ready_is_not_permission": True,
         "polymarket_geoblock_permitted": facts.polymarket_geoblock_permitted,
         "polymarket_geoblock_reason": facts.polymarket_geoblock_reason,
+        "polymarket_geoblock_transport": facts.polymarket_geoblock_transport,
         "polymarket_credentials_present": facts.polymarket_credentials_present,
         "polymarket_wallet_valid": facts.polymarket_wallet_valid,
         "polymarket_balance_readable": facts.polymarket_balance_readable,
