@@ -20,7 +20,6 @@ from sports_hedge.execution.live_canary import (
     live_runtime_armed,
     reset_live_canary_runtime,
     set_live_canary_trading_facts,
-    set_live_runtime_arm,
     trading_permission_reasons,
 )
 from sports_hedge.execution.matchbook_preflight import (
