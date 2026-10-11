@@ -386,6 +386,31 @@ def _observe(
     return records
 
 
+async def _prime_real_readiness_before_price2(engine: Any, opportunity_id: str) -> None:
+    """Single-flight, bounded-lifetime venue permission; not an ON-switch gate."""
+    from sports_hedge.config import Settings
+    from sports_hedge.execution.package import execution_armed
+    from sports_hedge.execution.live_canary import (
+        prime_live_submit_facts,
+        trading_permission_reasons,
+    )
+
+    settings = getattr(engine, "settings", None)
+    if not isinstance(settings, Settings) or not execution_armed(settings):
+        return
+    facts = await asyncio.to_thread(prime_live_submit_facts, settings)
+    denied = trading_permission_reasons(settings, facts)
+    if denied:
+        # The eventual pre-submit refusal is persisted against the bound
+        # opportunity; this phase marker helps distinguish provider latency
+        # from an ordinary economic Price-2 rejection.
+        log_execution_phase(
+            PHASE_VENUE_CAPITAL,
+            opportunity_id=opportunity_id,
+            reason=denied[0],
+        )
+
+
 async def capture_with_execution_reprice(
     decision: PaperScanDecision,
     *,
@@ -446,6 +471,9 @@ async def capture_with_execution_reprice(
             discovery_history=discovery_history,
             discovery_decision=discovery,
         )
+    # Collect read-only account/location evidence before taking the fresh
+    # execution snapshot. Never spend Price-2 quote life on remote preflight.
+    await _prime_real_readiness_before_price2(engine, opportunity_id)
     venues = hedge_venues(decision)
     refreshed = await engine.reprice_for_paper_entry(runtime, venues=venues)
     if refreshed.duplicate:
@@ -711,6 +739,7 @@ async def continue_iterative_paper_fills(
             operations = _paper_operations(watchlist)
             if _open_iterative_trade(operations, opportunity_id) is None:
                 return
+            await _prime_real_readiness_before_price2(engine, opportunity_id)
             venues = hedge_venues(decision)
             refreshed = await engine.reprice_for_paper_entry(runtime, venues=venues)
             if refreshed.duplicate:
