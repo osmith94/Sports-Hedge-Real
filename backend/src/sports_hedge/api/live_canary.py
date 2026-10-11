@@ -108,10 +108,10 @@ def live_canary_status() -> dict[str, Any]:
 
 @router.post("/arm")
 async def arm_live_canary(request: Request) -> dict[str, Any]:
-    """Runtime ON after a local Confirm click + read-only preflight. Boot remains OFF.
+    """Record a local operator's ON confirmation; venue checks run per trade.
 
-    Authentication is loopback + exact local Origin/Host, not a typed phrase.
-    GET cannot arm. Body, if present, is ignored.
+    Local Origin/Host and POST-only protection remain mandatory. This endpoint
+    makes no external provider calls or account-readiness checks. GET cannot arm.
     """
 
     _require_loopback(request, mutating=True)
