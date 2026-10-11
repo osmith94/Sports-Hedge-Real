@@ -203,15 +203,19 @@ def refusal_reason(
     if VenueName.POLYMARKET in venues and polymarket is None:
         return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
     from sports_hedge.execution.live_canary import (
+        canary_plan_refusal,
+        current_trading_facts,
         live_canary_enabled,
-        resolve_trading_facts,
         trading_permission_reasons,
     )
 
     if live_canary_enabled(settings):
-        permission = trading_permission_reasons(settings, resolve_trading_facts(settings))
+        # Authoritative pre-submit decision: one existing read-only readiness
+        # snapshot, collected BEFORE Price-2, never remote I/O on the hot path.
+        permission = trading_permission_reasons(settings, current_trading_facts())
         if permission:
             return permission[0]
+        return canary_plan_refusal(plan, settings=settings)
     return None
 
 
