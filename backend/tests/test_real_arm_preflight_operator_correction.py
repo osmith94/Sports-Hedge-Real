@@ -14,6 +14,8 @@ from sports_hedge.config import Settings
 from sports_hedge.execution.live_canary import (
     LiveCanaryTradingFacts,
     arm_live_runtime,
+    canary_submit_refusal,
+    disarm_live_runtime,
     explain_permission_reasons,
     live_runtime_armed,
     reset_live_canary_runtime,
@@ -102,7 +104,7 @@ async def test_arm_passes_when_official_balance_has_no_currency(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_arm_refuses_explicit_currency_mismatch_without_native_writes(tmp_path: Path) -> None:
+async def test_arm_accepts_intent_but_explicit_currency_mismatch_prevents_native_writes(tmp_path: Path) -> None:
     settings = _canary_settings(tmp_path)
     snapshot = snapshot_from_balance_body(
         {**NOW_OFFICIAL, "currency": "USD"},
@@ -126,10 +128,11 @@ async def test_arm_refuses_explicit_currency_mismatch_without_native_writes(tmp_
     )
     set_live_canary_trading_facts(facts)
     result = await arm_live_runtime(settings)
-    assert result["runtime_armed"] is False
+    assert result["runtime_armed"] is True
+    assert result["trading_permission"] is False
     assert "matchbook_currency_mismatch" in result["not_ready_reasons"]
-    set_live_runtime_arm(True)
     assert "matchbook_currency_mismatch" in trading_permission_reasons(settings, facts)
+    assert canary_submit_refusal(_plan(), settings=settings, facts=facts) == "matchbook_currency_mismatch"
     runtime, mb, _pm = _runtime()
     ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "fx.sqlite"), _plan())
     try:
@@ -138,6 +141,60 @@ async def test_arm_refuses_explicit_currency_mismatch_without_native_writes(tmp_
         pass
     assert mb.calls == []
 
+
+
+@pytest.mark.asyncio
+async def test_arm_is_independent_of_all_remote_checks_and_order_gate_stays_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _canary_settings(tmp_path)
+    calls = {"preflight": 0, "bind": 0}
+
+    async def fail_preflight(_settings: Settings) -> LiveCanaryTradingFacts:
+        calls["preflight"] += 1
+        raise AssertionError("turning ON must not make venue requests")
+
+    def fail_binding(_settings: Settings):
+        calls["bind"] += 1
+        raise AssertionError("turning ON must not construct venue clients")
+
+    monkeypatch.setattr(
+        "sports_hedge.execution.live_canary.collect_live_canary_facts",
+        fail_preflight,
+    )
+    monkeypatch.setattr(
+        "sports_hedge.execution.composition.bind_process_execution_runtime",
+        fail_binding,
+    )
+    assert live_runtime_armed() is False
+    result = await arm_live_runtime(settings)
+    assert result["runtime_armed"] is True
+    assert result["execution_toggle"] == "ON"
+    assert result["trading_permission"] is False
+    assert "canary_preflight_not_collected" in result["not_ready_reasons"]
+    assert calls == {"preflight": 0, "bind": 0}
+
+    # On the actual submit seam an explicit denial still blocks the order.
+    denied = LiveCanaryTradingFacts(
+        polymarket_geoblock_permitted=False,
+        polymarket_geoblock_reason="geoblock_unreachable_timeout",
+        injected=True,
+    )
+    assert canary_submit_refusal(_plan(), settings=settings, facts=denied) == "geoblock_unreachable_timeout"
+    assert calls == {"preflight": 0, "bind": 0}
+    # Turning OFF must still stop new execution immediately.
+    monkeypatch.undo()
+    off = disarm_live_runtime(settings)
+    assert off["runtime_armed"] is False
+
+
+@pytest.mark.asyncio
+async def test_paper_mode_cannot_be_armed(tmp_path: Path) -> None:
+    settings = Settings(sports_hedge_mode="paper", sports_hedge_execution_enabled=False)
+    status = await arm_live_runtime(settings)
+    assert status["runtime_armed"] is False
+    assert status["armed"] is False
+    assert "not_real_mode" in status["not_ready_reasons"]
 
 def test_geoblock_blocked_and_unreachable_are_distinct_and_both_deny() -> None:
     blocked = parse_geoblock({"blocked": True, "country": "US"})
