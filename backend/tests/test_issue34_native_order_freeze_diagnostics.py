@@ -10,6 +10,8 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from sports_hedge.application.execution_snapshot import ExecutionSnapshot, FrozenNativeOrder
 from sports_hedge.application.venue_capital import (
     POLYMARKET_CONSTRAINTS_UNPROVEN,
@@ -20,6 +22,7 @@ from sports_hedge.arbitrage.watchlist.price2_activity import project_audit_row
 from sports_hedge.config import Settings
 from sports_hedge.domain.models import VenueName
 from sports_hedge.execution.frozen import freeze_native_orders, freeze_native_package
+from sports_hedge.execution.depth_plan import DepthPlanError
 from sports_hedge.paper.fills import PaperOpportunityLeg
 from sports_hedge.paper.models import PaperScanDecision
 
@@ -399,3 +402,93 @@ def test_frozen_native_order_dataclass_round_trip_still_deserializes_old_orders(
     assert "native_order_freeze_diagnostics" in payload
     assert payload["native_order_freeze_diagnostics"] == []
     assert payload["frozen_orders"][0]["native_runner_id"] == TOKEN
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (lambda: DepthPlanError("private provider data"), "approved_depth_incompatible"),
+        (lambda: TypeError("secret invalid amount"), "native_order_translation_invalid_input"),
+        (lambda: AttributeError("secret missing attribute"), "native_order_translation_unexpected_error"),
+    ],
+)
+def test_polymarket_freeze_failures_have_safe_specific_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    failure,
+    reason: str,
+) -> None:
+    """The old 'other' bucket must not hide depth errors or leak exception text."""
+
+    def fail(_leg: object):
+        raise failure()
+
+    monkeypatch.setattr("sports_hedge.execution.frozen._plan_for_leg", fail)
+    package = freeze_native_package(
+        _decision(_pm()),
+        polymarket_books=_books(tick_size="0.01", min_order_size="5"),
+    )
+    assert package.orders == ()
+    assert len(package.diagnostics) == 1
+    diagnostic = package.diagnostics[0]
+    assert diagnostic.reason == reason
+    assert diagnostic.frozen is False
+    assert diagnostic.intended_native_stake == "2.50"
+    assert "secret" not in repr(diagnostic).lower()
+    assert "private" not in repr(diagnostic).lower()
+
+
+def test_polymarket_untyped_translation_error_retains_fail_closed_generic_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown translator conditions are still blocked, not guessed into approval."""
+    from sports_hedge.execution.translate import TranslationError
+
+    def fail(**_kwargs):
+        raise TranslationError("sensitive unexpected translator message")
+
+    monkeypatch.setattr("sports_hedge.execution.frozen.polymarket_native_order", fail)
+    package = freeze_native_package(
+        _decision(_pm()),
+        polymarket_books=_books(tick_size="0.01", min_order_size="5"),
+    )
+    assert package.orders == ()
+    assert package.diagnostics[0].reason == "native_order_translation_other"
+    assert "sensitive" not in repr(package.diagnostics)
+
+
+def test_new_polymarket_freeze_reasons_survive_existing_read_only_projection() -> None:
+    """The dashboard receives these codes from a stored Price-2 snapshot as-is."""
+    from sports_hedge.application.execution_snapshot import NativeOrderFreezeDiagnostic
+
+    snapshot = ExecutionSnapshot(
+        catalogue_row_id="cat-test",
+        started_at=NOW,
+        retrievals=(),
+        accepted=False,
+        native_order_freeze_diagnostics=(
+            NativeOrderFreezeDiagnostic(
+                venue="polymarket",
+                frozen=False,
+                reason="approved_depth_incompatible",
+                outcome="away",
+                native_market_id="condition-1",
+                native_runner_id=TOKEN,
+            ),
+        ),
+    )
+    payload = json.loads(snapshot.to_json())
+    payload["legs"] = [{
+        "venue": "polymarket",
+        "outcome": "away",
+        "native_market_id": "condition-1",
+        "native_runner_id": TOKEN,
+    }]
+    projection = project_audit_row({
+        "snapshot_id": snapshot.snapshot_id,
+        "opportunity_id": "watch:sample",
+        "occurred_at": NOW,
+        "accepted": False,
+        "snapshot_json": json.dumps(payload),
+    })
+    assert projection.legs[0].freeze_status == "not_frozen"
+    assert projection.legs[0].freeze_reason == "approved_depth_incompatible"
