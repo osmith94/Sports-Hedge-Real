@@ -7,6 +7,7 @@ One-Time stay on the existing settings store.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from sports_hedge.execution.package import (
     LIVE_SUBMIT_EVALUATION_TIME_INVALID,
     LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN,
     LIVE_SUBMIT_QUOTE_AGE_ELAPSED,
+    LIVE_SUBMIT_SKEW_UNKNOWN,
     live_submit_freshness_refusal,
 )
 from sports_hedge.execution.runtime import set_execution_runtime
@@ -34,6 +36,7 @@ from sports_hedge.persistence.operator_scanner_settings import (
 )
 from sports_hedge.persistence.paper_ledger import SqlitePaperLedger
 from test_wave40_live_canary import (
+    FROZEN_SUBMIT,
     PERMITTED,
     _arm,
     _canary_settings,
@@ -47,11 +50,16 @@ NOW = datetime(2026, 10, 11, 13, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
-def _reset() -> None:
+def _reset(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     set_execution_runtime(None)
     reset_live_canary_runtime()
     set_live_canary_trading_facts(None)
     bind_runtime_operator_scanner_settings_store(None)
+    if request.node.name != "test_slow_preflight_does_not_submit_elapsed_price2":
+        monkeypatch.setattr(
+            "sports_hedge.execution.package.wall_clock_utc",
+            lambda: FROZEN_SUBMIT,
+        )
     yield
     set_execution_runtime(None)
     reset_live_canary_runtime()
@@ -90,7 +98,15 @@ def test_slow_preflight_does_not_submit_elapsed_price2(tmp_path: Path, monkeypat
         _slow,
     )
     runtime, mb, pm = _runtime()
-    plan = _plan(snapshot=_snapshot(stake="1.50", oldest_quote_age_ms=200))
+    started = datetime.now(UTC).isoformat()
+    plan = _plan(
+        snapshot=_snapshot(
+            stake="1.50",
+            oldest_quote_age_ms=200,
+            evaluated_at=started,
+            started_at=started,
+        )
+    )
     ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "slow.sqlite"), plan)
     ops.capture_opening_fill(plan.opportunity_id, now=NOW)
     assert mb.calls == []
@@ -107,6 +123,7 @@ def test_fast_preflight_still_submits_both_legs(tmp_path: Path) -> None:
     _arm(settings)
     runtime, mb, pm = _runtime()
     plan = _plan(snapshot=_snapshot(stake="1.50", oldest_quote_age_ms=120))
+    time.sleep(3.05)
     ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "fast.sqlite"), plan)
     ops.capture_opening_fill(plan.opportunity_id, now=NOW)
     assert len(mb.calls) == 1
@@ -204,3 +221,48 @@ def test_fresh_price2_that_is_now_older_than_two_seconds_is_refused() -> None:
         == LIVE_SUBMIT_QUOTE_AGE_ELAPSED
     )
     assert live_submit_freshness_refusal(plan, settings=settings, now=evaluated) is None
+
+
+def test_missing_evaluated_at_is_not_rescued_by_recent_retrievals(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    _arm(settings)
+    runtime, mb, pm = _runtime()
+    recent = FROZEN_SUBMIT.isoformat()
+    plan = _plan(
+        snapshot=_snapshot(
+            stake="1.50",
+            evaluated_at=None,
+            started_at=None,
+            retrievals=[
+                {
+                    "venue": "matchbook",
+                    "native_id": "mb-mkt",
+                    "event_id": "evt-mb",
+                    "retrieved_at": recent,
+                }
+            ],
+        )
+    )
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "ret.sqlite"), plan)
+    ops.capture_opening_fill(plan.opportunity_id, now=NOW)
+    assert mb.calls == []
+    assert pm.calls == []
+    assert (
+        live_submit_freshness_refusal(plan, settings=settings, now=FROZEN_SUBMIT)
+        == LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
+    )
+
+
+def test_missing_skew_denies_armed_direct_package_entry(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    _arm(settings)
+    runtime, mb, pm = _runtime()
+    plan = _plan(snapshot=_snapshot(stake="1.50", skew_ms=None, snapshot_id="exec:noskew"))
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "skew.sqlite"), plan)
+    ops.capture_opening_fill(plan.opportunity_id, now=NOW)
+    assert mb.calls == []
+    assert pm.calls == []
+    assert (
+        live_submit_freshness_refusal(plan, settings=settings, now=FROZEN_SUBMIT)
+        == LIVE_SUBMIT_SKEW_UNKNOWN
+    )

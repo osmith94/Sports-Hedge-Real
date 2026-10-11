@@ -70,14 +70,19 @@ PERMITTED = LiveCanaryTradingFacts(
 )
 
 LOCAL_ORIGIN = {"Origin": "http://127.0.0.1:3000"}
+FROZEN_SUBMIT = datetime(2026, 10, 11, 13, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
-def _reset_canary() -> None:
+def _reset_canary(monkeypatch: pytest.MonkeyPatch) -> None:
     set_execution_runtime(None)
     reset_live_canary_runtime()
     set_live_canary_trading_facts(None)
     bind_runtime_operator_scanner_settings_store(None)
+    monkeypatch.setattr(
+        "sports_hedge.execution.package.wall_clock_utc",
+        lambda: FROZEN_SUBMIT,
+    )
     yield
     set_execution_runtime(None)
     reset_live_canary_runtime()
@@ -107,7 +112,7 @@ def _arm(settings: Settings) -> None:
 
 
 def _snapshot(*, stake: str, extra: dict | None = None, **fields: object) -> str:
-    evaluated = datetime.now(UTC).isoformat()
+    evaluated = FROZEN_SUBMIT.isoformat()
     payload: dict[str, object] = {
         "snapshot_id": "exec:canary:1",
         "accepted": True,

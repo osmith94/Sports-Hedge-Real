@@ -40,6 +40,8 @@ LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN = "live_submit_evaluation_time_unknown"
 LIVE_SUBMIT_EVALUATION_TIME_INVALID = "live_submit_evaluation_time_invalid"
 LIVE_SUBMIT_CLOCK_INVALID = "live_submit_clock_invalid"
 LIVE_SUBMIT_QUOTE_AGE_UNKNOWN = "live_submit_quote_age_unknown"
+LIVE_SUBMIT_SKEW_UNKNOWN = "live_submit_skew_unknown"
+LIVE_SUBMIT_SKEW = "live_submit_skew"
 LOGGER = getLogger("sports_hedge.execution.dispatch")
 
 
@@ -64,6 +66,14 @@ def _aware_utc(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _live_submit_requires_price2_times(settings: Settings) -> bool:
+    """True when this process can actually send Real venue orders."""
+
+    from sports_hedge.execution.live_canary import live_canary_enabled, live_runtime_armed
+
+    return live_runtime_armed() or live_canary_enabled(settings)
+
+
 def live_submit_freshness_refusal(
     plan: PaperFillPlan,
     *,
@@ -72,9 +82,9 @@ def live_submit_freshness_refusal(
 ) -> str | None:
     """Refuse a live submit whose Price-2 quotes have aged past the configured gate.
 
-    Uses elapsed wall time since ``evaluated_at`` / native retrievals, not the
-    stored Price-2 ``oldest_quote_age_ms`` alone. Missing, naive, or future
-    timestamps fail closed when this process is runtime-armed.
+    Runtime-armed Real requires aware-UTC ``evaluated_at``; native retrieval
+    timestamps are an additional stricter constraint, not a substitute.
+    Missing, naive, or future times fail closed. Production uses wall clock.
     """
 
     if not _accepted_plan(plan):
@@ -89,6 +99,7 @@ def live_submit_freshness_refusal(
     if not isinstance(current, datetime) or current.tzinfo is None:
         return LIVE_SUBMIT_CLOCK_INVALID
     current = current.astimezone(UTC)
+    armed = _live_submit_requires_price2_times(settings)
     max_age = int(settings.paper_entry_max_quote_age_ms)
     snapshot_max_age = payload.get("max_quote_age_ms", max_age)
     try:
@@ -99,19 +110,26 @@ def live_submit_freshness_refusal(
     max_skew = int(settings.paper_execution_max_snapshot_skew_ms)
     snapshot_max_skew = payload.get("max_skew_ms", max_skew)
     skew = payload.get("skew_ms")
-    if skew is not None:
+    if skew is None:
+        if armed:
+            return LIVE_SUBMIT_SKEW_UNKNOWN
+    else:
         try:
             allowed_skew = int(snapshot_max_skew if snapshot_max_skew is not None else max_skew)
             allowed_skew = min(allowed_skew, max_skew)
             if int(skew) > allowed_skew:
-                return "live_submit_skew"
+                return LIVE_SUBMIT_SKEW
         except (TypeError, ValueError):
-            return "live_submit_skew_unknown"
+            return LIVE_SUBMIT_SKEW_UNKNOWN
     evaluated = _aware_utc(payload.get("evaluated_at"))
-    if payload.get("evaluated_at") not in (None, "") and evaluated is None:
-        return LIVE_SUBMIT_EVALUATION_TIME_INVALID
-    ages: list[int] = []
-    if evaluated is not None:
+    if evaluated is None:
+        if armed:
+            return (
+                LIVE_SUBMIT_EVALUATION_TIME_INVALID
+                if payload.get("evaluated_at") not in (None, "")
+                else LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
+            )
+    else:
         if evaluated > current:
             return LIVE_SUBMIT_EVALUATION_TIME_INVALID
         recorded = payload.get("oldest_quote_age_ms")
@@ -119,30 +137,25 @@ def live_submit_freshness_refusal(
             return LIVE_SUBMIT_QUOTE_AGE_UNKNOWN
         try:
             elapsed_ms = int((current - evaluated).total_seconds() * 1000)
-            ages.append(int(recorded) + elapsed_ms)
+            ages = [int(recorded) + elapsed_ms]
         except (TypeError, ValueError):
             return LIVE_SUBMIT_QUOTE_AGE_UNKNOWN
-    retrievals = payload.get("retrievals")
-    if isinstance(retrievals, list) and retrievals:
-        retrieved_at: list[datetime] = []
-        for item in retrievals:
-            if not isinstance(item, dict):
-                return LIVE_SUBMIT_EVALUATION_TIME_INVALID
-            instant = _aware_utc(item.get("retrieved_at"))
-            if instant is None:
-                return LIVE_SUBMIT_EVALUATION_TIME_INVALID
-            if instant > current:
-                return LIVE_SUBMIT_EVALUATION_TIME_INVALID
-            retrieved_at.append(instant)
-        ages.append(int((current - min(retrieved_at)).total_seconds() * 1000))
-    if not ages:
-        from sports_hedge.execution.live_canary import live_canary_enabled, live_runtime_armed
-
-        if live_canary_enabled(settings) or live_runtime_armed():
-            return LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
+        retrievals = payload.get("retrievals")
+        if isinstance(retrievals, list) and retrievals:
+            retrieved_at: list[datetime] = []
+            for item in retrievals:
+                if not isinstance(item, dict):
+                    return LIVE_SUBMIT_EVALUATION_TIME_INVALID
+                instant = _aware_utc(item.get("retrieved_at"))
+                if instant is None or instant > current:
+                    return LIVE_SUBMIT_EVALUATION_TIME_INVALID
+                retrieved_at.append(instant)
+            ages.append(int((current - min(retrieved_at)).total_seconds() * 1000))
+        if max(ages) > allowed_age:
+            return LIVE_SUBMIT_QUOTE_AGE_ELAPSED
         return None
-    if max(ages) > allowed_age:
-        return LIVE_SUBMIT_QUOTE_AGE_ELAPSED
+    if armed:
+        return LIVE_SUBMIT_EVALUATION_TIME_UNKNOWN
     return None
 
 

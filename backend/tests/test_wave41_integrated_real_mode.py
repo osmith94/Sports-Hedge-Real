@@ -43,6 +43,7 @@ from test_wave39_matchbook_tail_refresh import (
     DEFAULT_MAX_SNAPSHOT_SKEW_MS as WAVE39_SKEW,
 )
 from test_wave40_live_canary import (
+    FROZEN_SUBMIT,
     LOCAL_ORIGIN,
     _arm,
     _canary_settings,
@@ -57,11 +58,15 @@ NOW = datetime(2026, 10, 11, 12, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
-def _reset_combined() -> None:
+def _reset_combined(monkeypatch: pytest.MonkeyPatch) -> None:
     set_execution_runtime(None)
     reset_live_canary_runtime()
     set_live_canary_trading_facts(None)
     bind_runtime_operator_scanner_settings_store(None)
+    monkeypatch.setattr(
+        "sports_hedge.execution.package.wall_clock_utc",
+        lambda: FROZEN_SUBMIT,
+    )
     yield
     set_execution_runtime(None)
     reset_live_canary_runtime()
