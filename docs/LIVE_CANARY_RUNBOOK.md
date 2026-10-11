@@ -24,7 +24,7 @@ Server **restarts always OFF**. Open/unknown/orphan ledger state persists so the
 
 1. Integrate Wave 38 (#42) and Wave 39 (#43) before using live Price-2.
 2. Confirm current-territory permission for **both** venues. Polymarket geoblock is current outbound IP, fail closed. No VPN/proxy.
-3. In the top-right header, EXECUTION OFF → confirm **REAL-MONEY EXECUTION** → type `ARM LIVE CANARY`. Confirmation shows the **actual** operator limits, not invented £3/£5 constants.
+3. In the top-right header, EXECUTION OFF → one **REAL-MONEY EXECUTION** confirmation → click **Confirm EXECUTION ON**. Confirmation shows the **actual** operator limits, not invented £3/£5 constants. There is no typed phrase. A page visit never arms.
 4. While preflight runs the switch shows **CHECKING**, not ON. Fail reasons stay OFF.
 5. ON stays ON during normal HOT/BACKGROUND/STREAM scanning until the operator switches OFF or a real risk/venue block. A browser refresh reads server state and does not auto-arm.
 

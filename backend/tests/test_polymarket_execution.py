@@ -565,6 +565,9 @@ async def test_geoblock_http_failure_is_closed() -> None:
         await client.aclose()
     assert result.permitted is False
     assert result.reachable is False
+    assert result.blocked is None
+    assert result.reason == "geoblock_unreachable_http"
+    assert result.transport == "http 503"
 
 
 async def test_matchbook_and_polymarket_dispatch_together(monkeypatch: pytest.MonkeyPatch) -> None:

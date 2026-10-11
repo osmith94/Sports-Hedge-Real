@@ -537,9 +537,7 @@ async def test_runtime_arm_without_startup_execution_flag(tmp_path: Path) -> Non
     )
     assert execution_armed(settings) is False
     assert live_runtime_armed() is False
-    refused = await arm_live_runtime(settings, phrase="nope")
-    assert refused["runtime_armed"] is False
-    result = await arm_live_runtime(settings, phrase="ARM LIVE CANARY")
+    result = await arm_live_runtime(settings)
     assert result["runtime_armed"] is True
     assert Decimal(str(result["max_one_time_gbp"])) == Decimal("5")
     assert execution_armed(settings) is True
@@ -563,25 +561,32 @@ def test_arm_rejects_nonlocal_origin(tmp_path: Path, monkeypatch: pytest.MonkeyP
     client = TestClient(app)
     response = client.post(
         "/live-canary/arm",
-        json={"phrase": "ARM LIVE CANARY"},
+        json={},
         headers={"origin": "https://evil.example"},
     )
     assert response.status_code == 403
     substring = client.post(
         "/live-canary/arm",
-        json={"phrase": "ARM LIVE CANARY"},
+        json={},
         headers={"Origin": "https://localhost.evil.example"},
     )
     assert substring.status_code == 403
-    missing = client.post("/live-canary/arm", json={"phrase": "ARM LIVE CANARY"})
+    missing = client.post("/live-canary/arm", json={})
     assert missing.status_code == 403
-    allowed = client.post(
-        "/live-canary/arm",
-        json={"phrase": "nope"},
-        headers=LOCAL_ORIGIN,
+    get_arm = client.get("/live-canary/arm", headers=LOCAL_ORIGIN)
+    assert get_arm.status_code == 405
+    assert live_runtime_armed() is False
+    set_live_canary_trading_facts(
+        LiveCanaryTradingFacts(
+            polymarket_geoblock_permitted=False,
+            polymarket_geoblock_reason="geoblock_blocked",
+            injected=True,
+        )
     )
+    allowed = client.post("/live-canary/arm", json={}, headers=LOCAL_ORIGIN)
     assert allowed.status_code == 200
     assert allowed.json()["runtime_armed"] is False
+    assert live_runtime_armed() is False
 
 
 def test_default_settings_keep_execution_off() -> None:
@@ -655,11 +660,13 @@ def test_health_off_then_arm_provisions_transports(
     assert runtime.polymarket is None
     assert _FakeMatchbookHttp.constructed == 0
     assert _FakePolymarketHttp.constructed == 0
-    armed = client.post(
+    leftover = client.post(
         "/live-canary/arm",
         json={"phrase": "ARM LIVE CANARY"},
         headers=LOCAL_ORIGIN,
-    ).json()
+    )
+    assert leftover.status_code == 200
+    armed = leftover.json()
     assert armed["runtime_armed"] is True
     runtime = get_execution_runtime()
     assert runtime.explicit is False
@@ -739,9 +746,9 @@ def test_stale_collected_facts_are_not_evergreen(tmp_path: Path, monkeypatch: py
     assert mb.calls == []
 
 
-def test_unknown_matchbook_currency_denies_before_submit(tmp_path: Path) -> None:
+def test_official_matchbook_balance_without_currency_is_not_a_mismatch(tmp_path: Path) -> None:
     settings = _canary_settings(tmp_path)
-    unknown = LiveCanaryTradingFacts(
+    official = LiveCanaryTradingFacts(
         polymarket_geoblock_permitted=True,
         polymarket_geoblock_reason="geoblock_permitted",
         polymarket_credentials_present=True,
@@ -754,19 +761,46 @@ def test_unknown_matchbook_currency_denies_before_submit(tmp_path: Path) -> None
         matchbook_currency_compatible=None,
         injected=True,
     )
-    set_live_canary_trading_facts(unknown)
+    set_live_canary_trading_facts(official)
     set_live_runtime_arm(True)
-    reasons = trading_permission_reasons(settings, unknown)
-    assert "matchbook_currency_unknown" in reasons
-    assert canary_submit_refusal(_plan(), settings=settings, facts=unknown) == "matchbook_currency_unknown"
+    reasons = trading_permission_reasons(settings, official)
+    assert "matchbook_currency_unknown" not in reasons
+    assert "matchbook_currency_mismatch" not in reasons
+    assert canary_submit_refusal(_plan(), settings=settings, facts=official) is None
     runtime, mb, _pm = _runtime()
     ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "cur.sqlite"), _plan())
     ops.capture_opening_fill("watch:mkt-canary", now=NOW)
-    assert mb.calls == []
+    assert mb.calls
     set_live_canary_trading_facts(PERMITTED)
     reasons_ok = trading_permission_reasons(settings, PERMITTED)
     assert "matchbook_currency_unknown" not in reasons_ok
     assert "matchbook_currency_mismatch" not in reasons_ok
+
+
+def test_explicit_matchbook_currency_mismatch_denies_before_submit(tmp_path: Path) -> None:
+    settings = _canary_settings(tmp_path)
+    mismatch = LiveCanaryTradingFacts(
+        polymarket_geoblock_permitted=True,
+        polymarket_geoblock_reason="geoblock_permitted",
+        polymarket_credentials_present=True,
+        polymarket_wallet_valid=True,
+        polymarket_balance_readable=True,
+        polymarket_trading_ready=True,
+        matchbook_credentials_present=True,
+        matchbook_authenticated=True,
+        matchbook_free_funds_positive=True,
+        matchbook_currency_compatible=False,
+        injected=True,
+    )
+    set_live_canary_trading_facts(mismatch)
+    set_live_runtime_arm(True)
+    reasons = trading_permission_reasons(settings, mismatch)
+    assert "matchbook_currency_mismatch" in reasons
+    assert canary_submit_refusal(_plan(), settings=settings, facts=mismatch) == "matchbook_currency_mismatch"
+    runtime, mb, _pm = _runtime()
+    ops = _ops(settings, runtime, SqlitePaperLedger(tmp_path / "mismatch.sqlite"), _plan())
+    ops.capture_opening_fill("watch:mkt-canary", now=NOW)
+    assert mb.calls == []
 
 
 def test_orphan_inspection_exception_denies(tmp_path: Path) -> None:

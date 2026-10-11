@@ -10,6 +10,7 @@ import {
   heartbeatLiveCanary,
   type RuntimeHealth,
 } from "../lib/api";
+import { explainLiveCanaryFailure } from "../lib/live-canary-reasons";
 import {
   readModelBadge,
   runtimeModeFromHealth,
@@ -154,23 +155,26 @@ export function RuntimeModeClock() {
               / £{confirmLimits?.max_one_time_gbp ?? health?.live_canary?.max_one_time_gbp ?? "—"}.
               Toggle OFF stops new submits and does not cancel orders already sent.
             </p>
-            <p>Type ARM LIVE CANARY to confirm.</p>
             <ExecutionConfirm
               onCancel={() => setConfirmOpen(false)}
-              onConfirm={async (phrase) => {
+              onConfirm={async () => {
                 setChecking(true);
                 setConfirmOpen(false);
                 try {
-                  const next = await armLiveCanary(phrase);
+                  const next = await armLiveCanary();
                   setHealth((current) => ({
                     ...(current ?? {}),
                     mode: "real",
                     execution_enabled: false,
                     live_canary: next,
                   }));
-                  const reasons = next?.not_ready_reasons ?? [];
                   if (!next?.runtime_armed) {
-                    setError(reasons.join(", ") || "NOT READY");
+                    setError(
+                      explainLiveCanaryFailure(
+                        next?.not_ready_reasons,
+                        next?.not_ready_explanations,
+                      ),
+                    );
                   } else {
                     setError(null);
                   }
@@ -193,30 +197,17 @@ function ExecutionConfirm({
   onConfirm,
 }: {
   onCancel: () => void;
-  onConfirm: (phrase: string) => Promise<void>;
+  onConfirm: () => Promise<void>;
 }) {
-  const [phrase, setPhrase] = useState("");
   return (
-    <>
-      <input
-        aria-label="Confirmation phrase"
-        value={phrase}
-        onChange={(event) => setPhrase(event.target.value)}
-      />
-      <div className="desktop-exit-actions">
-        <button type="button" onClick={onCancel}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="desktop-exit-confirm"
-          disabled={phrase !== "ARM LIVE CANARY"}
-          onClick={() => void onConfirm(phrase)}
-        >
-          Confirm EXECUTION ON
-        </button>
-      </div>
-    </>
+    <div className="desktop-exit-actions">
+      <button type="button" onClick={onCancel}>
+        Cancel
+      </button>
+      <button type="button" className="desktop-exit-confirm" onClick={() => void onConfirm()}>
+        Confirm EXECUTION ON
+      </button>
+    </div>
   );
 }
 

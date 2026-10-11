@@ -1890,6 +1890,7 @@ export type RuntimeHealth = {
     trading_permission?: boolean;
     label?: string;
     not_ready_reasons?: string[];
+    not_ready_explanations?: string[];
     max_event_gbp?: string;
     max_opportunity_gbp?: string;
     max_one_time_gbp?: string;
@@ -1901,11 +1902,11 @@ export function getRuntimeHealth(): Promise<RuntimeHealth> {
   return request<RuntimeHealth>("/health");
 }
 
-export async function armLiveCanary(phrase: string): Promise<RuntimeHealth["live_canary"]> {
+export async function armLiveCanary(): Promise<RuntimeHealth["live_canary"]> {
   const response = await fetch(`${API_BASE}/live-canary/arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phrase }),
+    body: "{}",
     cache: "no-store",
   });
   if (!response.ok) {
