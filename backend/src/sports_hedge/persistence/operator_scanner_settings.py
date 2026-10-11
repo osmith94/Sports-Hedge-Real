@@ -1234,6 +1234,12 @@ def bind_runtime_operator_scanner_settings_store(
     _RUNTIME_STORE = store
 
 
+def bound_runtime_operator_scanner_settings_store() -> SqliteOperatorScannerSettingsStore | None:
+    """Already-bound process store. Does not open paper_settings.sqlite."""
+
+    return _RUNTIME_STORE
+
+
 def runtime_operator_scanner_settings_store() -> SqliteOperatorScannerSettingsStore:
     if _RUNTIME_STORE is not None:
         return _RUNTIME_STORE

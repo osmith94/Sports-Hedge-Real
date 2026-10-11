@@ -1055,6 +1055,10 @@ class PaperOperationsService:
             return False
         if autofill is True:
             return True
+        from sports_hedge.execution.live_canary import live_canary_capture_active
+
+        if live_canary_capture_active(self.settings) and provenance is DataProvenance.LIVE_PAPER:
+            return True
         return (
             self.settings.paper_autofill_enabled
             and provenance is DataProvenance.LIVE_PAPER
@@ -2962,6 +2966,13 @@ class PaperOperationsService:
 
         if not execution_armed(self.settings):
             return self.simulate_fill(opportunity_id, **simulate_kwargs)
+        from sports_hedge.execution.live_canary import live_canary_enabled
+
+        if live_canary_enabled(self.settings):
+            from sports_hedge.execution.live_canary import live_canary_capture_active
+
+            if not live_canary_capture_active(self.settings):
+                return None
         plan = self._plans.get(opportunity_id)
         if plan is None:
             return None
@@ -3173,6 +3184,17 @@ class PaperOperationsService:
             polymarket=polymarket,
         ):
             return
+        from sports_hedge.execution.live_canary import (
+            canary_submit_refusal,
+            live_canary_enabled,
+        )
+
+        if live_canary_enabled(self.settings):
+            canary_reason = canary_submit_refusal(
+                plan, settings=self.settings, tranche_id=tranche_id
+            )
+            if canary_reason is not None:
+                return
         package_id = opening_package_id(trade_id, tranche_id)
         store = self._live_attempt_store()
         if store.get(package_id) is not None:

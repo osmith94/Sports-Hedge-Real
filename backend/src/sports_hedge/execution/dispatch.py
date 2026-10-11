@@ -171,7 +171,9 @@ def refusal_reason(
 ) -> str | None:
     """Why this plan must not be submitted. None means the existing package may run."""
 
-    if not (settings.sports_hedge_mode == "real" and settings.sports_hedge_execution_enabled is True):
+    from sports_hedge.execution.package import execution_armed
+
+    if not execution_armed(settings):
         return "execution_disabled"
     if not _accepted_plan(plan):
         return "decision_not_accepted"
@@ -200,6 +202,16 @@ def refusal_reason(
         return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
     if VenueName.POLYMARKET in venues and polymarket is None:
         return LIVE_EXECUTION_TRANSPORT_UNAVAILABLE
+    from sports_hedge.execution.live_canary import (
+        live_canary_enabled,
+        resolve_trading_facts,
+        trading_permission_reasons,
+    )
+
+    if live_canary_enabled(settings):
+        permission = trading_permission_reasons(settings, resolve_trading_facts(settings))
+        if permission:
+            return permission[0]
     return None
 
 
