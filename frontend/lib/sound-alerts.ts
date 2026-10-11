@@ -73,8 +73,7 @@ export class SoundEventTracker {
     for (const event of newEvents.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))) {
       queued.add(event.cue);
     }
-    // A completed trade is more important than a later radar alert.
-    const order: SoundCue[] = ["trade_entered", "price2_accepted", "price2_failed", "arb_detected"];
-    return order.filter((cue) => queued.has(cue));
+    // Play distinct milestones in the chronological order they were recorded.
+    return [...queued];
   }
 }
