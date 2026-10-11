@@ -1,4 +1,5 @@
 import { ActivityFeed } from "../components/activity-feed";
+import { Price2PerformancePanel } from "../components/price2-performance-panel";
 import { CapitalSummary } from "../components/capital-summary";
 import { FixtureDiscoverySection } from "../components/fixture-discovery-section";
 import { HotFixturesPanel } from "../components/hot-fixtures-panel";
@@ -70,6 +71,14 @@ export default async function ArbitragePage() {
   let activeTrades: PaperTrade[] = [];
   let tradesAvailable = true;
 
+  // Start the independent, indexed audit read immediately. It runs in parallel
+  // with existing dashboard requests, without polling or venue requests.
+  const performanceSince = encodeURIComponent(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+  const performanceFetch = settledValue(
+    getPrice2ActivityAttempts(`limit=50&include_recent=true&since=${performanceSince}`),
+    [] as Price2ActivityObservation[],
+  );
+
   const tracked = await settledValue(
     getTrackedWatchlist(opportunityMonitorTrackedQuery()),
     [] as NearOpportunity[],
@@ -88,6 +97,7 @@ export default async function ArbitragePage() {
     getPrice2ActivityAttempts(price2ActivityQuery(opportunityIds, oldest)),
     [] as Price2ActivityObservation[],
   );
+  const performance = await performanceFetch;
 
   try {
     livePriorityCount = (await getLivePriorityAlerts()).length;
@@ -170,6 +180,10 @@ export default async function ArbitragePage() {
       />
 
       <ScanCycleHistoryPanel />
+
+      <section className="ops-section">
+        <Price2PerformancePanel attempts={performance.value} available={performance.available} />
+      </section>
 
       {livePriorityCount > 0 ? (
         <section className="ops-section ops-section-compact">

@@ -237,7 +237,11 @@ def _freeze_polymarket(
         )
         implied = Decimal(1) / limit_odds
         if plan is not None and native.price < implied:
-            raise TranslationError("Polymarket tick cannot express the approved worst BUY price")
+            raise TranslationError(
+                "Polymarket tick cannot express the approved worst BUY price",
+                code="price_rounding_incompatible",
+                details={"intended_limit_price": format(native.price, "f")},
+            )
     except TranslationError as exc:
         return None, _diagnostic(
             venue=VenueName.POLYMARKET.value,
@@ -250,11 +254,21 @@ def _freeze_polymarket(
                 exc, fallback_stake=_optional_text(getattr(leg, "requested_stake", None))
             ),
         )
-    except (AttributeError, TypeError, InvalidOperation, ValueError, DepthPlanError):
+    except DepthPlanError:
+        # The approved stake/level sweep does not have executable depth.
+        # Never force a freeze or enlarge/shrink the approved stake.
+        reason = "approved_depth_incompatible"
+    except (TypeError, InvalidOperation, ValueError):
+        reason = "native_order_translation_invalid_input"
+    except AttributeError:
+        reason = "native_order_translation_unexpected_error"
+    else:
+        reason = None
+    if reason is not None:
         return None, _diagnostic(
             venue=VenueName.POLYMARKET.value,
             frozen=False,
-            reason="native_order_translation_other",
+            reason=reason,
             **identity,
             observed_tick_size=tick_size,
             observed_minimum_shares=_text(minimum),

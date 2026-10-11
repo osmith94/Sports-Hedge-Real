@@ -174,6 +174,10 @@ NATIVE_ORDER_FREEZE_REASONS = frozenset(
         "below_native_minimum_shares",
         "price_rounding_incompatible",
         "stake_rounding_or_size_incompatible",
+        "approved_depth_incompatible",
+        "native_order_translation_invalid_input",
+        "native_order_translation_unexpected_error",
+        "unsupported_native_side",
         "native_order_translation_other",
     }
 )
